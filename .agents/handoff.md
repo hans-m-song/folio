@@ -957,3 +957,16 @@ filename alone is a weak, non-blocking signal. The user then confirmed that
 Codex must not draft Stripe CSV rows: its CSV upload goes to human import
 review, and confirmed Stripe import alone creates those transactions. No MCP
 code has been written.
+
+## Git checkpoint and commit discipline — 2026-09-26
+
+The user requested that work completed so far be checked in and that future
+user-verified fixes and tasks be committed as they are completed. The initial
+project snapshot was committed locally as `50f26b9` (`Initial Folio application
+snapshot`), following the existing LICENSE-only commit. It contains the app,
+migrations, docs, and agent handoff, but excludes the `node_modules` symlink,
+local `docs/samples/` screenshots, and secret-like paths. The worktree was
+clean immediately after that commit. Do not push without a separate request.
+For subsequent work, commit coherent, user-verified changes after appropriate
+validation and a staged-file audit; leave incomplete or unverified work
+uncommitted and report it explicitly.

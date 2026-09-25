@@ -1031,3 +1031,12 @@
 - The user confirmed that MCP artifact metadata may cover all states, while
   original file contents are retrievable only after artifact approval and
   only from an available, versioned artifact.
+
+## 2026-09-26 — Commit practice
+
+- The user authorised a local initial project snapshot and asked that future
+  user-verified fixes and tasks be committed when completed. The initial
+  snapshot is `50f26b9`; the preceding repository history contained only
+  LICENSE. Commit coherent verified changes after staged-file review, without
+  including dependencies, local data, or secret-like files. Pushes are not
+  implied by this instruction.
