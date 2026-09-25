@@ -1,0 +1,57 @@
+.imports-workspace {
+  width: 100%;
+  padding: 1.75rem 0 4rem;
+}
+
+.imports-workspace > header {
+  padding: 0 0 0.75rem;
+}
+
+.imports-workspace > header > p:last-child {
+  max-width: 58rem;
+  margin-bottom: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.imports-workspace > main,
+.imports-workspace > .banking-page,
+.imports-workspace > .transaction-workflow-page,
+.imports-workspace > .artifact-upload-page {
+  width: 100%;
+  max-width: none;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.import-profile-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0 0 1.25rem;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.import-profile-tabs a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 3rem;
+  padding: 0.65rem 1rem 0.55rem;
+  border-bottom: 3px solid transparent;
+  color: var(--muted);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.import-profile-tabs a:hover,
+.import-profile-tabs a:focus-visible {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.import-profile-tabs a[aria-current="page"] {
+  border-bottom-color: var(--accent-strong);
+  color: var(--accent-strong);
+}

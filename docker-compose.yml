@@ -1,0 +1,149 @@
+services:
+  folio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: development
+      NITRO_HOST: 0.0.0.0
+      NITRO_PORT: "3000"
+      FOLIO_PRIVATE_MODE: "true"
+      FOLIO_BIND_HOST: 0.0.0.0
+      FOLIO_ALLOW_CONTAINER_BIND: "true"
+      FOLIO_DATABASE_URL: postgres://folio_app:folio-local-app-password@postgres/folio
+      FOLIO_DATABASE_SCHEMA: folio
+      FOLIO_DATABASE_APP_ROLE: folio_app
+      FOLIO_S3_REGION: us-east-1
+      FOLIO_S3_BUCKET: folio-local-artifacts
+      FOLIO_S3_KEY_PREFIX: folio-local/
+      FOLIO_S3_INTERNAL_ENDPOINT: http://minio:9000
+      FOLIO_S3_PUBLIC_ENDPOINT: "http://127.0.0.1:${FOLIO_LOCAL_PORT:-43230}"
+      FOLIO_MAX_UPLOAD_BYTES: "10485760"
+      FOLIO_REPORTING_TIMEZONE: Australia/Brisbane
+      FOLIO_GST_REGISTERED: "false"
+      FOLIO_ORIGIN: "http://127.0.0.1:${FOLIO_LOCAL_PORT:-43230}"
+      FOLIO_AUTH_MODE: local
+      FOLIO_LOCAL_PASSWORD: folio-local-password-123
+      AWS_ACCESS_KEY_ID: folio_local_access
+      AWS_SECRET_ACCESS_KEY: folio_local_secret_1234
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      folio-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  folio-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: tools
+    restart: "no"
+    command:
+      [
+        "/bin/sh",
+        "-ec",
+        "pnpm migrate && pnpm exec tsx src/database/seed-local-user.ts",
+      ]
+    environment:
+      NODE_ENV: development
+      NITRO_HOST: 0.0.0.0
+      NITRO_PORT: "3000"
+      FOLIO_PRIVATE_MODE: "true"
+      FOLIO_BIND_HOST: 0.0.0.0
+      FOLIO_ALLOW_CONTAINER_BIND: "true"
+      FOLIO_DATABASE_URL: postgres://folio_owner:folio-local-owner-password@postgres/folio
+      FOLIO_DATABASE_SCHEMA: folio
+      FOLIO_DATABASE_APP_ROLE: folio_app
+      FOLIO_S3_REGION: us-east-1
+      FOLIO_S3_BUCKET: folio-local-artifacts
+      FOLIO_S3_KEY_PREFIX: folio-local/
+      FOLIO_S3_INTERNAL_ENDPOINT: http://minio:9000
+      FOLIO_S3_PUBLIC_ENDPOINT: "http://127.0.0.1:${FOLIO_LOCAL_PORT:-43230}"
+      FOLIO_MAX_UPLOAD_BYTES: "10485760"
+      FOLIO_REPORTING_TIMEZONE: Australia/Brisbane
+      FOLIO_GST_REGISTERED: "false"
+      FOLIO_ORIGIN: "http://127.0.0.1:${FOLIO_LOCAL_PORT:-43230}"
+      FOLIO_AUTH_MODE: local
+      FOLIO_LOCAL_PASSWORD: folio-local-password-123
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: folio
+      POSTGRES_USER: folio_owner
+      POSTGRES_PASSWORD: folio-local-owner-password
+      FOLIO_DATABASE_APP_PASSWORD: folio-local-app-password
+    volumes:
+      - folio_postgres_data:/var/lib/postgresql/data
+      - ./ops/init-app-role.sh:/docker-entrypoint-initdb.d/10-init-app-role.sh:ro
+      - ./ops/init-app-role.sql:/opt/folio/init-app-role.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username folio_owner --dbname folio"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
+    command: ["server", "/data", "--address", ":9000"]
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: folio_local_access
+      MINIO_ROOT_PASSWORD: folio_local_secret_1234
+    volumes:
+      - folio_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-03-12T17-29-24Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: folio_local_access
+      MINIO_ROOT_PASSWORD: folio_local_secret_1234
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local-s3 http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing local-s3/folio-local-artifacts
+        mc version enable local-s3/folio-local-artifacts
+        mc version info local-s3/folio-local-artifacts
+
+  proxy:
+    image: caddy:2.10.0-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FOLIO_LOCAL_PORT:-43230}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      folio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+volumes:
+  folio_postgres_data:
+  folio_minio_data:

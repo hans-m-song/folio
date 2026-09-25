@@ -1,0 +1,213 @@
+.transaction-entry-actions {
+  margin-inline-start: auto;
+}
+
+.transaction-table-actions {
+  min-width: 0;
+  flex-flow: row wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.transaction-table-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2rem;
+  max-width: 100%;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface-muted);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.transaction-table-action.table-icon-action {
+  width: 2.75rem;
+  min-width: 2.75rem;
+  max-width: 2.75rem;
+  min-height: 2.75rem;
+  flex: 0 0 2.75rem;
+  padding: 0.45rem;
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+
+.transaction-table-action:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.transaction-table-action:focus-visible,
+.transaction-workflow-page .transaction-button-link:focus-visible {
+  outline: 3px solid #d49a43;
+  outline-offset: 2px;
+}
+
+button.transaction-table-action {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+@media (max-width: 760px) {
+  .transaction-table-action.table-icon-action {
+    width: auto;
+    max-width: 100%;
+    flex: 0 1 auto;
+    padding-inline: 0.65rem;
+    white-space: normal;
+  }
+}
+
+.transaction-workflow-page {
+  max-width: 72rem;
+}
+
+.transaction-workflow-page__void-actions {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.transaction-workflow-page__void-actions button.danger {
+  border: 1px solid var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
+
+.transaction-workflow-page__void-actions button.danger:hover:not(:disabled) {
+  border-color: #842f27;
+  background: #842f27;
+}
+
+.transaction-workflow-page__return {
+  margin-top: 1rem;
+}
+
+.app-content > main:has(.transaction-lifetime-summary) {
+  width: min(88rem, 100%);
+  max-width: 88rem;
+}
+
+.transaction-button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.7rem;
+  padding: 0.6rem 1rem;
+  border-radius: 0.45rem;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.section-heading .transaction-button-link {
+  color: #fff;
+  font-weight: 750;
+}
+
+.transaction-button-link--secondary {
+  background: #e9edf0;
+  color: var(--text);
+}
+
+.section-heading .transaction-button-link--secondary {
+  color: var(--text);
+}
+
+.transaction-lifetime-summary .section-heading > div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.transaction-lifetime-summary .section-heading p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.transaction-lifetime-summary__metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.transaction-lifetime-summary__metrics > div {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+}
+
+.transaction-lifetime-summary__metrics dt {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.transaction-lifetime-summary__metrics dd {
+  margin: 0.35rem 0 0;
+  overflow-wrap: anywhere;
+  font-size: clamp(1rem, 2vw, 1.3rem);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.transaction-lifetime-summary__coverage,
+.transaction-lifetime-summary__warnings {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.transaction-lifetime-summary__coverage strong {
+  color: var(--text);
+}
+
+.transaction-lifetime-summary__warnings ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.transaction-lifetime-summary__error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.transaction-lifetime-summary__error p {
+  margin: 0;
+}
+
+.transaction-query-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.transaction-query-error p {
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .transaction-lifetime-summary__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 460px) {
+  .transaction-lifetime-summary__metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

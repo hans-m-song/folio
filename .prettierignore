@@ -1,0 +1,7 @@
+.nitro
+.output
+.tanstack
+dist
+src/routeTree.gen.ts
+node_modules
+pnpm-lock.yaml

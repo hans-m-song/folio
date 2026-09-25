@@ -1,0 +1,94 @@
+.transaction-detail-page {
+  display: grid;
+  gap: 1rem;
+}
+.transaction-detail-page > section {
+  margin-top: 0;
+}
+.transaction-detail-back {
+  width: fit-content;
+  color: var(--accent-strong);
+  font-weight: 650;
+  text-decoration: none;
+}
+.transaction-detail-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 2.7rem;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface-muted);
+  color: var(--accent-strong);
+  font-weight: 650;
+  text-decoration: none;
+}
+.transaction-detail-edit:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.transaction-detail-edit:focus-visible {
+  outline: 3px solid #d49a43;
+  outline-offset: 2px;
+}
+.transaction-detail-state {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  text-transform: capitalize;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+.transaction-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1.25rem;
+  margin: 1rem 0 0;
+}
+.transaction-detail-grid > div {
+  min-width: 0;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+.transaction-detail-grid dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.transaction-detail-grid dd {
+  margin: 0.3rem 0 0;
+  overflow-wrap: anywhere;
+}
+.transaction-detail-wide {
+  grid-column: 1 / -1;
+}
+.transaction-detail-artifacts {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0;
+  list-style: none;
+}
+.transaction-detail-artifacts li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+}
+.transaction-detail-artifacts li span:first-child {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 650px) {
+  .transaction-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}

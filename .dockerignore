@@ -1,0 +1,17 @@
+.git
+.gitignore
+.agents
+.env
+.env.*
+.envrc
+.envrc.*
+.aws
+.config
+.ssh
+node_modules
+.nitro
+.output
+.tanstack
+dist
+**/*.test.ts
+**/*.spec.ts

@@ -1,0 +1,213 @@
+.manual-entry-form[data-owner-funding="true"] > .field-document-amount {
+  padding: 0.85rem;
+  border: 2px solid var(--accent);
+  border-radius: 0.6rem;
+  background: var(--accent-soft);
+}
+
+.manual-entry-form[data-owner-funding="true"] > .field-document-amount > label {
+  color: var(--accent-strong);
+  font-size: 1rem;
+  font-weight: 750;
+}
+
+.manual-entry-form[data-owner-funding="true"] > .field-document-amount > input {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.manual-entry-form .existing-evidence {
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0.85rem;
+  border: 2px solid var(--accent);
+  border-radius: 0.65rem;
+  background: var(--surface);
+}
+
+.manual-entry-form .existing-evidence legend {
+  padding: 0 0.35rem;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 750;
+}
+
+.manual-entry-form .existing-evidence > label {
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 650;
+}
+
+.manual-entry-form .existing-evidence-help,
+.manual-entry-form .existing-evidence-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.manual-entry-form .existing-evidence-options {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 14rem;
+  overflow: auto;
+  padding: 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-muted);
+}
+
+.manual-entry-form .existing-evidence-options > label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.55rem;
+  padding: 0.5rem;
+  border-radius: 0.35rem;
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.manual-entry-form .existing-evidence-options > label:hover {
+  background: var(--accent-soft);
+}
+
+.manual-entry-form .existing-evidence-options input[type="checkbox"] {
+  width: 1rem;
+  min-width: 1rem;
+  height: 1rem;
+  min-height: 1rem;
+  margin: 0.1rem 0 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.manual-entry-form .category-suggestion,
+.manual-entry-form .tax-treatment-suggestion {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.manual-entry-form .pdf-filename-suggestion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.7rem;
+  margin: 0.55rem 0 0;
+  padding: 0.65rem 0.8rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0.3rem;
+  background: var(--accent-soft);
+}
+
+.manual-entry-form .payment-values-suggestion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.7rem;
+  margin: 0.55rem 0 0;
+  padding: 0.65rem 0.8rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0.3rem;
+  background: var(--accent-soft);
+}
+
+.manual-entry-form .pdf-filename-suggestion p,
+.manual-entry-form .payment-values-suggestion p {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.manual-entry-form .pdf-filename-suggestion button,
+.manual-entry-form .payment-values-suggestion button {
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.8rem;
+}
+
+.manual-entry-form .existing-pdf-filename-suggestion {
+  align-items: flex-start;
+  gap: 0.35rem 0.55rem;
+  padding: 0.45rem 0.6rem;
+}
+
+.manual-entry-form .existing-pdf-filename-source {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-weight: 650;
+}
+
+.manual-entry-form .existing-pdf-filename-actions {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.manual-entry-form .existing-pdf-filename-actions button {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.manual-entry-form .existing-pdf-filename-suggestion > [role="status"] {
+  flex-basis: 100%;
+}
+
+.manual-entry-form .category-suggestion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.65rem;
+}
+
+.manual-entry-form .tax-treatment-suggestion {
+  display: grid;
+  justify-items: start;
+  gap: 0.45rem;
+}
+
+.manual-entry-form .tax-treatment-suggestion p {
+  margin: 0;
+}
+
+.manual-entry-form .category-suggestion button,
+.manual-entry-form .tax-treatment-suggestion button {
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.8rem;
+}
+
+.manual-entry-form .submission-feedback {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0.65rem 0.8rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0.3rem;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.manual-entry-form .submission-feedback.error {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.manual-entry-form .submission-feedback:focus {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
