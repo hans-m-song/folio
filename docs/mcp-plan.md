@@ -48,11 +48,14 @@ must not be silently promoted or matched by an MCP call.
    activity merely because upload validation succeeded.
 3. Codex submits one suggestion per call, using a caller-supplied idempotency
    key. A new-transaction request creates one manual draft and records its
-   intended bank row internally when applicable. It may cite an uploaded
-   invoice PDF that is still awaiting review as proposed evidence, but this is
-   not an approved attachment. A match-existing request stores only the
-   candidate suggestion. The MCP response returns an ID or a validation
-   error, not a claim of approval. Bulk submission is deferred.
+   intended bank row internally when one exists. Before a CommBank CSV is
+   imported, a draft may instead cite its artifact ID and source row number;
+   after import, Folio resolves that locator to the resulting bank row and
+   presents the draft in Reconcile. This never creates a match. A draft may
+   cite an uploaded invoice PDF that is still awaiting review as proposed
+   evidence, but this is not an approved attachment. A match-existing request
+   stores only the candidate suggestion. The MCP response returns an ID or a
+   validation error, not a claim of approval. Bulk submission is deferred.
 4. In Banking → Reconcile, the selected row shows its draft or match
    suggestions above the ordinary candidate and manual-action controls. The
    user can open the draft in the existing transaction editor, change fields,
@@ -68,7 +71,8 @@ must not be silently promoted or matched by an MCP call.
 
 Standalone transaction drafts may appear in Transactions and use its normal
 draft-to-recorded workflow. They do not appear in Reconcile without an
-explicit intended bank-row link. This preserves bulk transaction creation
+explicit intended bank-row link or a verified CommBank artifact-and-row
+locator that resolves after import. This preserves bulk transaction creation
 without inventing a bank association from amount, date, or description.
 
 ## UI boundary
@@ -165,12 +169,22 @@ Codex retries. The review UI need not expose these details; a temporary draft
 badge and note are sufficient user-facing origin cues.
 
 The minimal internal persistence should be a restricted credential table and
-a submission ledger linked to normal draft transactions. Exact schema and
-actor attribution must be settled against the existing transaction model:
-manual creation currently expects a Folio actor and owner. An MCP credential
-must not masquerade as the human who later records the draft; the human saver
-must be attributable in `updated_by_id` or an equivalent audit field. No
-transaction may be recorded without a permitted owner.
+a submission ledger linked to normal draft transactions. Each local MCP
+credential is bound to one permitted default transaction owner; Codex cannot
+select an arbitrary owner per draft. The human reviewer may change the owner
+before recording, subject to ordinary permissions. The transaction model
+currently expects a Folio actor and owner. An MCP credential must not
+masquerade as the human who later records the draft; the human saver must be
+attributable in `updated_by_id` or an equivalent audit field. No transaction
+may be recorded without a permitted owner.
+
+A pre-import CommBank locator is the immutable source artifact ID plus source
+row number, not an inferred amount/date match. Validate it against the
+uploaded CSV's parsed rows before accepting a draft. After human CSV import,
+resolve it through the bank-row attribution; if the source file is rejected or
+the row is not imported, leave the draft unlinked and visible for manual
+review. Never auto-match or silently redirect the suggestion to a similar
+bank row.
 
 An idempotency key repeated with an identical canonical request returns the
 same draft/suggestion ID; the same key with a different payload conflicts.
@@ -202,11 +216,15 @@ claiming compatibility ([transport specification](https://modelcontextprotocol.i
 The first slice now includes artifact upload and retrieval. This replaces the
 earlier existing-artifact-only restriction. File uploads must preserve the
 original file and its profile; Codex-extracted values are draft fields, not a
-replacement for the source artifact. The registry currently defines invoice
-PDF, Stripe CSV, CommBank CSV/PDF, and NAB CSV profiles
-([profile registry](../src/artifacts/profiles.ts)). Metadata discovery covers
-all profiles, not only invoice evidence. Original contents are requested
-separately from metadata because they may contain personal and financial data.
+replacement for the source artifact. The first MCP upload/review release
+supports only invoice-evidence PDFs, Stripe balance CSVs, and CommBank
+transaction-history CSVs. The registry also defines CommBank statement PDFs
+and NAB CSVs, but their import workflows are not implemented and MCP must not
+accept their uploads yet ([profile registry](../src/artifacts/profiles.ts),
+[roadmap](roadmap.md)). Metadata discovery covers all registered profiles,
+and original-content reads cover any approved, available artifact regardless
+of profile. Original contents are requested separately from metadata because
+they may contain personal and financial data.
 
 The existing upload service creates a pending artifact and a short-lived,
 checksum-bound storage PUT URL; confirmation verifies object metadata and its
@@ -283,17 +301,17 @@ remain provenance for their own import workflows, not invoice evidence.
 
 ## First tools
 
-| Tool                        | Permitted effect                                           |
-| --------------------------- | ---------------------------------------------------------- |
-| `list_unresolved_bank_rows` | Bounded source facts and revision tokens                   |
-| `search_transactions`       | Bounded recorded candidate search                          |
-| `list_artifacts`            | Bounded metadata across artifact profiles and states       |
-| `read_artifact`             | Original available artifact content, separate scope        |
-| `begin_artifact_upload`     | Create one typed pending artifact and upload intent        |
-| `confirm_artifact_upload`   | Verify uploaded version and queue every profile for review |
-| `submit_draft_transaction`  | Create one manual draft only                               |
-| `suggest_existing_match`    | Store one existing-match suggestion only                   |
-| `get_submission_status`     | Read one own submission outcome and linked ID              |
+| Tool                        | Permitted effect                                                     |
+| --------------------------- | -------------------------------------------------------------------- |
+| `list_unresolved_bank_rows` | Bounded source facts and revision tokens                             |
+| `search_transactions`       | Bounded recorded candidate search                                    |
+| `list_artifacts`            | Bounded metadata across artifact profiles and states                 |
+| `read_artifact`             | Original available artifact content, separate scope                  |
+| `begin_artifact_upload`     | Create an upload intent for one of the three supported profiles      |
+| `confirm_artifact_upload`   | Verify the uploaded version and queue a supported profile for review |
+| `submit_draft_transaction`  | Create one manual draft only                                         |
+| `suggest_existing_match`    | Store one existing-match suggestion only                             |
+| `get_submission_status`     | Read one own submission outcome and linked ID                        |
 
 No tool can record, approve, match, classify, delete, run raw SQL, or
 read arbitrary transactions. Artifact upload cannot import bank rows or
@@ -321,13 +339,19 @@ the existing Folio match action, not an MCP-created reconciliation.
    record. A draft may cite an unapproved PDF as proposed evidence, but cannot
    become recorded with that PDF until approval; rejection or deletion cannot
    leave an approved evidence link. Stripe CSVs queue for import but cannot
-   spawn parallel MCP draft transactions from their rows.
+   spawn parallel MCP draft transactions from their rows. Unsupported NAB CSV
+   and CommBank statement PDF upload profiles are rejected in the first slice;
+   approved artifacts of either profile remain readable.
 4. Reconcile UI tests: draft/match suggestions for the intended bank row only,
    keyboard/narrow-screen review, stale state, edit return path, and no
    implicit save or match.
 5. PostgreSQL workflow tests: MCP draft → human edit/record → candidate appears
    → human match; retries do not duplicate drafts, recording does not match,
-   and stale or amount-mismatched rows remain unresolved.
+   and stale or amount-mismatched rows remain unresolved. A pre-import
+   CommBank artifact-and-row locator resolves only after import and does not
+   match automatically; a rejected or missing row leaves the draft unlinked.
+   Credential-bound ownership cannot be changed by Codex and human owner
+   changes are attributed to the reviewer.
 6. Local end-to-end smoke: submit one synthetic draft and one existing-match
    suggestion, record and match the draft, leave another draft unrecorded,
    and verify the ordinary transaction and bank views.

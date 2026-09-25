@@ -1040,3 +1040,18 @@
   LICENSE. Commit coherent verified changes after staged-file review, without
   including dependencies, local data, or secret-like files. Pushes are not
   implied by this instruction.
+
+## 2026-09-26 — MCP pre-implementation boundary
+
+- The user confirmed pre-import CommBank drafts keyed by uploaded artifact ID
+  and source row number. Import can resolve the locator for Reconcile display
+  but never creates a match. Rejected or absent rows leave the draft unlinked.
+- Initial MCP upload/review is limited to invoice-evidence PDF, Stripe CSV,
+  and CommBank transaction-history CSV profiles. Approved artifacts of any
+  registered profile remain eligible for metadata/content reads. The
+  registered NAB CSV and CommBank statement PDF upload flows remain future
+  work because their import workflows do not exist.
+- Each local MCP credential has one permitted default transaction owner;
+  Codex cannot override it. A human with ordinary permissions may edit owner
+  before recording. Protocol and binary transfer details are verification
+  gates, not unresolved user-facing policy choices.

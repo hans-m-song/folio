@@ -970,3 +970,20 @@ clean immediately after that commit. Do not push without a separate request.
 For subsequent work, commit coherent, user-verified changes after appropriate
 validation and a staged-file audit; leave incomplete or unverified work
 uncommitted and report it explicitly.
+
+## BILL-M6 final pre-implementation choices — 2026-09-26
+
+The user confirmed three remaining scope choices. A draft may be submitted
+before CommBank CSV import using the uploaded artifact ID plus source row
+number; once the human import creates a bank row, Reconcile shows the draft
+beside it without matching automatically. The first MCP upload/review release
+supports invoice-evidence PDFs, Stripe balance CSVs, and CommBank
+transaction-history CSVs only. Metadata and original-content reads still
+cover every registered profile, subject to approved/available state for bytes;
+NAB CSV and CommBank statement PDF uploads wait for their own import workflows.
+Each local MCP credential binds one permitted default transaction owner;
+Codex cannot select another owner, but the human reviewer may change it before
+recording. `docs/mcp-plan.md` and BILL-M6 in `docs/roadmap.md` now reflect
+these choices. No MCP code has been written. Remaining work is implementation
+and verification, including Codex protocol/binary handling and the durable
+artifact-review intake bridge.

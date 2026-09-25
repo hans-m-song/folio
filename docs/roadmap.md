@@ -358,14 +358,16 @@ importing CSV rows, or matching a bank row until a human acts in Folio.
 
 Scope: bounded, idempotent individual submission and status tools; separate
 artifact metadata and original-content reads across all profiles; two-step
-artifact upload with validated confirmation and human review for all uploaded
-profiles, whether submitted through MCP or the UI; CSV uploads queued for
-existing per-file and batch import review with duplicate warnings for both
-Stripe and CommBank; MCP-created manual drafts and stored
-existing-match suggestions, excluding drafts derived from Stripe CSV rows;
-review within the current Reconcile suggestions area and ordinary transaction
-editor. Human promotion
-from draft to recorded approves a new transaction; a separate manual match
+artifact upload limited initially to invoice PDFs, Stripe CSVs, and CommBank
+transaction-history CSVs, with validated confirmation and the same human
+review as UI uploads; CSV uploads queued for existing per-file and batch
+import review with duplicate warnings for both Stripe and CommBank;
+MCP-created manual drafts and stored existing-match suggestions, excluding
+drafts derived from Stripe CSV rows;
+pre-import CommBank drafts may cite the uploaded artifact and source row and
+resolve beside a bank row after import without creating a match; review within
+the current Reconcile suggestions area and ordinary transaction editor. Human
+promotion from draft to recorded approves a new transaction; a separate manual match
 approves reconciliation. No separate proposal inbox or first-class AI/MCP
 navigation. Human recording is one reviewed draft at a time; there is no
 bulk-record approval in the first slice. Remote MCP access is a separate future
@@ -377,7 +379,8 @@ drafts may cite uploaded but unapproved PDFs as proposed evidence, while
 recording requires each retained PDF to be approved and available; Stripe CSV
 rows create transactions only through confirmed import; metadata,
 content-read, upload, and draft-submit permissions are separate; editable
-notes are not the sole provenance mechanism;
+notes are not the sole provenance mechanism; each MCP credential binds one
+permitted default owner, and the human reviewer may change it before recording;
 revalidate duplicates, signed amounts, ownership, and revisions when recording
 or matching.
 
@@ -388,24 +391,29 @@ without creating rows; proposed PDF evidence cannot become an approved link
 until artifact approval and draft recording; unrecorded drafts and unused
 match suggestions leave reports and bank matches unchanged; submitting a
 draft derived from a Stripe CSV row is rejected; a human records and
-attributes each transaction; only an explicit human match changes
-the bank row; stale suggestions surface actionable conflicts.
+attributes each transaction; only an explicit human match changes the bank
+row; a pre-import CommBank locator never matches automatically and
+remains unlinked if its source row is rejected or absent; unsupported bank
+statement PDF and NAB CSV uploads are rejected in this first slice, while
+approved artifacts of those profiles remain readable; stale suggestions
+surface actionable conflicts.
 
 Role: MCP/auth, submission persistence, and Reconcile UI owners with
 independent security and financial verification. Dependencies: BILL-T09A,
 BILL-T28, and the manual-entry workflow. Verification gates: protocol
 conformance, permission and idempotency tests, PostgreSQL-backed draft/save/
 match tests, and a local Codex-to-Folio smoke test. Blockers: verify current
-SDK/Codex protocol compatibility, define internal actor/owner provenance for
-MCP-created drafts, validate the durable CSV review-queue bridge and shared
+SDK/Codex protocol compatibility, implement credential-bound owner attribution
+for MCP-created drafts, validate the durable CSV review-queue bridge and shared
 duplicate-warning signals (same-profile checksum, overlapping source rows,
-same-profile filename), and verify
-loopback deployment. Transport/authentication, individual submission,
-all-profile artifact retrieval, two-step upload, and human-reviewed CSV import
+same-profile filename), and verify loopback deployment.
+Transport/authentication, individual submission,
+all-profile approved-artifact retrieval, three-profile two-step upload,
+pre-import CommBank row locators, and human-reviewed CSV import
 are confirmed. Metadata may cover all artifact states, but original bytes are
 readable only for approved, available, versioned artifacts. MCP binary-result
-compatibility remains to be verified. Remote access also
-depends on BILL-T09B, BILL-T10, and public-exposure verification. Parallel
+compatibility remains to be verified. Remote access also depends on BILL-T09B,
+BILL-T10, and public-exposure verification. Parallel
 boundary: protocol endpoint and Reconcile suggestion UI should share one domain
 contract but can be built independently after that contract is approved.
 
