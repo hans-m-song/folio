@@ -1008,3 +1008,9 @@ approves its read. Metadata discovery and upload do not grant permission to
 inspect contents; background reads remain prohibited. No real file has been
 read for this planning decision. `docs/mcp-plan.md` and BILL-M6 in
 `docs/roadmap.md` have been updated; no MCP code has started.
+
+The user further confirmed that artifact filenames will not contain PII.
+`list_artifacts` may therefore return original filenames without per-file
+approval or redaction. This is an operator-provided convention, not a
+guarantee verified by Folio; it does not authorise original-file content
+reads. No artifact metadata or original files were inspected for this decision.

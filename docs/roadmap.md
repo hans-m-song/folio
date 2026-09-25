@@ -382,6 +382,8 @@ rows create transactions only through confirmed import; metadata,
 upload, and draft-submit permissions are separate; editable
 notes are not the sole provenance mechanism; each MCP credential binds one
 permitted default owner, and the human reviewer may change it before recording;
+metadata includes original filenames under the operator's non-PII filename
+convention, without per-file approval or a PII-detection guarantee;
 revalidate duplicates, signed amounts, ownership, and revisions when recording
 or matching.
 

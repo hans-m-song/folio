@@ -284,6 +284,9 @@ scope. If retrieval is reconsidered later, it must be separately authorised
 and restricted to approved, `available`, versioned artifacts, matching the
 current UI download boundary ([download service](../src/documents/service.ts)).
 The binary transport and privacy policy would then need explicit verification.
+The operator expects filenames to contain no PII, so metadata results include
+the original filename without a per-file approval step or redaction. This is
+an input convention, not a guarantee or a content-inspection permission.
 
 Upload and metadata-read are separate credential scopes. A
 draft-submit credential must not implicitly grant file access. The user
@@ -376,7 +379,9 @@ Privacy boundary: Codex may inspect a file containing personal information
 only when the operator explicitly submits that particular file for review or
 approves its read. Artifact metadata discovery and upload do not themselves
 grant permission to open file contents; no background content reads are in
-scope. No real customer file is needed for the initial MCP verification.
+scope. Filenames in metadata are assumed non-PII by operator convention; the
+MCP server does not establish that property by inspecting files. No real
+customer file is needed for the initial MCP verification.
 
 Stripe CSV import currently creates recorded transactions. Submitting drafts
 for the same Stripe rows and then confirming their import would duplicate

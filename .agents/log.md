@@ -1070,3 +1070,7 @@
   approve its read. This is a per-file exception to the repository's default
   no-PII-reading instruction; no automatic or background reads are permitted.
   No original file was inspected while recording this decision.
+- The operator expects artifact filenames to have no PII. MCP metadata may
+  include original filenames without separate per-file approval or redaction.
+  This is an input convention, not a Folio-verified guarantee, and grants no
+  permission to inspect file contents.
