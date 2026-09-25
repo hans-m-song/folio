@@ -1055,3 +1055,18 @@
   Codex cannot override it. A human with ordinary permissions may edit owner
   before recording. Protocol and binary transfer details are verification
   gates, not unresolved user-facing policy choices.
+
+## 2026-09-26 — MCP retrieval deferred and artifact inbox clarified
+
+- The user deferred original-file retrieval through MCP. Initial tools retain
+  all-profile artifact metadata discovery, but expose no file bytes, signed
+  download URL, or content-read scope. Folio UI downloads are unchanged.
+- A validated uploaded artifact persists in Awaiting review. Add-to-batch is
+  an ephemeral browser selection; reload clears the selection, not the files.
+  The artifact lifecycle is the durable inbox for this slice, without a
+  persisted batch entity.
+- The user authorised Codex to inspect a specific original file containing
+  personal information only when they explicitly submit it for review or
+  approve its read. This is a per-file exception to the repository's default
+  no-PII-reading instruction; no automatic or background reads are permitted.
+  No original file was inspected while recording this decision.

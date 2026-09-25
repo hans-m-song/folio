@@ -987,3 +987,24 @@ recording. `docs/mcp-plan.md` and BILL-M6 in `docs/roadmap.md` now reflect
 these choices. No MCP code has been written. Remaining work is implementation
 and verification, including Codex protocol/binary handling and the durable
 artifact-review intake bridge.
+
+## BILL-M6 retrieval, privacy, and durable inbox boundary — 2026-09-26
+
+The user deferred MCP original-file retrieval. The first release retains
+paginated artifact metadata discovery but has no original-file read tool,
+download URL, or read-content credential scope. The existing Folio UI
+download behavior is unchanged. This supersedes earlier MCP content-read
+scope statements above and in the previous plan revision.
+
+Validated UI and MCP uploads must persist as Awaiting review and reappear
+after a page reload. `Add to batch` is only temporary browser selection;
+selection resets on reload, without discarding uploaded files. The plan uses
+the artifact lifecycle as the durable inbox, not a new persisted batch entity.
+
+The user authorised a narrow per-file exception to the repository's
+no-PII-reading instruction: Codex may inspect an original invoice/export
+only when the operator explicitly submits that specific file for review or
+approves its read. Metadata discovery and upload do not grant permission to
+inspect contents; background reads remain prohibited. No real file has been
+read for this planning decision. `docs/mcp-plan.md` and BILL-M6 in
+`docs/roadmap.md` have been updated; no MCP code has started.

@@ -37,10 +37,12 @@ must not be silently promoted or matched by an MCP call.
 
 ## User-facing workflow
 
-1. The operator provides an invoice or monthly export to Codex. Codex may
-   inspect that supplied file, but its extraction remains a suggestion, not
-   invoice or tax proof. Codex may also discover artifact metadata and request
-   original contents through separately authorised MCP reads.
+1. The operator explicitly submits an invoice or monthly export to Codex for
+   review, or explicitly approves a read of that specific file. This grants a
+   narrow per-file exception to the repository's no-PII-reading instruction;
+   no background or automatic inspection is authorised. Extracted values
+   remain suggestions, not invoice or tax proof. Codex may discover artifact
+   metadata; retrieval of original contents through Folio MCP is deferred.
 2. Codex uploads the original file as a typed Folio artifact. Folio validates
    its size, checksum, media type, immutable storage version, and
    profile-specific rules, then places it in the same human-review intake as
@@ -213,8 +215,8 @@ claiming compatibility ([transport specification](https://modelcontextprotocol.i
 
 ## Artifact access and upload
 
-The first slice now includes artifact upload and retrieval. This replaces the
-earlier existing-artifact-only restriction. File uploads must preserve the
+The first slice includes artifact upload and metadata discovery. This replaces
+the earlier existing-artifact-only restriction. File uploads must preserve the
 original file and its profile; Codex-extracted values are draft fields, not a
 replacement for the source artifact. The first MCP upload/review release
 supports only invoice-evidence PDFs, Stripe balance CSVs, and CommBank
@@ -222,9 +224,8 @@ transaction-history CSVs. The registry also defines CommBank statement PDFs
 and NAB CSVs, but their import workflows are not implemented and MCP must not
 accept their uploads yet ([profile registry](../src/artifacts/profiles.ts),
 [roadmap](roadmap.md)). Metadata discovery covers all registered profiles,
-and original-content reads cover any approved, available artifact regardless
-of profile. Original contents are requested separately from metadata because
-they may contain personal and financial data.
+but original-file retrieval through MCP is deferred. The Folio UI retains its
+existing approved-artifact download workflow.
 
 The existing upload service creates a pending artifact and a short-lived,
 checksum-bound storage PUT URL; confirmation verifies object metadata and its
@@ -266,6 +267,9 @@ queues are held in browser component state, so an MCP-created artifact will
 not appear in an operator's queue without new persisted review state or a
 server-derived review listing. The first slice must add that bridge and let
 the existing per-file preview/admission UI open an uploaded artifact by ID.
+Validated uploads persist in `awaiting_review` and reappear after reload;
+`Add to batch` remains a temporary browser selection that resets on reload.
+No persistent batch ID or saved selection is required in this slice.
 For CommBank, `pending` currently persists until `confirmBankImport`; for
 Stripe, generic confirmation produces `available` before preview. Treating
 either artifact state alone as proof of import approval would be incorrect
@@ -274,21 +278,14 @@ either artifact state alone as proof of import approval would be incorrect
 
 `list_artifacts` returns bounded, paginated metadata with ID, profile,
 original filename, MIME type, size, checksum, state, and link counts; it never
-returns bytes or storage keys. `read_artifact` accepts an artifact ID and
-returns the original file with its MIME type and filename under a distinct
-read-content scope. The user confirmed that MCP content reads are limited to
-approved, `available`, versioned artifacts, matching the current UI download
-boundary ([download service](../src/documents/service.ts)); metadata may show
-other states. Neither tool exposes
-raw object keys or storage credentials. Each content read is authorised and
-audited, with a bounded response; the exact MCP binary representation and
-Codex handling must be tested before choosing embedded content versus a
-resource link. The protocol supports both embedded resources and resource
-links, and binary resources use base64
-([MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
-[MCP resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources)).
+returns bytes or storage keys. Metadata may show any artifact state. The first
+MCP release has no `read_artifact` tool, download URL, or original-file read
+scope. If retrieval is reconsidered later, it must be separately authorised
+and restricted to approved, `available`, versioned artifacts, matching the
+current UI download boundary ([download service](../src/documents/service.ts)).
+The binary transport and privacy policy would then need explicit verification.
 
-Upload, metadata-read, and content-read are separate credential scopes. A
+Upload and metadata-read are separate credential scopes. A
 draft-submit credential must not implicitly grant file access. The user
 confirmed that a draft may cite a still-unapproved invoice PDF ID. Store this
 as proposed evidence, distinct from the approved transaction-artifact link;
@@ -306,7 +303,6 @@ remain provenance for their own import workflows, not invoice evidence.
 | `list_unresolved_bank_rows` | Bounded source facts and revision tokens                             |
 | `search_transactions`       | Bounded recorded candidate search                                    |
 | `list_artifacts`            | Bounded metadata across artifact profiles and states                 |
-| `read_artifact`             | Original available artifact content, separate scope                  |
 | `begin_artifact_upload`     | Create an upload intent for one of the three supported profiles      |
 | `confirm_artifact_upload`   | Verify the uploaded version and queue a supported profile for review |
 | `submit_draft_transaction`  | Create one manual draft only                                         |
@@ -327,11 +323,11 @@ the existing Folio match action, not an MCP-created reconciliation.
 2. Protocol and security tests: current MCP wire format with Codex, anonymous
    and wrong-scope rejection, unexpected `Host`/`Origin` rejection, and no
    public-proxy exposure. Confirm upload/read isolation, immutable-version
-   checks, oversized-file rejection, retry outcomes, private-content access
-   controls, and denial of content reads for every non-available state. Test
-   against synthetic records; use of real bank
-   descriptions requires separate permission under the repository's privacy
-   instructions.
+   checks, oversized-file rejection, and retry outcomes. Assert that the MCP
+   surface exposes no original-file retrieval tool or URL. Test against
+   synthetic records; a real bank file may be inspected only after the
+   operator explicitly submits that specific file for review or approves
+   its read.
 3. Artifact-review tests: MCP and UI uploads both remain awaiting review;
    same-profile checksum, source-row overlap, and filename matches show
    reason-labelled warnings; a filename-only match remains non-blocking;
@@ -341,7 +337,7 @@ the existing Folio match action, not an MCP-created reconciliation.
    leave an approved evidence link. Stripe CSVs queue for import but cannot
    spawn parallel MCP draft transactions from their rows. Unsupported NAB CSV
    and CommBank statement PDF upload profiles are rejected in the first slice;
-   approved artifacts of either profile remain readable.
+   approved artifacts of either profile remain discoverable as metadata.
 4. Reconcile UI tests: draft/match suggestions for the intended bank row only,
    keyboard/narrow-screen review, stale state, edit return path, and no
    implicit save or match.
@@ -363,17 +359,24 @@ a time for the first slice. The earlier batch-submission and `approve selected`
 proposal-inbox actions are deferred. Each draft must be opened and saved as
 recorded by a human. Each bank match remains a separate explicit human action.
 
-The user requested retrieval of metadata and original contents for all
-artifact profiles, plus artifact upload before draft submission. They
-confirmed the two-step upload and that CSV uploads enter the existing
-human-reviewed import flow. MCP may read original bytes only for approved,
-available artifacts; metadata can cover all states. Drafts may cite an uploaded
-but unapproved PDF as proposed evidence; recording remains blocked until
-artifact approval. The confirmed duplicate-warning signals are same-profile
-checksum, overlapping source rows,
+The user requested artifact upload before draft submission and metadata
+discovery for all artifact profiles. They initially requested original-file
+retrieval, then deferred it from the first MCP release. They confirmed the
+two-step upload and that CSV uploads enter the existing human-reviewed import
+flow. MCP cannot read original bytes in this release; metadata can cover all
+states. Drafts may cite an uploaded but unapproved PDF as proposed evidence;
+recording remains blocked until artifact approval. The confirmed
+duplicate-warning signals are same-profile checksum, overlapping source rows,
 and same-profile filename matches; filename alone does not prove duplication.
-Exact MCP binary-result handling and the durable import-queue bridge require
-verification against the installed Codex client and current application UI.
+The durable import-queue bridge requires verification against the current
+application UI. Validated files persist across reloads in Awaiting review;
+the Add-to-batch selection is temporary.
+
+Privacy boundary: Codex may inspect a file containing personal information
+only when the operator explicitly submits that particular file for review or
+approves its read. Artifact metadata discovery and upload do not themselves
+grant permission to open file contents; no background content reads are in
+scope. No real customer file is needed for the initial MCP verification.
 
 Stripe CSV import currently creates recorded transactions. Submitting drafts
 for the same Stripe rows and then confirming their import would duplicate
