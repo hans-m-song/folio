@@ -740,6 +740,57 @@
   font-size: 0.74rem;
 }
 
+.banking-proposal-suggestions {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--banking-line);
+  border-radius: 0.7rem;
+  background: #fff;
+}
+
+.banking-proposal-suggestions h2,
+.banking-proposal-suggestions p {
+  margin: 0;
+}
+
+.banking-proposal-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.banking-proposal-card {
+  display: grid;
+  justify-items: start;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid #dfe6f0;
+  border-radius: 0.6rem;
+}
+
+.banking-proposal-card__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.banking-proposal-badge {
+  padding: 0.18rem 0.5rem;
+  border-radius: 99rem;
+  background: #eaf1fb;
+  color: #183669;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.banking-proposal-warning {
+  color: #8a3b24;
+}
+
 .banking-action-row {
   align-items: center;
   margin-top: 1rem;

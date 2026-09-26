@@ -65,7 +65,13 @@ const bankOverlapFingerprint = (overlaps: readonly BankOverlap[]): string => {
 export interface BankImportRecord {
   artifactId: string;
   filename: string;
-  state: "pending" | "available" | "abandoned" | "superseded";
+  state:
+    | "pending"
+    | "awaiting_review"
+    | "available"
+    | "rejected"
+    | "abandoned"
+    | "superseded";
   createdAt: string;
   confirmedAt: string | null;
   rowCount: number;
@@ -254,8 +260,11 @@ export class BankRepository {
           rowCount,
         };
       }
-      if (artifact.state !== "pending")
-        throw new Error("Pending CommBank import artifact not found");
+      if (
+        artifact.state !== "awaiting_review" ||
+        artifact.version_id !== input.versionId
+      )
+        throw new Error("Reviewable CommBank import artifact not found");
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         [`${profile}:${String(artifact.checksum_sha256)}`],
@@ -266,7 +275,7 @@ export class BankRepository {
       );
       if (duplicate.rows[0]) {
         await client.query(
-          `UPDATE ${this.artifactsTable} SET state='abandoned' WHERE id=$1 AND state='pending'`,
+          `UPDATE ${this.artifactsTable} SET state='rejected' WHERE id=$1 AND state='awaiting_review'`,
           [input.artifactId],
         );
         const existingId = String(duplicate.rows[0].id);
@@ -297,11 +306,11 @@ export class BankRepository {
         };
       }
       const available = await client.query(
-        `UPDATE ${this.artifactsTable} SET state='available', version_id=$2, confirmed_at=now() WHERE id=$1 AND state='pending'`,
+        `UPDATE ${this.artifactsTable} SET state='available' WHERE id=$1 AND state='awaiting_review' AND version_id=$2`,
         [input.artifactId, input.versionId],
       );
       if (available.rowCount !== 1)
-        throw new Error("Pending CommBank import artifact not found");
+        throw new Error("Reviewable CommBank import artifact not found");
       for (const row of input.rows) {
         const inserted = await client.query(
           `INSERT INTO ${this.bankTransactionsTable} (posted_date, amount_aud, description, metadata, created_by_id, updated_by_id) VALUES ($1,$2,$3,$4,$5,$5) RETURNING id`,

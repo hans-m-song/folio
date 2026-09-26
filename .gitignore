@@ -4,6 +4,7 @@
 dist/
 src/routeTree.gen.ts
 node_modules
+.pnpm-store/
 docs/samples/
 pnpm-debug.log*
 .env*

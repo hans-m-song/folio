@@ -177,6 +177,11 @@
   color: var(--warning);
 }
 
+.artifact-library-state--awaiting_review {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
 .artifact-library-state--superseded,
 .artifact-library-state--abandoned {
   background: #f1f2f3;
@@ -241,6 +246,12 @@
 }
 
 .artifact-library-unavailable {
+  align-self: center;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.artifact-library-review-hint {
   align-self: center;
   color: var(--muted);
   font-size: 0.78rem;
@@ -545,9 +556,9 @@
   color: var(--warning);
 }
 
-.artifact-upload-status--confirmed {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+.artifact-upload-status--awaitingReview {
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 
 .artifact-upload-status--failed {

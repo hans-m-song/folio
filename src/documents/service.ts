@@ -1,11 +1,11 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
   artifactProfileSchema,
   assertArtifactProfileMediaType,
   getArtifactProfile,
+  isInvoiceEvidenceProfile,
   legacyArtifactProfile,
-  isBankArtifactProfile,
   type ArtifactProfile,
 } from "../artifacts/profiles";
 import type { ArtifactKind } from "./keys";
@@ -25,6 +25,7 @@ export interface ArtifactRecord {
   originalFilename?: string;
   state:
     | "pending"
+    | "awaiting_review"
     | "available"
     | "rejected"
     | "superseded"
@@ -47,11 +48,33 @@ export interface ArtifactRepository {
     byteSize: string;
     checksumSha256: string;
   }): Promise<ArtifactRecord>;
+  createPendingUploadIntent(input: {
+    credentialId: string;
+    requestKey: string;
+    payloadSha256: string;
+    id: string;
+    actorId: string;
+    ownerId: string | null;
+    artifactProfile: ArtifactProfile;
+    objectKey: string;
+    filename: string;
+    mediaType: string;
+    byteSize: string;
+    checksumSha256: string;
+  }): Promise<
+    | { status: "created" | "replayed"; artifact: ArtifactRecord }
+    | {
+        status: "not_uploadable";
+        artifactId: string;
+        artifactState: ArtifactRecord["state"] | "deleted";
+      }
+  >;
   getArtifact(id: string): Promise<ArtifactRecord | null>;
   abandonPendingArtifact(id: string): Promise<void>;
   requireActiveActor(email: string): Promise<void>;
   requireActiveActorId(id: string): Promise<void>;
-  confirmAvailable(id: string, versionId: string): Promise<void>;
+  confirmAwaitingReview(id: string, versionId: string): Promise<void>;
+  approveArtifact(id: string, versionId: string): Promise<ArtifactRecord>;
   rejectArtifact(id: string, versionId: string): Promise<ArtifactRecord>;
   claimArtifactDeletion(id: string): Promise<ArtifactRecord | null>;
   deleteClaimedArtifact(id: string, objectKey: string): Promise<void>;
@@ -71,6 +94,13 @@ export class ArtifactPresignRecoveryError extends Error {
       primaryError instanceof Error ? { cause: primaryError } : undefined,
     );
     this.name = "ArtifactPresignRecoveryError";
+  }
+}
+
+export class ArtifactUploadIdempotencyConflictError extends Error {
+  constructor() {
+    super("Upload idempotency key was already used with a different payload");
+    this.name = "ArtifactUploadIdempotencyConflictError";
   }
 }
 
@@ -168,15 +198,100 @@ export class DocumentService {
     return { artifact, uploadUrl };
   }
 
+  async startIdempotentUpload(input: {
+    credentialId: string;
+    idempotencyKey: string;
+    actorId: string;
+    ownerId: string | null;
+    artifactProfile: ArtifactProfile;
+    filename: string;
+    mediaType: string;
+    byteSize: number;
+    checksumSha256: string;
+  }): Promise<
+    | {
+        status: "upload_ready";
+        artifact: ArtifactRecord;
+        uploadUrl: string;
+        replayed: boolean;
+      }
+    | {
+        status: "intent_not_uploadable";
+        artifactId: string;
+        artifactState: ArtifactRecord["state"] | "deleted";
+      }
+  > {
+    const artifactProfile = requestedArtifactProfile(input);
+    assertArtifactProfileMediaType(artifactProfile, input.mediaType);
+    if (
+      !Number.isSafeInteger(input.byteSize) ||
+      input.byteSize <= 0 ||
+      input.byteSize > this.settings.maxUploadBytes
+    )
+      throw new Error("Upload size is outside the configured limit");
+    if (!/^[A-Za-z0-9+/]{43}=$/.test(input.checksumSha256))
+      throw new Error("Expected a base64 SHA-256 checksum");
+    if (!/^[A-Za-z0-9._:-]{1,200}$/.test(input.idempotencyKey))
+      throw new Error("Invalid upload idempotency key");
+    const filename = input.filename.trim().normalize("NFC");
+    if (!filename || filename.length > 255)
+      throw new Error("Invalid upload filename");
+    const payloadSha256 = createHash("sha256")
+      .update(
+        JSON.stringify([
+          "folio-mcp-upload-v1",
+          artifactProfile,
+          filename,
+          input.byteSize,
+          input.checksumSha256,
+        ]),
+      )
+      .digest("hex");
+    const id = randomUUID();
+    const intent = await this.repository.createPendingUploadIntent({
+      credentialId: input.credentialId,
+      requestKey: input.idempotencyKey,
+      payloadSha256,
+      id,
+      actorId: input.actorId,
+      ownerId: input.ownerId,
+      artifactProfile,
+      objectKey: createObjectKey(this.settings.prefix, artifactProfile, id),
+      filename,
+      mediaType: input.mediaType,
+      byteSize: input.byteSize.toString(),
+      checksumSha256: input.checksumSha256,
+    });
+    if (intent.status === "not_uploadable")
+      return {
+        status: "intent_not_uploadable",
+        artifactId: intent.artifactId,
+        artifactState: intent.artifactState,
+      };
+    const artifact = intent.artifact;
+    const uploadUrl = await this.storage.presignPut({
+      bucket: this.settings.bucket,
+      key: artifact.objectKey,
+      contentType: artifact.mediaType,
+      checksumSha256: artifact.checksumSha256,
+      byteSize: Number(artifact.byteSize),
+      artifactId: artifact.id,
+    });
+    return {
+      status: "upload_ready",
+      artifact,
+      uploadUrl,
+      replayed: intent.status === "replayed",
+    };
+  }
+
   async confirmUpload(actorId: string, id: string): Promise<ArtifactRecord> {
     await this.repository.requireActiveActorId(actorId);
     const artifact = await this.repository.getArtifact(id);
+    if (artifact?.state === "awaiting_review" && artifact.versionId)
+      return artifact;
     if (!artifact || artifact.state !== "pending")
       throw new Error("Pending artifact not found");
-    if (isBankArtifactProfile(artifactProfileOf(artifact)))
-      throw new Error(
-        "Bank activity artifacts require a profile-specific importer",
-      );
     const versionId = await this.storage.latestVersionId(
       this.settings.bucket,
       artifact.objectKey,
@@ -211,11 +326,25 @@ export class DocumentService {
       if (Buffer.from(signature).toString("ascii") !== "%PDF-")
         throw new Error("Stored PDF signature is invalid");
     }
-    await this.repository.confirmAvailable(id, versionId);
-    return { ...artifact, state: "available", versionId };
+    await this.repository.confirmAwaitingReview(id, versionId);
+    return { ...artifact, state: "awaiting_review", versionId };
   }
 
-  async readPendingBankText(
+  async approveArtifact(actorId: string, id: string): Promise<ArtifactRecord> {
+    await this.repository.requireActiveActorId(actorId);
+    const artifact = await this.repository.getArtifact(id);
+    if (
+      !artifact ||
+      !isInvoiceEvidenceProfile(artifactProfileOf(artifact)) ||
+      !artifact.versionId ||
+      (artifact.state !== "awaiting_review" && artifact.state !== "available")
+    )
+      throw new Error("Reviewable PDF artifact not found");
+    if (artifact.state === "available") return artifact;
+    return this.repository.approveArtifact(id, artifact.versionId);
+  }
+
+  async readReviewText(
     actorId: string,
     id: string,
     expectedProfile: ArtifactProfile,
@@ -224,31 +353,13 @@ export class DocumentService {
     const artifact = await this.repository.getArtifact(id);
     if (
       !artifact ||
-      artifact.state !== "pending" ||
+      (artifact.state !== "awaiting_review" &&
+        artifact.state !== "available") ||
       artifactProfileOf(artifact) !== expectedProfile ||
-      !isBankArtifactProfile(expectedProfile)
+      getArtifactProfile(expectedProfile).mediaType !== "text/csv" ||
+      !artifact.versionId
     )
-      throw new Error("Pending bank artifact not found");
-    const versionId = await this.storage.latestVersionId(
-      this.settings.bucket,
-      artifact.objectKey,
-    );
-    if (!versionId) throw new Error("Stored object has no immutable version");
-    const head = await this.storage.headVersion(
-      this.settings.bucket,
-      artifact.objectKey,
-      versionId,
-    );
-    if (
-      head.contentLength?.toString() !== artifact.byteSize ||
-      head.contentType !== artifact.mediaType ||
-      !equalText(head.checksumSha256, artifact.checksumSha256) ||
-      !equalText(head.metadata?.["folio-artifact-id"], artifact.id) ||
-      head.versionId !== versionId
-    )
-      throw new Error(
-        "Stored object metadata or version does not match the upload intent",
-      );
+      throw new Error("Reviewable CSV artifact not found");
     const byteSize = Number(artifact.byteSize);
     if (
       !Number.isSafeInteger(byteSize) ||
@@ -259,12 +370,12 @@ export class DocumentService {
     const bytes = await this.storage.readPrefix(
       this.settings.bucket,
       artifact.objectKey,
-      versionId,
+      artifact.versionId,
       byteSize,
     );
     return {
       artifact,
-      versionId,
+      versionId: artifact.versionId,
       text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
     };
   }
@@ -282,48 +393,42 @@ export class DocumentService {
     );
   }
 
+  async previewArtifactForReview(actorId: string, id: string): Promise<string> {
+    await this.repository.requireActiveActorId(actorId);
+    const artifact = await this.repository.getArtifact(id);
+    if (
+      !artifact ||
+      artifact.state !== "awaiting_review" ||
+      !artifact.versionId ||
+      getArtifactProfile(artifactProfileOf(artifact)).mediaType !==
+        "application/pdf"
+    )
+      throw new Error("Reviewable PDF artifact not found");
+    return this.storage.presignInline(
+      this.settings.bucket,
+      artifact.objectKey,
+      artifact.versionId,
+      artifact.originalFilename ?? artifact.filename ?? "artifact",
+    );
+  }
+
   async rejectArtifact(actorId: string, id: string): Promise<ArtifactRecord> {
     await this.repository.requireActiveActorId(actorId);
     const artifact = await this.repository.getArtifact(id);
-    if (!artifact) throw new Error("Rejectable CSV artifact not found");
+    if (!artifact) throw new Error("Rejectable artifact not found");
     const profile = artifactProfileOf(artifact);
-    if (getArtifactProfile(profile).mediaType !== "text/csv")
-      throw new Error("Rejectable CSV artifact not found");
     if (artifact.state === "rejected" && artifact.versionId) return artifact;
-    const isPendingCommBankCsv =
-      artifact.state === "pending" &&
-      profile === "commbank_transaction_history_csv_v1";
+    const mediaType = getArtifactProfile(profile).mediaType;
+    const isAwaitingReview = artifact.state === "awaiting_review";
+    const isLegacyAvailableCsv =
+      artifact.state === "available" && mediaType === "text/csv";
     if (
-      !isPendingCommBankCsv &&
-      (artifact.state !== "available" || !artifact.versionId)
+      (!isAwaitingReview && !isLegacyAvailableCsv) ||
+      !artifact.versionId ||
+      (mediaType !== "text/csv" && mediaType !== "application/pdf")
     )
-      throw new Error("Rejectable CSV artifact not found");
-
-    let versionId: string | undefined = artifact.versionId ?? undefined;
-    if (isPendingCommBankCsv) {
-      versionId = await this.storage.latestVersionId(
-        this.settings.bucket,
-        artifact.objectKey,
-      );
-      if (!versionId) throw new Error("Stored object has no immutable version");
-      const head = await this.storage.headVersion(
-        this.settings.bucket,
-        artifact.objectKey,
-        versionId,
-      );
-      if (
-        head.contentLength?.toString() !== artifact.byteSize ||
-        head.contentType !== artifact.mediaType ||
-        !equalText(head.checksumSha256, artifact.checksumSha256) ||
-        !equalText(head.metadata?.["folio-artifact-id"], artifact.id) ||
-        head.versionId !== versionId
-      )
-        throw new Error(
-          "Stored object metadata or version does not match the upload intent",
-        );
-    }
-    if (!versionId) throw new Error("Stored object has no immutable version");
-    return this.repository.rejectArtifact(id, versionId);
+      throw new Error("Rejectable artifact not found");
+    return this.repository.rejectArtifact(id, artifact.versionId);
   }
 
   async deleteArtifact(

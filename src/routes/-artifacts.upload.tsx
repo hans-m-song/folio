@@ -14,7 +14,7 @@ type UploadStatus =
   | "validating"
   | "uploading"
   | "confirming"
-  | "confirmed"
+  | "awaitingReview"
   | "failed";
 
 interface PdfUploadEntry {
@@ -57,8 +57,8 @@ export const uploadStatusLabel = (status: UploadStatus): string => {
       return "Uploading";
     case "confirming":
       return "Confirming";
-    case "confirmed":
-      return "Available in file library";
+    case "awaitingReview":
+      return "Awaiting review";
     case "failed":
       return "Needs attention";
   }
@@ -117,6 +117,9 @@ const safeUploadError = (error: unknown, fallback: string): string => {
     return fallback;
   return message;
 };
+
+const uncertainPdfConfirmationMessage =
+  "Confirmation response was uncertain. Retry confirmation for this uploaded PDF. The retry handle lasts only while this page is open; after reload, check the file library before uploading it again.";
 
 export const ArtifactPdfUploadPage = ({
   session,
@@ -256,10 +259,10 @@ export const ArtifactPdfUploadPage = ({
       await confirmArtifactUpload({ data: { id: artifactId } });
       updateUpload(id, (current) => ({
         ...current,
-        status: "confirmed",
+        status: "awaitingReview",
         progress: 100,
         message:
-          "Confirmed and available as reusable evidence in the file library.",
+          "Upload confirmed. This PDF is awaiting human review and is not available as evidence yet.",
       }));
     } catch (error) {
       const knownPrecommitFailure =
@@ -270,7 +273,7 @@ export const ArtifactPdfUploadPage = ({
         stage === "confirm"
           ? knownPrecommitFailure
             ? "Storage was unavailable before confirmation. Retry confirmation for this PDF."
-            : "Confirmation could not be verified. Check the file library before retrying this PDF."
+            : uncertainPdfConfirmationMessage
           : stage === "upload"
             ? "The browser upload failed. Check the connection and retry this PDF."
             : "The PDF could not be prepared for upload. Check the file and retry.";
@@ -318,7 +321,7 @@ export const ArtifactPdfUploadPage = ({
     const upload = uploads.find((candidate) => candidate.id === id);
     if (
       !upload?.artifactId ||
-      !upload.confirmationRetryable ||
+      (!upload.confirmationRetryable && !upload.confirmationUnknown) ||
       inFlight.current
     )
       return;
@@ -333,11 +336,12 @@ export const ArtifactPdfUploadPage = ({
       await confirmArtifactUpload({ data: { id: upload.artifactId } });
       updateUpload(id, (current) => ({
         ...current,
-        status: "confirmed",
+        status: "awaitingReview",
+        confirmationUnknown: false,
         confirmationRetryable: false,
         progress: 100,
         message:
-          "Confirmed and available as reusable evidence in the file library.",
+          "Upload confirmed. This PDF is awaiting human review and is not available as evidence yet.",
       }));
     } catch (error) {
       const knownPrecommitFailure =
@@ -349,7 +353,7 @@ export const ArtifactPdfUploadPage = ({
         confirmationRetryable: knownPrecommitFailure,
         message: knownPrecommitFailure
           ? "Storage is still unavailable. Retry confirmation when it recovers."
-          : "Confirmation could not be verified. Check the file library before retrying this PDF.",
+          : uncertainPdfConfirmationMessage,
       }));
     } finally {
       inFlight.current = false;
@@ -383,6 +387,8 @@ export const ArtifactPdfUploadPage = ({
             <p>
               Add invoice and evidence PDFs to the file library. Uploading files
               here does not create transactions or link evidence automatically.
+              PDFs remain unavailable as evidence until a reviewer approves
+              them.
             </p>
           </header>
           <SourceTabs active="pdf" />
@@ -395,11 +401,13 @@ export const ArtifactPdfUploadPage = ({
       >
         <div className="artifact-upload-panel-heading">
           <div>
-            <p className="artifact-library-kicker">Reusable evidence</p>
+            <p className="artifact-library-kicker">PDF upload</p>
             <h2 id="artifact-upload-heading">Choose PDF files</h2>
             <p>
-              Each file is checked, uploaded, and confirmed independently.
-              Failed files stay in the list so you can retry them individually.
+              Each file is checked, uploaded, and confirmed independently. PDFs
+              remain unavailable as evidence until a reviewer approves them in
+              the file library. Failed files stay in the list so you can retry
+              them individually.
             </p>
           </div>
           <a href="/imports/library">View file library</a>
@@ -435,10 +443,10 @@ export const ArtifactPdfUploadPage = ({
               <h3 id="artifact-upload-queue-heading">Upload queue</h3>
               <p aria-live="polite">
                 {
-                  uploads.filter((upload) => upload.status === "confirmed")
+                  uploads.filter((upload) => upload.status === "awaitingReview")
                     .length
                 }{" "}
-                confirmed ·{" "}
+                awaiting review ·{" "}
                 {uploads.filter((upload) => upload.status === "failed").length}{" "}
                 need attention
               </p>
@@ -481,7 +489,8 @@ export const ArtifactPdfUploadPage = ({
                       className="artifact-filename-match-warning"
                       role="status"
                     >
-                      Could not check this filename; upload remains available.
+                      Could not check this filename; you can still upload the
+                      PDF.
                     </p>
                   )}
                   {upload.status === "uploading" && (
@@ -500,9 +509,9 @@ export const ArtifactPdfUploadPage = ({
                   >
                     {upload.message || uploadStatusLabel(upload.status)}
                   </p>
-                  {upload.status === "confirmed" && (
-                    <a href="/imports/library?profile=manual_invoice_pdf_v1&state=available&linkage=unlinked">
-                      View available evidence
+                  {upload.status === "awaitingReview" && (
+                    <a href="/imports/library?profile=manual_invoice_pdf_v1&state=awaiting_review&linkage=unlinked">
+                      Review this PDF in the file library
                     </a>
                   )}
                   {upload.status === "failed" &&
@@ -516,13 +525,9 @@ export const ArtifactPdfUploadPage = ({
                         Retry upload for {upload.file.name}
                       </button>
                     )}
-                  {upload.status === "failed" && upload.confirmationUnknown && (
-                    <a href="/imports/library">
-                      Check the file library before adding this file again
-                    </a>
-                  )}
                   {upload.status === "failed" &&
-                    upload.confirmationRetryable && (
+                    (upload.confirmationUnknown ||
+                      upload.confirmationRetryable) && (
                       <button
                         type="button"
                         disabled={busy}
@@ -531,6 +536,9 @@ export const ArtifactPdfUploadPage = ({
                         Retry confirmation for {upload.file.name}
                       </button>
                     )}
+                  {upload.status === "failed" && upload.confirmationUnknown && (
+                    <a href="/imports/library">Check the file library</a>
+                  )}
                 </li>
               ))}
             </ol>

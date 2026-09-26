@@ -6,6 +6,7 @@ import { AuthService, createGoogleOidcOperations } from "../auth/service";
 import { loadAuthConfig, loadConfig } from "../config";
 import { AuthRepository } from "../database/auth-repository";
 import { BankRepository } from "../database/bank-repository";
+import { ProposalRepository } from "../database/proposal-repository";
 import { FolioRepository } from "../database/repository";
 import { DocumentService } from "../documents/service";
 import { S3ObjectStorage } from "../documents/storage";
@@ -49,12 +50,25 @@ function createRuntime() {
     config.databaseSchema,
     config.gstRegistered,
   );
+  const proposalRepository = new ProposalRepository(
+    pool,
+    config.databaseSchema,
+    config.gstRegistered,
+  );
   const auth = new AuthService(
     authRepository,
     authConfig,
     createGoogleOidcOperations(authConfig),
   );
-  return { config, authConfig, repository, bankRepository, documents, auth };
+  return {
+    config,
+    authConfig,
+    repository,
+    bankRepository,
+    proposalRepository,
+    documents,
+    auth,
+  };
 }
 
 export function runtime() {

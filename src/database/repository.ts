@@ -31,10 +31,16 @@ import {
 import type { ManualTransactionAction } from "../domain/manual-transaction";
 import {
   artifactProfileOf,
+  ArtifactUploadIdempotencyConflictError,
   type ArtifactRecord,
   type ArtifactRepository,
 } from "../documents/service";
 import { FolioDiagnosticError } from "../domain/diagnostics";
+import type {
+  CsvDuplicateIdentitySet,
+  CsvDuplicateProfile,
+  CsvDuplicateRowIdentity,
+} from "../domain/csv-duplicates";
 import { requiredMigrationIds } from "./migrations";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
@@ -71,6 +77,30 @@ export interface TransactionPageQuery {
   };
   page: number;
   reportingTimezone: string;
+}
+
+export type CsvDuplicateWarningReason =
+  | "same_checksum"
+  | "same_filename"
+  | "overlapping_rows";
+
+export interface CsvDuplicateWarningGroup {
+  reason: CsvDuplicateWarningReason;
+  totalArtifactCount: number;
+  truncated: boolean;
+  matches: {
+    artifactId: string;
+    filename: string;
+    matchingRowCount: number | null;
+  }[];
+}
+
+export interface CsvDuplicateWarningReport {
+  artifactId: string;
+  profile: CsvDuplicateProfile;
+  rowCount: number;
+  rowIdentityLimitReached: boolean;
+  warnings: CsvDuplicateWarningGroup[];
 }
 
 export interface TransactionPage {
@@ -228,6 +258,8 @@ export class FolioRepository implements ArtifactRepository {
   private readonly bankTransactionArtifactsTable: string;
   private readonly bankTransactionsTable: string;
   private readonly migrationsTable: string;
+  private readonly mcpCredentialsTable: string;
+  private readonly mcpUploadIntentsTable: string;
   private readonly schema: string;
 
   constructor(
@@ -245,6 +277,8 @@ export class FolioRepository implements ArtifactRepository {
     this.bankTransactionArtifactsTable = `"${schema}"."bank_transaction_artifacts"`;
     this.bankTransactionsTable = `"${schema}"."bank_transactions"`;
     this.migrationsTable = `"${schema}"."_migrations"`;
+    this.mcpCredentialsTable = `"${schema}"."mcp_credentials"`;
+    this.mcpUploadIntentsTable = `"${schema}"."mcp_upload_intents"`;
   }
 
   private async actor(queryable: Queryable, email: string): Promise<User> {
@@ -563,7 +597,7 @@ export class FolioRepository implements ArtifactRepository {
       this.pool.query(
         `SELECT
           count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} link WHERE link.transaction_id=transactions.id))::integer AS linked_evidence_gaps,
-          (SELECT count(*)::integer FROM ${this.artifactsTable} artifact WHERE artifact.artifact_profile IN ('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1') AND artifact.state='pending') AS pending_import_uploads,
+          (SELECT count(*)::integer FROM ${this.artifactsTable} artifact WHERE artifact.artifact_profile IN ('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1') AND artifact.state IN ('pending', 'awaiting_review')) AS pending_import_uploads,
           (SELECT count(*)::integer FROM ${this.artifactsTable} artifact WHERE artifact.artifact_profile IN ('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1') AND artifact.state='abandoned') AS abandoned_import_uploads
          FROM ${this.transactionsTable} transactions`,
       ),
@@ -632,6 +666,7 @@ export class FolioRepository implements ArtifactRepository {
       mediaType: string;
       state: string;
       byteSize: string;
+      checksumSha256: string;
       createdAt: string;
       transactionCount: number;
       bankRowCount: number;
@@ -658,7 +693,7 @@ export class FolioRepository implements ArtifactRepository {
         parameters,
       ),
       this.pool.query(
-        `SELECT artifact.id, artifact.filename, artifact.artifact_profile, artifact.media_type, artifact.state, artifact.byte_size, artifact.created_at,
+        `SELECT artifact.id, artifact.filename, artifact.artifact_profile, artifact.media_type, artifact.state, artifact.byte_size, artifact.checksum_sha256, artifact.created_at,
           (SELECT count(*)::integer FROM ${this.transactionArtifactsTable} t WHERE t.source_artifact_id=artifact.id) AS transaction_count,
           (SELECT count(*)::integer FROM ${this.bankTransactionArtifactsTable} b WHERE b.source_artifact_id=artifact.id) AS bank_row_count
          FROM ${this.artifactsTable} artifact ${conditions}
@@ -675,6 +710,7 @@ export class FolioRepository implements ArtifactRepository {
         mediaType: String(row.media_type),
         state: String(row.state),
         byteSize: String(row.byte_size),
+        checksumSha256: String(row.checksum_sha256),
         createdAt: row.created_at.toISOString(),
         transactionCount: Number(row.transaction_count),
         bankRowCount: Number(row.bank_row_count),
@@ -701,6 +737,197 @@ export class FolioRepository implements ArtifactRepository {
       [profile, filenames],
     );
     return result.rows.map((row) => Number(row.match_count));
+  }
+
+  async getArtifactCreatorId(id: string): Promise<string | null> {
+    const result = await this.pool.query(
+      `SELECT created_by_id FROM ${this.artifactsTable} WHERE id=$1`,
+      [id],
+    );
+    return result.rows[0]?.created_by_id
+      ? String(result.rows[0].created_by_id)
+      : null;
+  }
+
+  async findCsvDuplicateWarnings(
+    actorId: string,
+    artifactId: string,
+    profile: CsvDuplicateProfile,
+    identitySet: CsvDuplicateIdentitySet,
+  ): Promise<CsvDuplicateWarningReport> {
+    await this.actorById(this.pool, actorId);
+    const artifactResult = await this.pool.query(
+      `SELECT id, filename, original_filename, checksum_sha256
+       FROM ${this.artifactsTable}
+       WHERE id=$1 AND artifact_profile=$2 AND state IN ('awaiting_review','available')`,
+      [artifactId, profile],
+    );
+    const artifact = artifactResult.rows[0];
+    if (!artifact) throw new Error("Reviewable CSV artifact not found");
+    const invalidIdentity = identitySet.identities.some((identity) =>
+      profile === "stripe_balance_itemised_csv_v1"
+        ? identity.kind !== "stripe_reference"
+        : identity.kind !== "commbank_row",
+    );
+    if (invalidIdentity) throw new Error("CSV duplicate identity mismatch");
+
+    const filename = String(artifact.original_filename || artifact.filename);
+    const metadataMatches = await this.pool.query(
+      `WITH signals AS (
+         SELECT candidate.id, candidate.filename, reason.value AS reason,
+           count(*) OVER (PARTITION BY reason.value)::integer AS total_artifact_count,
+           row_number() OVER (PARTITION BY reason.value ORDER BY candidate.created_at DESC, candidate.id DESC) AS rank
+         FROM ${this.artifactsTable} candidate
+         CROSS JOIN LATERAL (VALUES
+           ('same_checksum', candidate.checksum_sha256=$3),
+           ('same_filename', lower(coalesce(nullif(candidate.original_filename, ''), candidate.filename))=lower($4))
+         ) reason(value, matched)
+         WHERE candidate.id<>$1 AND candidate.artifact_profile=$2
+           AND candidate.state IN ('awaiting_review','available','superseded')
+           AND reason.matched
+       )
+       SELECT id, filename, reason, total_artifact_count
+       FROM signals WHERE rank<=25 ORDER BY reason, rank`,
+      [artifactId, profile, artifact.checksum_sha256, filename],
+    );
+
+    const rowMatches =
+      profile === "stripe_balance_itemised_csv_v1"
+        ? await this.stripeDuplicateRowMatches(
+            artifactId,
+            identitySet.identities,
+          )
+        : await this.commBankDuplicateRowMatches(
+            artifactId,
+            identitySet.identities,
+          );
+    const groups = new Map<
+      CsvDuplicateWarningReason,
+      CsvDuplicateWarningGroup
+    >();
+    for (const row of metadataMatches.rows) {
+      const reason = row.reason as CsvDuplicateWarningReason;
+      const group = groups.get(reason) ?? {
+        reason,
+        totalArtifactCount: Number(row.total_artifact_count),
+        truncated: Number(row.total_artifact_count) > 25,
+        matches: [],
+      };
+      group.matches.push({
+        artifactId: String(row.id),
+        filename: String(row.filename),
+        matchingRowCount: null,
+      });
+      groups.set(reason, group);
+    }
+    for (const row of rowMatches.rows) {
+      const reason = "overlapping_rows" as const;
+      const group = groups.get(reason) ?? {
+        reason,
+        totalArtifactCount: Number(row.total_artifact_count),
+        truncated: Number(row.total_artifact_count) > 25,
+        matches: [],
+      };
+      group.matches.push({
+        artifactId: String(row.id),
+        filename: String(row.filename),
+        matchingRowCount: Number(row.matching_row_count),
+      });
+      groups.set(reason, group);
+    }
+    return {
+      artifactId,
+      profile,
+      rowCount: identitySet.rowCount,
+      rowIdentityLimitReached: identitySet.rowIdentityLimitReached,
+      warnings: ["same_checksum", "same_filename", "overlapping_rows"]
+        .map((reason) => groups.get(reason as CsvDuplicateWarningReason))
+        .filter((group): group is CsvDuplicateWarningGroup => Boolean(group)),
+    };
+  }
+
+  private stripeDuplicateRowMatches(
+    artifactId: string,
+    identities: readonly CsvDuplicateRowIdentity[],
+  ) {
+    const references = identities
+      .filter(
+        (
+          identity,
+        ): identity is Extract<
+          CsvDuplicateRowIdentity,
+          { kind: "stripe_reference" }
+        > => identity.kind === "stripe_reference",
+      )
+      .map((identity) => identity.reference);
+    return this.pool.query(
+      `WITH matches AS (
+         SELECT artifact.id, artifact.filename, count(DISTINCT transaction.reference)::integer AS matching_row_count
+         FROM ${this.artifactsTable} artifact
+         JOIN ${this.transactionArtifactsTable} link ON link.source_artifact_id=artifact.id
+         JOIN ${this.transactionsTable} transaction ON transaction.id=link.transaction_id
+         WHERE artifact.id<>$1 AND artifact.artifact_profile='stripe_balance_itemised_csv_v1'
+           AND artifact.state IN ('available','superseded')
+           AND transaction.source_system='stripe' AND transaction.reference=ANY($2::text[])
+         GROUP BY artifact.id, artifact.filename
+       ), ranked AS (
+         SELECT matches.*, count(*) OVER ()::integer AS total_artifact_count,
+           row_number() OVER (ORDER BY matching_row_count DESC, id) AS rank
+         FROM matches
+       )
+       SELECT * FROM ranked WHERE rank<=25 ORDER BY rank`,
+      [artifactId, references],
+    );
+  }
+
+  private commBankDuplicateRowMatches(
+    artifactId: string,
+    identities: readonly CsvDuplicateRowIdentity[],
+  ) {
+    const rows = identities
+      .filter(
+        (
+          identity,
+        ): identity is Extract<
+          CsvDuplicateRowIdentity,
+          { kind: "commbank_row" }
+        > => identity.kind === "commbank_row",
+      )
+      .map((identity) => ({
+        rowIndex: identity.rowIndex,
+        postedDate: identity.postedDate,
+        amountAud: identity.amountAud,
+        description: identity.description,
+        runningBalance: identity.runningBalance,
+      }));
+    return this.pool.query(
+      `WITH requested AS (
+         SELECT * FROM jsonb_to_recordset($2::jsonb) AS row(
+           "rowIndex" integer, "postedDate" date, "amountAud" numeric,
+           description text, "runningBalance" numeric
+         )
+       ), matches AS (
+         SELECT artifact.id, artifact.filename, count(DISTINCT requested."rowIndex")::integer AS matching_row_count
+         FROM requested
+         JOIN ${this.bankTransactionsTable} bank
+           ON bank.posted_date=requested."postedDate"
+           AND bank.amount_aud=requested."amountAud"
+           AND bank.description=requested.description
+           AND bank.metadata->>'runningBalance' ~ '^[+-]?[0-9]+(?:\\.[0-9]+)?$'
+           AND (bank.metadata->>'runningBalance')::numeric=requested."runningBalance"
+         JOIN ${this.bankTransactionArtifactsTable} link ON link.bank_transaction_id=bank.id
+         JOIN ${this.artifactsTable} artifact ON artifact.id=link.source_artifact_id
+         WHERE artifact.id<>$1 AND artifact.artifact_profile='commbank_transaction_history_csv_v1'
+           AND artifact.state IN ('available','superseded')
+         GROUP BY artifact.id, artifact.filename
+       ), ranked AS (
+         SELECT matches.*, count(*) OVER ()::integer AS total_artifact_count,
+           row_number() OVER (ORDER BY matching_row_count DESC, id) AS rank
+         FROM matches
+       )
+       SELECT * FROM ranked WHERE rank<=25 ORDER BY rank`,
+      [artifactId, JSON.stringify(rows)],
+    );
   }
 
   async linkTransactionArtifact(
@@ -987,13 +1214,28 @@ export class FolioRepository implements ArtifactRepository {
     try {
       await client.query("BEGIN");
       const actor = await this.actorById(client, actorId);
-      const artifact = await this.getArtifactWith(client, artifactId);
+      const artifactResult = await client.query(
+        `SELECT * FROM ${this.artifactsTable} WHERE id=$1 FOR UPDATE`,
+        [artifactId],
+      );
+      const artifact = artifactResult.rows[0]
+        ? mapArtifact(artifactResult.rows[0])
+        : null;
       if (
         !artifact ||
         artifactProfileOf(artifact) !== "stripe_balance_itemised_csv_v1" ||
-        artifact.state !== "available"
+        !artifact.versionId ||
+        (artifact.state !== "awaiting_review" && artifact.state !== "available")
       )
-        throw new Error("Available Stripe CSV artifact not found");
+        throw new Error("Reviewable Stripe CSV artifact not found");
+      if (artifact.state === "awaiting_review") {
+        const available = await client.query(
+          `UPDATE ${this.artifactsTable} SET state='available' WHERE id=$1 AND state='awaiting_review' AND version_id=$2`,
+          [artifactId, artifact.versionId],
+        );
+        if (available.rowCount !== 1)
+          throw new Error("Reviewable Stripe CSV artifact not found");
+      }
       let imported = 0;
       for (const row of rows) {
         const classification = classifyStripeReportingCategory(
@@ -1074,9 +1316,9 @@ export class FolioRepository implements ArtifactRepository {
     if (
       !artifact ||
       artifactProfileOf(artifact) !== "stripe_balance_itemised_csv_v1" ||
-      artifact.state !== "available"
+      (artifact.state !== "awaiting_review" && artifact.state !== "available")
     )
-      throw new Error("Available Stripe CSV artifact not found");
+      throw new Error("Reviewable Stripe CSV artifact not found");
     if (rows.length === 0) return [];
 
     const existing = await this.pool.query(
@@ -1149,6 +1391,89 @@ export class FolioRepository implements ArtifactRepository {
     return mapArtifact(result.rows[0]!);
   }
 
+  async createPendingUploadIntent(
+    input: Parameters<ArtifactRepository["createPendingUploadIntent"]>[0],
+  ): ReturnType<ArtifactRepository["createPendingUploadIntent"]> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const credentialResult = await client.query(
+        `SELECT credential.actor_user_id, credential.default_owner_id
+         FROM ${this.mcpCredentialsTable} credential
+         JOIN ${this.usersTable} actor ON actor.id=credential.actor_user_id AND actor.active=true
+         JOIN ${this.usersTable} owner ON owner.id=credential.default_owner_id AND owner.active=true
+         WHERE credential.id=$1 AND credential.revoked_at IS NULL
+           AND 'artifacts:upload'=ANY(credential.scopes)
+         FOR SHARE OF credential, actor, owner`,
+        [input.credentialId],
+      );
+      const credential = credentialResult.rows[0];
+      if (
+        !credential ||
+        String(credential.actor_user_id) !== input.actorId ||
+        String(credential.default_owner_id) !== input.ownerId
+      )
+        throw new Error("Upload credential is not authorized");
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [`${input.credentialId}:${input.requestKey}`],
+      );
+      const existingResult = await client.query(
+        `SELECT intent.payload_sha256 AS intent_payload_sha256,
+           intent.artifact_id AS intent_artifact_id, artifact.*
+         FROM ${this.mcpUploadIntentsTable} intent
+         LEFT JOIN ${this.artifactsTable} artifact ON artifact.id=intent.artifact_id
+         WHERE intent.credential_id=$1 AND intent.request_key=$2`,
+        [input.credentialId, input.requestKey],
+      );
+      const existing = existingResult.rows[0];
+      if (existing) {
+        if (String(existing.intent_payload_sha256) !== input.payloadSha256)
+          throw new ArtifactUploadIdempotencyConflictError();
+        await client.query("COMMIT");
+        if (!existing.id || existing.state !== "pending")
+          return {
+            status: "not_uploadable",
+            artifactId: String(existing.intent_artifact_id),
+            artifactState: existing.state
+              ? (String(existing.state) as ArtifactRecord["state"])
+              : "deleted",
+          };
+        return { status: "replayed", artifact: mapArtifact(existing) };
+      }
+      const artifactResult = await client.query(
+        `INSERT INTO ${this.artifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, original_filename, media_type, byte_size, checksum_sha256)
+         VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9) RETURNING *`,
+        [
+          input.id,
+          input.ownerId,
+          input.actorId,
+          input.artifactProfile,
+          input.objectKey,
+          input.filename,
+          input.mediaType,
+          input.byteSize,
+          input.checksumSha256,
+        ],
+      );
+      await client.query(
+        `INSERT INTO ${this.mcpUploadIntentsTable} (credential_id, request_key, payload_sha256, artifact_id)
+         VALUES ($1,$2,$3,$4)`,
+        [input.credentialId, input.requestKey, input.payloadSha256, input.id],
+      );
+      await client.query("COMMIT");
+      return {
+        status: "created",
+        artifact: mapArtifact(artifactResult.rows[0]!),
+      };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getArtifact(id: string): Promise<ArtifactRecord | null> {
     return this.getArtifactWith(this.pool, id);
   }
@@ -1161,29 +1486,42 @@ export class FolioRepository implements ArtifactRepository {
     if (result.rowCount !== 1) throw new Error("Pending artifact not found");
   }
 
-  async confirmAvailable(id: string, versionId: string): Promise<void> {
+  async confirmAwaitingReview(id: string, versionId: string): Promise<void> {
     const result = await this.pool.query(
-      `UPDATE ${this.artifactsTable} SET state='available', version_id=$2, confirmed_at=now() WHERE id=$1 AND state='pending'`,
+      `UPDATE ${this.artifactsTable} SET state='awaiting_review', version_id=$2, confirmed_at=now() WHERE id=$1 AND state='pending'`,
       [id, versionId],
     );
     if (result.rowCount !== 1) throw new Error("Pending artifact not found");
+  }
+
+  async approveArtifact(
+    id: string,
+    versionId: string,
+  ): Promise<ArtifactRecord> {
+    const result = await this.pool.query(
+      `UPDATE ${this.artifactsTable} artifact SET state='available'
+       WHERE artifact.id=$1 AND artifact.state='awaiting_review' AND artifact.version_id=$2 AND artifact.artifact_profile='manual_invoice_pdf_v1'
+       RETURNING artifact.*`,
+      [id, versionId],
+    );
+    if (!result.rows[0]) throw new Error("Reviewable PDF artifact not found");
+    return mapArtifact(result.rows[0]);
   }
 
   async rejectArtifact(id: string, versionId: string): Promise<ArtifactRecord> {
     const result = await this.pool.query(
       `UPDATE ${this.artifactsTable} artifact SET state='rejected', version_id=coalesce(artifact.version_id, $2), confirmed_at=coalesce(artifact.confirmed_at, now())
        WHERE artifact.id=$1
-         AND artifact.media_type='text/csv'
          AND (
-           (artifact.state='pending' AND artifact.artifact_profile='commbank_transaction_history_csv_v1' AND artifact.version_id IS NULL)
-           OR (artifact.state IN ('available', 'rejected') AND artifact.version_id=$2)
+           (artifact.state='awaiting_review' AND artifact.version_id=$2 AND artifact.media_type IN ('application/pdf', 'text/csv'))
+           OR (artifact.state IN ('available', 'rejected') AND artifact.version_id=$2 AND artifact.media_type='text/csv')
          )
          AND NOT EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} link WHERE link.source_artifact_id=artifact.id)
          AND NOT EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} link WHERE link.source_artifact_id=artifact.id)
        RETURNING artifact.*`,
       [id, versionId],
     );
-    if (!result.rows[0]) throw new Error("Unlinked CSV artifact not found");
+    if (!result.rows[0]) throw new Error("Unlinked review artifact not found");
     return mapArtifact(result.rows[0]);
   }
 

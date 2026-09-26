@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { getCurrentSession } from "../auth/session-server";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
+import { CsvDuplicateWarnings } from "../components/csv-duplicate-warnings";
 import { SourceTabs } from "../components/import-profile-tabs";
 import {
   ManualTransactionForm,
@@ -10,6 +11,7 @@ import {
 } from "../components/manual-transaction-form";
 import type { ManualTransactionServerIssue } from "../domain/manual-transaction";
 import type { StripeImportPreview } from "../domain/stripe-csv";
+import type { CsvDuplicateWarningReport } from "../database/repository";
 import { defaultTaxTreatmentForTransaction } from "../domain/tax";
 import {
   expenseCategorySuggestions,
@@ -17,19 +19,25 @@ import {
   type TransactionRecord,
 } from "../domain/types";
 import {
+  approveArtifact,
   confirmArtifactUpload,
+  discardProposedDraftEvidence,
   findArtifactFilenameMatches,
   getFolioUiConfig,
+  getProposedDraftEvidence,
   getTransaction,
   importStripeCsv,
+  listArtifacts,
   listAvailableInvoiceArtifacts,
   listTransactionFormOptions,
   saveManualTransaction,
   previewStripeCsv,
+  previewArtifactForReview,
   rejectArtifact,
   startArtifactUpload,
   voidTransaction,
 } from "../server/operations";
+import { getCsvDuplicateWarnings } from "../server/bank-operations";
 
 const emptyTransaction: TransactionInput = {
   ownerId: null,
@@ -108,17 +116,33 @@ export const loadManualTransactionRouteData = async (
       uiConfig: null,
       availableArtifacts: null,
       transaction: null,
+      proposedDraftEvidence: null,
     };
-  const [formOptions, uiConfig, availableArtifacts, transaction] =
-    await Promise.all([
-      listTransactionFormOptions(),
-      getFolioUiConfig(),
-      listAvailableInvoiceArtifacts(),
-      transactionId
-        ? getTransaction({ data: { id: transactionId } })
-        : Promise.resolve(null),
-    ]);
-  return { session, formOptions, uiConfig, availableArtifacts, transaction };
+  const [
+    formOptions,
+    uiConfig,
+    availableArtifacts,
+    transaction,
+    proposedDraftEvidence,
+  ] = await Promise.all([
+    listTransactionFormOptions(),
+    getFolioUiConfig(),
+    listAvailableInvoiceArtifacts(),
+    transactionId
+      ? getTransaction({ data: { id: transactionId } })
+      : Promise.resolve(null),
+    transactionId
+      ? getProposedDraftEvidence({ data: { transactionId } })
+      : Promise.resolve(null),
+  ]);
+  return {
+    session,
+    formOptions,
+    uiConfig,
+    availableArtifacts,
+    transaction,
+    proposedDraftEvidence,
+  };
 };
 
 export const loadTransactionWorkflowSession = () => getCurrentSession();
@@ -212,10 +236,12 @@ export const ManualTransactionRoute = ({
   data,
   mode,
   returnTo,
+  reviewReturnTo,
 }: {
   data: ManualRouteData;
   mode: "create" | "edit";
   returnTo: string;
+  reviewReturnTo?: string;
 }) => {
   const router = useRouter();
   const transaction = data.transaction;
@@ -238,7 +264,7 @@ export const ManualTransactionRoute = ({
   );
   const [evidence, setEvidence] = useState<{
     filename: string;
-    status: "selected" | "confirmed" | "attached" | "failed";
+    status: "selected" | "awaiting_review" | "approved" | "attached" | "failed";
   } | null>(
     artifactId
       ? {
@@ -250,6 +276,20 @@ export const ManualTransactionRoute = ({
         }
       : null,
   );
+  const [stagedPdf, setStagedPdf] = useState<{
+    file: File;
+    id: string;
+    approved: boolean;
+  } | null>(null);
+  const [reviewPreviewUrl, setReviewPreviewUrl] = useState<string | null>(null);
+  const [stagedPreviewOpened, setStagedPreviewOpened] = useState(false);
+  const [proposedEvidence, setProposedEvidence] = useState(
+    data.proposedDraftEvidence,
+  );
+  const [proposedPreviewUrl, setProposedPreviewUrl] = useState<string | null>(
+    null,
+  );
+  const [proposedPreviewOpened, setProposedPreviewOpened] = useState(false);
 
   if (
     !data.session.authenticated ||
@@ -286,6 +326,8 @@ export const ManualTransactionRoute = ({
       ...emptyTransaction,
       ownerId: data.session.authenticated ? data.session.user.id : null,
     } as TransactionRecord);
+  const returnHref = reviewReturnTo ?? "/transactions";
+  const returnLabel = reviewReturnTo ? "Reconcile" : "Transactions";
   const uploadEvidence = async (file: File, ownerId: string | null) => {
     setWorkflow({
       stage: "validating",
@@ -326,9 +368,173 @@ export const ManualTransactionRoute = ({
     const confirmed = await confirmArtifactUpload({
       data: { id: started.artifact.id },
     });
-    setArtifactId(confirmed.id);
-    setEvidence({ filename: file.name, status: "confirmed" });
+    setStagedPdf({ file, id: confirmed.id, approved: false });
+    setReviewPreviewUrl(null);
+    setStagedPreviewOpened(false);
+    setEvidence({ filename: file.name, status: "awaiting_review" });
     return confirmed.id;
+  };
+
+  const preparePdfPreview = async () => {
+    if (!stagedPdf || busy) return;
+    setBusy(true);
+    try {
+      const url = await previewArtifactForReview({
+        data: { id: stagedPdf.id },
+      });
+      setReviewPreviewUrl(url);
+      setStagedPreviewOpened(false);
+      setWorkflow({
+        stage: "preview",
+        detail: "Open the PDF preview, then approve the file if it is correct.",
+        artifactId: stagedPdf.id,
+      });
+    } catch (error) {
+      setWorkflow({
+        stage: "error",
+        detail: safeTransactionWorkflowError(
+          error,
+          "PDF preview could not be prepared. Retry before approving.",
+        ),
+        artifactId: stagedPdf.id,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const approveStagedPdf = async () => {
+    if (!stagedPdf || busy || !stagedPreviewOpened) return;
+    setBusy(true);
+    try {
+      await approveArtifact({ data: { id: stagedPdf.id } });
+      setStagedPdf({ ...stagedPdf, approved: true });
+      setArtifactId(stagedPdf.id);
+      setEvidence({ filename: stagedPdf.file.name, status: "approved" });
+      setWorkflow({
+        stage: "preview",
+        detail: "PDF approved. Save the transaction to attach it.",
+        artifactId: stagedPdf.id,
+      });
+    } catch (error) {
+      setWorkflow({
+        stage: "error",
+        detail: safeTransactionWorkflowError(
+          error,
+          "PDF approval failed. The transaction was not saved.",
+        ),
+        artifactId: stagedPdf.id,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refreshProposedEvidence = async () => {
+    if (!transaction || busy) return;
+    setBusy(true);
+    try {
+      const result = await getProposedDraftEvidence({
+        data: { transactionId: transaction.id },
+      });
+      setProposedEvidence(result);
+      setProposedPreviewUrl(null);
+      setProposedPreviewOpened(false);
+      setWorkflow({
+        stage: "preview",
+        detail: "Proposed PDF review state refreshed.",
+        artifactId: result?.artifactId ?? null,
+      });
+    } catch (error) {
+      setWorkflow({
+        stage: "error",
+        detail: safeTransactionWorkflowError(
+          error,
+          "Proposed PDF review state could not be refreshed.",
+        ),
+        artifactId: proposedEvidence?.artifactId ?? null,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const previewProposedEvidence = async () => {
+    if (!proposedEvidence || busy) return;
+    setBusy(true);
+    try {
+      const url = await previewArtifactForReview({
+        data: { id: proposedEvidence.artifactId },
+      });
+      setProposedPreviewUrl(url);
+      setProposedPreviewOpened(false);
+    } catch (error) {
+      setWorkflow({
+        stage: "error",
+        detail: safeTransactionWorkflowError(
+          error,
+          "Proposed PDF preview could not be prepared.",
+        ),
+        artifactId: proposedEvidence.artifactId,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const approveProposedEvidence = async () => {
+    if (!proposedEvidence || !proposedPreviewOpened || busy) return;
+    setBusy(true);
+    try {
+      await approveArtifact({ data: { id: proposedEvidence.artifactId } });
+      setProposedEvidence({ ...proposedEvidence, state: "available" });
+      setWorkflow({
+        stage: "preview",
+        detail: "Proposed PDF approved. Recording this draft will attach it.",
+        artifactId: proposedEvidence.artifactId,
+      });
+    } catch (error) {
+      setWorkflow({
+        stage: "error",
+        detail: safeTransactionWorkflowError(
+          error,
+          "Proposed PDF approval failed. The draft remains unrecorded.",
+        ),
+        artifactId: proposedEvidence.artifactId,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const discardProposedEvidence = async () => {
+    if (!proposedEvidence || !transaction || busy) return;
+    setBusy(true);
+    try {
+      const result = await discardProposedDraftEvidence({
+        data: { transactionId: transaction.id },
+      });
+      setProposedEvidence(result);
+      setProposedPreviewUrl(null);
+      setProposedPreviewOpened(false);
+      setWorkflow({
+        stage: "preview",
+        detail:
+          "Proposed PDF removed from this draft. The source artifact remains in Sources.",
+        artifactId: result?.artifactId ?? null,
+      });
+    } catch (error) {
+      setWorkflow({
+        stage: "error",
+        detail: safeTransactionWorkflowError(
+          error,
+          "Proposed PDF could not be removed from the draft.",
+        ),
+        artifactId: proposedEvidence.artifactId,
+      });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const save = async (submission: ManualTransactionSubmission) => {
@@ -340,18 +546,49 @@ export const ManualTransactionRoute = ({
     let linkedIds = [...submission.artifactIds];
     try {
       if (
-        submission.file instanceof File &&
-        submission.file.size > 0 &&
-        evidence?.status !== "attached" &&
-        evidence?.status !== "confirmed"
+        proposedEvidence &&
+        !proposedEvidence.discardedAt &&
+        (submission.action === "save_recorded" ||
+          submission.action === "restore_recorded")
       ) {
-        confirmedId = await uploadEvidence(
-          submission.file,
-          submission.transaction.ownerId,
-        );
-        linkedIds = [...new Set([...linkedIds, confirmedId])];
-      } else if (artifactId)
-        linkedIds = [...new Set([...linkedIds, artifactId])];
+        if (proposedEvidence.state !== "available") {
+          setWorkflow({
+            stage: "error",
+            detail:
+              "Approve or remove the proposed PDF before recording this draft.",
+            artifactId: proposedEvidence.artifactId,
+          });
+          return;
+        }
+        linkedIds = [...new Set([...linkedIds, proposedEvidence.artifactId])];
+      }
+      if (submission.file instanceof File && submission.file.size > 0) {
+        if (stagedPdf?.file !== submission.file) {
+          confirmedId = await uploadEvidence(
+            submission.file,
+            submission.transaction.ownerId,
+          );
+          setWorkflow({
+            stage: "preview",
+            detail:
+              "PDF uploaded and awaiting review. Preview and approve it before saving the transaction.",
+            artifactId: confirmedId,
+          });
+          return;
+        }
+        if (!stagedPdf.approved) {
+          setWorkflow({
+            stage: "preview",
+            detail:
+              "Preview and approve this PDF before saving the transaction.",
+            artifactId: stagedPdf.id,
+          });
+          return;
+        }
+        linkedIds = [...new Set([...linkedIds, stagedPdf.id])];
+      } else if (stagedPdf?.approved)
+        linkedIds = [...new Set([...linkedIds, stagedPdf.id])];
+      else if (artifactId) linkedIds = [...new Set([...linkedIds, artifactId])];
       setWorkflow({
         stage: "saving",
         detail: "Saving transaction…",
@@ -381,8 +618,9 @@ export const ManualTransactionRoute = ({
       setCompletedTransactionId(result.transaction.id);
       setWorkflow({
         stage: "complete",
-        detail:
-          "Transaction saved. Return to the transaction list to review the refreshed record.",
+        detail: reviewReturnTo
+          ? "Transaction saved. Return to Reconcile to review the selected bank row. Recording did not match it."
+          : "Transaction saved. Return to the transaction list to review the refreshed record.",
         artifactId: confirmedId ?? artifactId,
       });
       try {
@@ -417,7 +655,8 @@ export const ManualTransactionRoute = ({
       if (
         submission.file instanceof File &&
         submission.file.size > 0 &&
-        !confirmedId
+        !confirmedId &&
+        stagedPdf?.file !== submission.file
       )
         setEvidence({ filename: submission.file.name, status: "failed" });
     } finally {
@@ -502,9 +741,9 @@ export const ManualTransactionRoute = ({
     <main className="transaction-workflow-page">
       <a
         className="transaction-button-link transaction-button-link--secondary"
-        href="/transactions"
+        href={returnHref}
       >
-        ← Transactions
+        ← {returnLabel}
       </a>
       <header>
         <p className="eyebrow">Transactions</p>
@@ -519,6 +758,71 @@ export const ManualTransactionRoute = ({
             : "Correct this manual record, its evidence, or its state."}
         </p>
       </header>
+      {proposedEvidence && !proposedEvidence.discardedAt && (
+        <section
+          className="transaction-proposed-evidence"
+          aria-label="Proposed PDF evidence"
+        >
+          <h2>Proposed PDF evidence</h2>
+          <p>
+            {proposedEvidence.filename} ·{" "}
+            {proposedEvidence.state.replaceAll("_", " ")}
+          </p>
+          {proposedEvidence.note && <p>{proposedEvidence.note}</p>}
+          <p>
+            {proposedEvidence.state === "available"
+              ? "This approved PDF will be attached when the draft is recorded."
+              : "Approve this PDF or remove the proposal before recording the draft."}
+          </p>
+          <div className="actions">
+            {proposedEvidence.state === "awaiting_review" && (
+              <>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={busy}
+                  onClick={() => void previewProposedEvidence()}
+                >
+                  Prepare PDF preview
+                </button>
+                {proposedPreviewUrl && (
+                  <a
+                    href={proposedPreviewUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setProposedPreviewOpened(true)}
+                  >
+                    Open PDF preview
+                  </a>
+                )}
+                <button
+                  type="button"
+                  disabled={busy || !proposedPreviewOpened}
+                  onClick={() => void approveProposedEvidence()}
+                >
+                  Approve PDF
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy}
+              onClick={() => void refreshProposedEvidence()}
+            >
+              Refresh PDF status
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy}
+              onClick={() => void discardProposedEvidence()}
+            >
+              Remove proposed PDF
+            </button>
+          </div>
+        </section>
+      )}
       <ManualTransactionForm
         transaction={{
           ...current,
@@ -544,22 +848,58 @@ export const ManualTransactionRoute = ({
         }
         availableArtifacts={data.availableArtifacts}
         evidenceStatus={
-          <p id="pdf-evidence-status" role="status" aria-live="polite">
-            {evidence
-              ? `PDF filename: ${evidence.filename}. Status: ${evidence.status === "attached" ? "already attached" : evidence.status}.`
-              : "No PDF selected or attached."}
-          </p>
+          <div>
+            <p id="pdf-evidence-status" role="status" aria-live="polite">
+              {evidence
+                ? `PDF filename: ${evidence.filename}. Status: ${evidence.status === "attached" ? "already attached" : evidence.status.replaceAll("_", " ")}.`
+                : "No PDF selected or attached."}
+            </p>
+            {stagedPdf && !stagedPdf.approved && (
+              <div className="actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={busy}
+                  onClick={() => void preparePdfPreview()}
+                >
+                  Prepare PDF preview
+                </button>
+                {reviewPreviewUrl && (
+                  <a
+                    href={reviewPreviewUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setStagedPreviewOpened(true)}
+                  >
+                    Open PDF preview
+                  </a>
+                )}
+                <button
+                  type="button"
+                  disabled={busy || !stagedPreviewOpened}
+                  onClick={() => void approveStagedPdf()}
+                >
+                  Approve PDF
+                </button>
+              </div>
+            )}
+          </div>
         }
         busy={busy}
         serverIssues={issues}
-        onEvidenceChange={(file) =>
-          setEvidence(file ? { filename: file.name, status: "selected" } : null)
-        }
+        onEvidenceChange={(file) => {
+          setEvidence(
+            file ? { filename: file.name, status: "selected" } : null,
+          );
+          if (stagedPdf?.file !== file) {
+            setStagedPdf(null);
+            setReviewPreviewUrl(null);
+            setStagedPreviewOpened(false);
+          }
+        }}
         onSubmit={save}
         onCancel={
-          mode === "edit"
-            ? () => window.location.assign("/transactions")
-            : undefined
+          mode === "edit" ? () => window.location.assign(returnHref) : undefined
         }
       />
       <WorkflowStatus
@@ -599,9 +939,9 @@ export const ManualTransactionRoute = ({
         <p className="transaction-workflow-page__return">
           <a
             className="transaction-button-link transaction-button-link--secondary"
-            href="/transactions"
+            href={returnHref}
           >
-            Return to Transactions
+            Return to {returnLabel}
           </a>
         </p>
       )}
@@ -625,11 +965,14 @@ type StripeQueueStatus =
 
 interface StripeQueueItem {
   id: number;
-  file: File;
+  file: File | null;
+  filename: string;
+  byteSize: number;
   status: StripeQueueStatus;
   decision: "accepted" | "rejected" | null;
   artifactId: string | null;
   uploadConfirmed: boolean;
+  canRetryConfirmation: boolean;
   preview: StripeImportPreview | null;
   previewStale: boolean;
   canRetryPreview: boolean;
@@ -638,6 +981,8 @@ interface StripeQueueItem {
   errorDetail: string | null;
   filenameMatchCount: number | null;
   filenameMatchCheckFailed: boolean;
+  duplicateWarnings: CsvDuplicateWarningReport | null;
+  duplicateWarningCheckFailed: boolean;
 }
 
 const stripeFileSelectionError = (file: File): string | null => {
@@ -665,7 +1010,7 @@ const stripeQueueStatusText = (item: StripeQueueItem): string => {
   if (item.status === "importing") return "Importing atomically…";
   if (item.status === "imported")
     return item.importedCount === 0
-      ? "Already imported — no new rows"
+      ? "Import complete — no new rows"
       : "Import complete";
   return "Needs attention";
 };
@@ -683,8 +1028,71 @@ export const StripeImportRoute = ({
   const [reviewingItemId, setReviewingItemId] = useState<number | null>(null);
   const [busyItemId, setBusyItemId] = useState<number | null>(null);
   const [queueNotice, setQueueNotice] = useState<string | null>(null);
+  const [savedQueueOffset, setSavedQueueOffset] = useState(0);
+  const [savedQueueTotal, setSavedQueueTotal] = useState(0);
+  const [loadingSavedQueue, setLoadingSavedQueue] = useState(false);
   const nextQueueId = useRef(0);
   const inFlight = useRef(false);
+
+  const loadSavedQueue = async (offset: number) => {
+    setLoadingSavedQueue(true);
+    try {
+      const result = await listArtifacts({
+        data: {
+          search: "",
+          profile: "stripe_balance_itemised_csv_v1",
+          state: "awaiting_review",
+          from: null,
+          to: null,
+          linkage: "all",
+          limit: 100,
+          offset,
+        },
+      });
+      setQueueItems((items) => {
+        const existingIds = new Set(items.map((item) => item.artifactId));
+        const restored = result.rows
+          .filter((row) => !existingIds.has(row.id))
+          .map(
+            (row): StripeQueueItem => ({
+              id: nextQueueId.current++,
+              file: null,
+              filename: row.filename,
+              byteSize: Number(row.byteSize),
+              status: "preview",
+              decision: null,
+              artifactId: row.id,
+              uploadConfirmed: true,
+              canRetryConfirmation: false,
+              preview: null,
+              previewStale: false,
+              canRetryPreview: true,
+              sourceInvalid: false,
+              importedCount: null,
+              errorDetail: null,
+              filenameMatchCount: 0,
+              filenameMatchCheckFailed: false,
+              duplicateWarnings: null,
+              duplicateWarningCheckFailed: false,
+            }),
+          );
+        return [...items, ...restored];
+      });
+      setSavedQueueOffset(offset + result.rows.length);
+      setSavedQueueTotal(result.total);
+    } catch {
+      setQueueNotice(
+        "Saved Stripe files could not be loaded. Retry from the file library.",
+      );
+    } finally {
+      setLoadingSavedQueue(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!session.authenticated) return;
+    void loadSavedQueue(0);
+  }, [session.authenticated]);
   if (!session.authenticated) {
     const authenticationRequired = (
       <TransactionAuthenticationRequired
@@ -700,6 +1108,20 @@ export const StripeImportRoute = ({
       items.map((item) => (item.id === id ? { ...item, ...changes } : item)),
     );
 
+  const checkDuplicateWarnings = async (id: number, artifactId: string) => {
+    try {
+      const duplicateWarnings = await getCsvDuplicateWarnings({
+        data: { artifactId },
+      });
+      updateQueueItem(id, {
+        duplicateWarnings,
+        duplicateWarningCheckFailed: false,
+      });
+    } catch {
+      updateQueueItem(id, { duplicateWarningCheckFailed: true });
+    }
+  };
+
   const addFiles = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (selectedFiles.length === 0) return;
@@ -708,10 +1130,13 @@ export const StripeImportRoute = ({
       return {
         id: nextQueueId.current++,
         file,
+        filename: file.name,
+        byteSize: file.size,
         status: errorDetail ? ("failed" as const) : ("pending" as const),
         decision: null,
         artifactId: null,
         uploadConfirmed: false,
+        canRetryConfirmation: false,
         preview: null,
         previewStale: false,
         canRetryPreview: false,
@@ -720,6 +1145,8 @@ export const StripeImportRoute = ({
         errorDetail,
         filenameMatchCount: null,
         filenameMatchCheckFailed: false,
+        duplicateWarnings: null,
+        duplicateWarningCheckFailed: false,
       } satisfies StripeQueueItem;
     });
     setQueueItems((items) => [...items, ...addedItems]);
@@ -762,6 +1189,7 @@ export const StripeImportRoute = ({
     const item = queueItems.find((candidate) => candidate.id === id);
     if (
       !item ||
+      !item.file ||
       item.sourceInvalid ||
       item.uploadConfirmed ||
       item.decision !== null ||
@@ -776,6 +1204,7 @@ export const StripeImportRoute = ({
       status: "validating",
       artifactId: null,
       uploadConfirmed: false,
+      canRetryConfirmation: false,
       preview: null,
       previewStale: false,
       canRetryPreview: false,
@@ -790,9 +1219,9 @@ export const StripeImportRoute = ({
         data: {
           ownerId: null,
           artifactProfile: "stripe_balance_itemised_csv_v1",
-          filename: item.file.name,
+          filename: item.filename,
           mediaType: "text/csv",
-          byteSize: item.file.size,
+          byteSize: item.byteSize,
           checksumSha256,
         },
       });
@@ -816,6 +1245,7 @@ export const StripeImportRoute = ({
       updateQueueItem(id, {
         status: "previewing",
         uploadConfirmed: true,
+        canRetryConfirmation: false,
         canRetryPreview: true,
       });
       const preview = await previewStripeCsv({
@@ -826,11 +1256,13 @@ export const StripeImportRoute = ({
         decision: null,
         artifactId,
         uploadConfirmed: true,
+        canRetryConfirmation: false,
         preview,
         previewStale: false,
         canRetryPreview: true,
         errorDetail: null,
       });
+      void checkDuplicateWarnings(id, artifactId);
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : "";
       const failure = safeTransactionWorkflowError(
@@ -853,20 +1285,93 @@ export const StripeImportRoute = ({
           ? "Unsupported Stripe All activity export. Export the itemised Balance change from activity CSV from Reporting > Balance Summary Reports."
           : "This CSV is malformed or does not match the Stripe Balance Summary itemised format. Correct the source file and add it again."
         : uploadConfirmed
-          ? `${failure} The confirmed artifact is available; retry its preview without uploading again.`
+          ? `${failure} The validated artifact awaits review; retry its preview without uploading again.`
           : confirmationAttempted
-            ? `${failure} The artifact may be pending or confirmed, so this screen will not claim it is reusable. Choose the source file again.`
+            ? `${failure} Retry confirmation for this same uploaded artifact before previewing it.`
             : `${failure} The artifact is not confirmed and cannot be previewed. Retry this file or choose the source again.`;
       updateQueueItem(id, {
         status: "failed",
         decision: null,
         artifactId,
         uploadConfirmed,
+        canRetryConfirmation: confirmationAttempted && !uploadConfirmed,
         preview: null,
         previewStale: false,
         canRetryPreview: uploadConfirmed && !invalidStripeCsv,
         sourceInvalid,
         errorDetail,
+      });
+    } finally {
+      inFlight.current = false;
+      setBusyItemId(null);
+    }
+  };
+
+  const retryConfirmation = async (id: number) => {
+    const item = queueItems.find((candidate) => candidate.id === id);
+    if (
+      !item?.artifactId ||
+      !item.canRetryConfirmation ||
+      item.uploadConfirmed ||
+      inFlight.current
+    )
+      return;
+    inFlight.current = true;
+    setBusyItemId(id);
+    setReviewingItemId(id);
+    setQueueNotice(null);
+    updateQueueItem(id, { status: "confirming", errorDetail: null });
+    let confirmed = false;
+    try {
+      await confirmArtifactUpload({ data: { id: item.artifactId } });
+      confirmed = true;
+      updateQueueItem(id, {
+        status: "previewing",
+        uploadConfirmed: true,
+        canRetryConfirmation: false,
+        canRetryPreview: true,
+      });
+      const preview = await previewStripeCsv({
+        data: { artifactId: item.artifactId, page: 1 },
+      });
+      updateQueueItem(id, {
+        status: "preview",
+        uploadConfirmed: true,
+        canRetryConfirmation: false,
+        canRetryPreview: true,
+        preview,
+        previewStale: false,
+        errorDetail: null,
+      });
+      void checkDuplicateWarnings(id, item.artifactId);
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : "";
+      const failure = safeTransactionWorkflowError(
+        error,
+        confirmed
+          ? "The confirmed Stripe CSV preview could not be loaded."
+          : "Stripe upload confirmation could not be verified.",
+      );
+      const sourceInvalid =
+        confirmed &&
+        (rawMessage.includes("STRIPE_CSV_INVALID") ||
+          failure.includes("STRIPE_CSV_INVALID"));
+      const unsupportedReport =
+        rawMessage.includes("Stripe All activity export") ||
+        failure.includes("Stripe All activity export");
+      updateQueueItem(id, {
+        status: "failed",
+        uploadConfirmed: confirmed,
+        canRetryConfirmation: !confirmed,
+        canRetryPreview: confirmed && !sourceInvalid,
+        sourceInvalid,
+        errorDetail: sourceInvalid
+          ? unsupportedReport
+            ? "Unsupported Stripe All activity export. Export the itemised Balance change from activity CSV from Reporting > Balance Summary Reports."
+            : "This CSV is malformed or does not match the Stripe Balance Summary itemised format. Correct the source file and add it again."
+          : confirmed
+            ? `${failure} Retry preview without uploading again.`
+            : `${failure} Retry confirmation for this same uploaded artifact.`,
       });
     } finally {
       inFlight.current = false;
@@ -893,6 +1398,7 @@ export const StripeImportRoute = ({
         canRetryPreview: true,
         errorDetail: null,
       });
+      void checkDuplicateWarnings(id, item.artifactId);
     } catch (error) {
       const failure = safeTransactionWorkflowError(
         error,
@@ -902,7 +1408,7 @@ export const StripeImportRoute = ({
         status: "failed",
         previewStale: true,
         canRetryPreview: true,
-        errorDetail: `${failure} The confirmed artifact remains available; retry its preview without uploading again.`,
+        errorDetail: `${failure} The validated artifact still awaits review; retry its preview without uploading again.`,
       });
     } finally {
       inFlight.current = false;
@@ -927,7 +1433,7 @@ export const StripeImportRoute = ({
       errorDetail: null,
     });
     setQueueNotice(
-      `${item.file.name} was added to the batch. No transactions have been imported.`,
+      `${item.filename} was added to the batch. No transactions have been imported.`,
     );
   };
 
@@ -957,7 +1463,7 @@ export const StripeImportRoute = ({
       });
       if (reviewingItemId === id) setReviewingItemId(null);
       setQueueNotice(
-        `${item.file.name} was rejected and remains visible in the queue.`,
+        `${item.filename} was rejected and remains visible in the queue.`,
       );
     } catch (error) {
       const failure = safeTransactionWorkflowError(
@@ -973,7 +1479,7 @@ export const StripeImportRoute = ({
               : "failed",
         errorDetail: item.errorDetail
           ? `${item.errorDetail} Rejection failed: ${failure}.`
-          : `${failure} The file remains available for review; rejection was not confirmed.`,
+          : `${failure} The file still awaits review; rejection was not confirmed.`,
       });
     } finally {
       inFlight.current = false;
@@ -1027,15 +1533,6 @@ export const StripeImportRoute = ({
             filesNeedingReview += 1;
             continue;
           }
-          if (freshPreview.willImportCount === 0) {
-            updateQueueItem(item.id, {
-              status: "imported",
-              importedCount: 0,
-              errorDetail: null,
-            });
-            completedFiles += 1;
-            continue;
-          }
           const count = await importStripeCsv({
             data: { artifactId: item.artifactId! },
           });
@@ -1051,7 +1548,7 @@ export const StripeImportRoute = ({
         } catch (error) {
           const failure = safeTransactionWorkflowError(
             error,
-            "Stripe batch import failed. The archived CSV remains available for review.",
+            "Stripe batch import failed. The archived CSV still awaits review.",
           );
           const outcomeUnknown =
             /\bDB_OUTCOME_UNKNOWN\b/.test(failure) ||
@@ -1105,7 +1602,7 @@ export const StripeImportRoute = ({
     if (reviewingItemId === null || inFlight.current) return;
     setReviewingItemId(null);
     setQueueNotice(
-      "Preview closed. No import was started. The confirmed CSV remains in the queue.",
+      "Preview closed. No import was started. The validated CSV remains in the queue.",
     );
   };
 
@@ -1208,38 +1705,53 @@ export const StripeImportRoute = ({
             {queueItems.map((item) => {
               const canRemove =
                 !item.uploadConfirmed &&
+                !item.canRetryConfirmation &&
                 (item.status === "pending" || item.status === "failed");
               const canUpload =
                 item.status === "pending" ||
                 (item.status === "failed" &&
                   !item.uploadConfirmed &&
+                  !item.canRetryConfirmation &&
                   !item.sourceInvalid);
+              const canRetryConfirmation =
+                item.status === "failed" &&
+                !item.uploadConfirmed &&
+                item.canRetryConfirmation &&
+                item.artifactId !== null;
               const canRetryPreview =
                 item.status === "failed" &&
                 item.uploadConfirmed &&
                 item.canRetryPreview &&
                 !item.preview &&
                 item.decision !== "rejected";
+              const canLoadSavedPreview =
+                item.status === "preview" &&
+                item.uploadConfirmed &&
+                !item.preview;
               const canReviewPreview =
                 item.preview !== null &&
                 item.status !== "imported" &&
                 item.status !== "rejected" &&
                 item.status !== "rejecting" &&
                 item.id !== reviewingItemId;
-              const actionLabel = canUpload
-                ? item.status === "pending"
-                  ? `Upload and preview ${item.file.name}`
-                  : `Retry upload ${item.file.name}`
-                : canRetryPreview
-                  ? `Retry preview ${item.file.name}`
-                  : canReviewPreview &&
-                      (item.previewStale ||
-                        item.status === "failed" ||
-                        (item.preview?.conflictCount ?? 0) > 0)
-                    ? `Refresh preview for ${item.file.name}`
-                    : canReviewPreview
-                      ? `Review preview for ${item.file.name}`
-                      : null;
+              const actionLabel = canRetryConfirmation
+                ? `Retry confirmation for ${item.filename}`
+                : canUpload
+                  ? item.status === "pending"
+                    ? `Upload and preview ${item.filename}`
+                    : `Retry upload ${item.filename}`
+                  : canRetryPreview
+                    ? `Retry preview ${item.filename}`
+                    : canLoadSavedPreview
+                      ? `Load preview for ${item.filename}`
+                      : canReviewPreview &&
+                          (item.previewStale ||
+                            item.status === "failed" ||
+                            (item.preview?.conflictCount ?? 0) > 0)
+                        ? `Refresh preview for ${item.filename}`
+                        : canReviewPreview
+                          ? `Review preview for ${item.filename}`
+                          : null;
               const canReject =
                 item.uploadConfirmed &&
                 item.status !== "imported" &&
@@ -1253,9 +1765,9 @@ export const StripeImportRoute = ({
                   className={`stripe-import-queue__item stripe-import-queue__item--${item.status}`}
                 >
                   <div className="stripe-import-queue__file">
-                    <strong>{item.file.name}</strong>
+                    <strong>{item.filename}</strong>
                     <span>
-                      {(item.file.size / 1024).toLocaleString(undefined, {
+                      {(item.byteSize / 1024).toLocaleString(undefined, {
                         maximumFractionDigits: 1,
                       })}{" "}
                       KB
@@ -1286,7 +1798,14 @@ export const StripeImportRoute = ({
                       className="artifact-filename-match-warning"
                       role="status"
                     >
-                      Could not check this filename; upload remains available.
+                      Could not check this filename; upload remains possible.
+                    </p>
+                  )}
+                  <CsvDuplicateWarnings report={item.duplicateWarnings} />
+                  {item.duplicateWarningCheckFailed && (
+                    <p className="artifact-duplicate-warning" role="status">
+                      Could not check duplicate CSV content; review remains
+                      possible.
                     </p>
                   )}
                   <p
@@ -1318,12 +1837,19 @@ export const StripeImportRoute = ({
                       <button
                         type="button"
                         className={
-                          canUpload || canRetryPreview ? undefined : "secondary"
+                          canUpload ||
+                          canRetryConfirmation ||
+                          canRetryPreview ||
+                          canLoadSavedPreview
+                            ? undefined
+                            : "secondary"
                         }
                         disabled={busy}
                         onClick={() => {
-                          if (canUpload) void uploadAndPreview(item.id);
-                          else if (canRetryPreview)
+                          if (canRetryConfirmation)
+                            void retryConfirmation(item.id);
+                          else if (canUpload) void uploadAndPreview(item.id);
+                          else if (canRetryPreview || canLoadSavedPreview)
                             void loadConfirmedPreview(item.id, 1);
                           else if (
                             item.previewStale ||
@@ -1344,7 +1870,7 @@ export const StripeImportRoute = ({
                         disabled={busy}
                         onClick={() => void rejectFile(item.id)}
                       >
-                        Reject {item.file.name}
+                        Reject {item.filename}
                       </button>
                     )}
                     {canRemove && (
@@ -1354,7 +1880,7 @@ export const StripeImportRoute = ({
                         disabled={busy}
                         onClick={() => removeQueueItem(item.id)}
                       >
-                        Remove {item.file.name}
+                        Remove {item.filename}
                       </button>
                     )}
                     {item.status === "imported" && (
@@ -1370,6 +1896,18 @@ export const StripeImportRoute = ({
               );
             })}
           </ol>
+        )}
+        {savedQueueOffset < savedQueueTotal && (
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy || loadingSavedQueue}
+            onClick={() => void loadSavedQueue(savedQueueOffset)}
+          >
+            {loadingSavedQueue
+              ? "Loading saved files…"
+              : "Load more saved files"}
+          </button>
         )}
       </section>
       {queueNotice && (
@@ -1414,7 +1952,7 @@ export const StripeImportRoute = ({
               {acceptedItems.map((item) => (
                 <li key={item.id} className="stripe-import-batch__item">
                   <div className="stripe-import-queue__file">
-                    <strong>{item.file.name}</strong>
+                    <strong>{item.filename}</strong>
                     <span>{stripeQueueStatusText(item)}</span>
                   </div>
                   {item.preview ? (
@@ -1459,8 +1997,8 @@ export const StripeImportRoute = ({
                         item.status === "failed" ||
                         !item.preview ||
                         item.preview.conflictCount > 0
-                          ? `Refresh preview for ${item.file.name}`
-                          : `Review preview for ${item.file.name}`}
+                          ? `Refresh preview for ${item.filename}`
+                          : `Review preview for ${item.filename}`}
                       </button>
                     )}
                     {item.status !== "imported" && (
@@ -1470,7 +2008,7 @@ export const StripeImportRoute = ({
                         disabled={busy}
                         onClick={() => void rejectFile(item.id)}
                       >
-                        Reject {item.file.name}
+                        Reject {item.filename}
                       </button>
                     )}
                   </div>
@@ -1505,10 +2043,10 @@ export const StripeImportRoute = ({
             <div>
               <p className="eyebrow">File preview</p>
               <h2 id="stripe-preview-heading">
-                Review {reviewingItem.file.name}
+                Review {reviewingItem.filename}
               </h2>
               <p>
-                {reviewingItem.file.name} contains {preview.totalCount} rows:{" "}
+                {reviewingItem.filename} contains {preview.totalCount} rows:{" "}
                 {preview.willImportCount} new, {preview.alreadyImportedCount}{" "}
                 already imported, and {preview.conflictCount} conflicts.
               </p>

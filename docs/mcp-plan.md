@@ -1,6 +1,12 @@
 # Local MCP-assisted draft workflow
 
-Status: design revision, 26 September 2026. No MCP implementation has started.
+Status: implemented for synthetic functional verification, 26 September 2026;
+local operator rollout and live PostgreSQL migration verification remain.
+Artifact review, durable CSV intake, scoped loopback MCP tools, proposal
+persistence, and Reconcile suggestions are integrated. The synthetic suite
+passed on 26 September 2026 (559 tests passed, one skipped); typecheck and
+lint passed. No browser E2E, live PostgreSQL, or real Codex-to-Folio smoke test
+was run, as requested.
 The user rejected a separate proposal inbox and first-class AI/MCP navigation.
 The existing Reconcile suggestions area should surface draft transactions and
 suggested matches for the selected bank row. A short note can explain a
@@ -29,9 +35,9 @@ direct report effect.
 This is a change from the earlier proposal-only storage design: an MCP-created
 draft is a real Folio transaction, but it is not a recorded financial movement.
 Folio already excludes drafts from reports and its exact signed-AUD candidate
-query currently includes recorded manual transactions only
+query includes recorded manual transactions only
 ([report effects](../src/domain/reports.ts),
-[candidate query](../src/database/bank-repository.ts)). Reconcile will need a
+[candidate query](../src/database/bank-repository.ts)). Reconcile uses a
 separate query for draft suggestions tied to the selected bank row. A draft
 must not be silently promoted or matched by an MCP call.
 
@@ -213,6 +219,30 @@ sessions; verify the selected SDK and installed Codex client together before
 claiming compatibility ([transport specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http),
 [TypeScript SDK guidance](https://ts.sdk.modelcontextprotocol.io/v2/migration/support-2026-07-28)).
 
+### Local operator setup (not yet smoke-tested)
+
+Apply migrations 0010–0012, provision an active dedicated MCP actor distinct
+from the permitted default owner and administrator, then issue a restricted
+credential with `src/database/manage-mcp-credential.ts`. The command displays
+the bearer token once; keep it outside the repository. Start the endpoint with
+`pnpm mcp:start`; it binds `127.0.0.1:4765/mcp` and requires the local Folio
+database and artifact storage configuration. Codex must run on the same host
+to reach that loopback address. A user-level Codex configuration can use:
+
+```toml
+[mcp_servers.folio]
+url = "http://127.0.0.1:4765/mcp"
+bearer_token_env_var = "FOLIO_MCP_TOKEN"
+```
+
+Set the named token variable only in the local Codex process environment;
+never put the token value in this file or project configuration. Codex's
+[MCP guidance](https://learn.chatgpt.com/docs/extend/mcp) and
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+document the Streamable HTTP URL and bearer-token setting. This is a setup
+recipe, not a verified live connection: migration execution, credential
+issuance, Codex discovery, and an upload/draft smoke test are deferred.
+
 ## Artifact access and upload
 
 The first slice includes artifact upload and metadata discovery. This replaces
@@ -231,16 +261,17 @@ The existing upload service creates a pending artifact and a short-lived,
 checksum-bound storage PUT URL; confirmation verifies object metadata and its
 immutable version ([artifact service](../src/documents/service.ts)). A direct
 binary upload argument in MCP would inflate large files and couple the server
-to the client's filesystem. The proposed contract is therefore
+to the client's filesystem. The implemented contract is therefore
 `begin_artifact_upload` → ordinary authenticated PUT to the returned upload URL
 → `confirm_artifact_upload`. This is a stateless workflow; the artifact ID is
 the durable hand-off between calls. Confirm must be idempotent or report an
 unambiguous already-confirmed outcome after retries. The upload URL is a
 temporary write capability, never a read capability.
 
-The existing generic confirmation rejects bank activity profiles, which need
-profile-specific import validation. The MCP adapter must not bypass that
-boundary. A stored CommBank CSV is not automatically an imported bank row and
+Generic confirmation now places the supported bank activity profile in
+`awaiting_review`; profile-specific import validation remains a separate
+human action. The MCP adapter must not bypass that boundary. A stored
+CommBank CSV is not automatically an imported bank row and
 a stored Stripe CSV is not automatically a recorded transaction. For a CSV,
 confirmation verifies the upload and queues the artifact for per-file preview,
 Add to batch or Reject, combined batch review, and human Confirm import in
@@ -248,9 +279,8 @@ Sources → Imports. The imported rows or transactions are created only by that
 last human action. A malformed CSV remains visibly rejectable. Invoice/evidence
 PDFs also await explicit human review before becoming available evidence; PDF
 approval creates no transaction. The same state transitions apply to MCP and
-UI uploads. A distinct post-upload `awaiting_review` state is the proposed
-design; the current `pending` state alone cannot distinguish an incomplete
-PUT from a validated file waiting for a reviewer.
+UI uploads. The distinct post-upload `awaiting_review` state distinguishes an
+incomplete PUT from a validated file waiting for a reviewer.
 
 Both Stripe and CommBank CSV review must show non-blocking duplicate warnings
 for MCP and UI uploads. Warnings should identify the matching artifact or
@@ -262,17 +292,14 @@ duplicate/conflict enforcement: a reviewer may inspect a false-positive
 warning, but cannot override a genuine duplicate into a second financial
 record.
 
-This requires a durable intake hand-off: the current Stripe and CommBank batch
-queues are held in browser component state, so an MCP-created artifact will
-not appear in an operator's queue without new persisted review state or a
-server-derived review listing. The first slice must add that bridge and let
-the existing per-file preview/admission UI open an uploaded artifact by ID.
+The durable intake hand-off uses persisted artifact state and a server-derived
+review listing; the Stripe and CommBank batch choices remain browser state.
+The per-file preview/admission UI can open a validated upload by artifact ID.
 Validated uploads persist in `awaiting_review` and reappear after reload;
 `Add to batch` remains a temporary browser selection that resets on reload.
 No persistent batch ID or saved selection is required in this slice.
-For CommBank, `pending` currently persists until `confirmBankImport`; for
-Stripe, generic confirmation produces `available` before preview. Treating
-either artifact state alone as proof of import approval would be incorrect
+Import approval remains distinct from upload confirmation. Treating
+`awaiting_review` as proof of import approval would be incorrect
 ([CommBank operations](../src/server/bank-operations.ts),
 [Stripe import route](../src/routes/-transaction-workflow.tsx)).
 
@@ -344,14 +371,14 @@ the existing Folio match action, not an MCP-created reconciliation.
 4. Reconcile UI tests: draft/match suggestions for the intended bank row only,
    keyboard/narrow-screen review, stale state, edit return path, and no
    implicit save or match.
-5. PostgreSQL workflow tests: MCP draft → human edit/record → candidate appears
+5. Deferred live PostgreSQL workflow tests: MCP draft → human edit/record → candidate appears
    → human match; retries do not duplicate drafts, recording does not match,
    and stale or amount-mismatched rows remain unresolved. A pre-import
    CommBank artifact-and-row locator resolves only after import and does not
    match automatically; a rejected or missing row leaves the draft unlinked.
    Credential-bound ownership cannot be changed by Codex and human owner
    changes are attributed to the reviewer.
-6. Local end-to-end smoke: submit one synthetic draft and one existing-match
+6. Deferred local end-to-end smoke: submit one synthetic draft and one existing-match
    suggestion, record and match the draft, leave another draft unrecorded,
    and verify the ordinary transaction and bank views.
 

@@ -9,9 +9,12 @@ import { z } from "zod";
 import { artifactProfiles, artifactProfileSchema } from "../artifacts/profiles";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
 import {
+  approveArtifact,
   deleteArtifact,
   downloadArtifact,
   listArtifacts,
+  previewArtifactForReview,
+  rejectArtifact,
 } from "../server/operations";
 import artifactsCss from "../styles/artifacts.css?url";
 
@@ -19,6 +22,7 @@ export const artifactPageSize = 25;
 
 const artifactStateSchema = z.enum([
   "pending",
+  "awaiting_review",
   "available",
   "superseded",
   "abandoned",
@@ -84,6 +88,13 @@ export const artifactPagination = (total: number, requestedPage: number) => {
 export const isArtifactDownloadable = (state: string): boolean =>
   state === "available";
 
+export const isArtifactReviewablePdf = (artifact: {
+  state: string;
+  mediaType: string;
+}): boolean =>
+  artifact.state === "awaiting_review" &&
+  artifact.mediaType === "application/pdf";
+
 export const isArtifactDeletable = (artifact: {
   transactionCount: number;
   bankRowCount: number;
@@ -146,6 +157,13 @@ function ArtifactLibraryPage() {
     tone: "status" | "error";
   } | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [reviewActivity, setReviewActivity] = useState<{
+    id: string;
+    action: "preview" | "approve" | "reject";
+  } | null>(null);
+  const [preview, setPreview] = useState<{ id: string; url: string } | null>(
+    null,
+  );
   const [deletingArtifact, setDeletingArtifact] =
     useState<ArtifactListRow | null>(null);
   const [deletePending, setDeletePending] = useState(false);
@@ -161,6 +179,7 @@ function ArtifactLibraryPage() {
 
   const applyFilters = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setPreview(null);
     const next = validateArtifactSearch(
       Object.fromEntries(new FormData(event.currentTarget)),
     );
@@ -179,7 +198,82 @@ function ArtifactLibraryPage() {
   };
 
   const goToPage = (page: number) => {
+    setPreview(null);
     void navigate({ search: (previous) => ({ ...previous, page }) });
+  };
+
+  const handlePreview = async (artifact: ArtifactListRow) => {
+    if (!isArtifactReviewablePdf(artifact) || reviewActivity) return;
+    setReviewActivity({ id: artifact.id, action: "preview" });
+    setPreview(null);
+    setActionMessage({
+      text: `Preparing the verified PDF preview for ${artifact.filename}…`,
+      tone: "status",
+    });
+    try {
+      const url = await previewArtifactForReview({
+        data: { id: artifact.id },
+      });
+      setPreview({ id: artifact.id, url });
+      setActionMessage({
+        text: `Pinned PDF preview ready for ${artifact.filename}. Open it in a new tab to review.`,
+        tone: "status",
+      });
+    } catch {
+      setActionMessage({
+        text: `Preview could not be prepared for ${artifact.filename}. It remains awaiting review; try again.`,
+        tone: "error",
+      });
+    } finally {
+      setReviewActivity(null);
+    }
+  };
+
+  const handleReviewDecision = async (
+    artifact: ArtifactListRow,
+    action: "approve" | "reject",
+  ) => {
+    if (
+      !isArtifactReviewablePdf(artifact) ||
+      reviewActivity ||
+      (action === "approve" && preview?.id !== artifact.id)
+    )
+      return;
+    setReviewActivity({ id: artifact.id, action });
+    setPreview(null);
+    setActionMessage({
+      text: `${action === "approve" ? "Approving" : "Rejecting"} ${artifact.filename}…`,
+      tone: "status",
+    });
+
+    try {
+      if (action === "approve")
+        await approveArtifact({ data: { id: artifact.id } });
+      else await rejectArtifact({ data: { id: artifact.id } });
+    } catch {
+      setActionMessage({
+        text: `Could not confirm the ${action} action for ${artifact.filename}. Refresh the file library to check its state before retrying.`,
+        tone: "error",
+      });
+      await router.invalidate().catch(() => undefined);
+      return;
+    } finally {
+      setReviewActivity(null);
+    }
+
+    setActionMessage({
+      text:
+        action === "approve"
+          ? `${artifact.filename} approved and available as evidence.`
+          : `${artifact.filename} rejected. It is not available as evidence.`,
+      tone: "status",
+    });
+    await router.invalidate().catch(() => {
+      setActionMessage({
+        text: `${artifact.filename} was ${action === "approve" ? "approved" : "rejected"}, but the file library could not refresh. Reload the page to see its current state.`,
+        tone: "error",
+      });
+    });
   };
 
   const handleDownload = async (artifact: ArtifactListRow) => {
@@ -276,7 +370,9 @@ function ArtifactLibraryPage() {
         <h1>File library</h1>
         <p className="artifact-library-lead">
           Browse uploaded files and their links to transactions or bank
-          activity.
+          activity. PDFs awaiting review are not available as evidence until
+          approved. Preview is required to enable approval, but Folio cannot
+          confirm that the PDF was read.
         </p>
       </header>
 
@@ -336,6 +432,7 @@ function ArtifactLibraryPage() {
             <select name="state" defaultValue={search.state}>
               <option value="all">All states</option>
               <option value="pending">Pending</option>
+              <option value="awaiting_review">Awaiting review</option>
               <option value="available">Available</option>
               <option value="superseded">Superseded</option>
               <option value="abandoned">Abandoned</option>
@@ -450,6 +547,75 @@ function ArtifactLibraryPage() {
                         </td>
                         <td data-label="Actions">
                           <div className="artifact-library-actions">
+                            {isArtifactReviewablePdf(artifact) && (
+                              <>
+                                <button
+                                  type="button"
+                                  className="artifact-library-action"
+                                  aria-label={`Preview ${artifact.filename}`}
+                                  disabled={reviewActivity !== null}
+                                  onClick={() => void handlePreview(artifact)}
+                                >
+                                  {reviewActivity?.id === artifact.id &&
+                                  reviewActivity.action === "preview"
+                                    ? "Preparing…"
+                                    : "Preview"}
+                                </button>
+                                {preview?.id === artifact.id && (
+                                  <a
+                                    className="artifact-library-action"
+                                    href={preview.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    aria-label={`Open PDF preview for ${artifact.filename}`}
+                                  >
+                                    Open preview
+                                  </a>
+                                )}
+                                {preview?.id !== artifact.id && (
+                                  <span className="artifact-library-review-hint">
+                                    Preview before approval
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  className="artifact-library-action"
+                                  aria-label={`Approve ${artifact.filename}`}
+                                  disabled={
+                                    reviewActivity !== null ||
+                                    preview?.id !== artifact.id
+                                  }
+                                  onClick={() =>
+                                    void handleReviewDecision(
+                                      artifact,
+                                      "approve",
+                                    )
+                                  }
+                                >
+                                  {reviewActivity?.id === artifact.id &&
+                                  reviewActivity.action === "approve"
+                                    ? "Approving…"
+                                    : "Approve"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="artifact-library-action artifact-library-action--danger"
+                                  aria-label={`Reject ${artifact.filename}`}
+                                  disabled={reviewActivity !== null}
+                                  onClick={() =>
+                                    void handleReviewDecision(
+                                      artifact,
+                                      "reject",
+                                    )
+                                  }
+                                >
+                                  {reviewActivity?.id === artifact.id &&
+                                  reviewActivity.action === "reject"
+                                    ? "Rejecting…"
+                                    : "Reject"}
+                                </button>
+                              </>
+                            )}
                             {isArtifactDownloadable(artifact.state) ? (
                               <button
                                 type="button"
@@ -568,10 +734,11 @@ const artifactTypeLabel = (mediaType: string): string => {
 
 const artifactStateLabel = (state: string): string => {
   if (state === "pending") return "Pending";
+  if (state === "awaiting_review") return "Awaiting review";
   if (state === "available") return "Available";
   if (state === "superseded") return "Superseded";
   if (state === "abandoned") return "Abandoned";
-  if (state === "rejected") return "Rejected CSV";
+  if (state === "rejected") return "Rejected";
   if (state === "deleting") return "Deleting";
   return "Unknown";
 };

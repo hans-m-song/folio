@@ -8,4 +8,7 @@ export const requiredMigrationIds = [
   "0007_folio_bank_reconciliation",
   "0008_folio_rejected_artifacts",
   "0009_folio_unlinked_artifact_deletion",
+  "0010_folio_artifact_review",
+  "0011_folio_mcp_proposals",
+  "0012_folio_mcp_upload_intents",
 ] as const;

@@ -21,7 +21,7 @@ const artifact: ArtifactRecord = {
 function boundaries(overrides: Partial<ObjectStorage> = {}) {
   const repository = {
     requireActiveActor: vi.fn(),
-    confirmAvailable: vi.fn(),
+    confirmAwaitingReview: vi.fn(),
     getArtifact: vi.fn().mockResolvedValue(artifact),
   } as unknown as ArtifactRepository;
   const storage = {
@@ -54,7 +54,7 @@ describe("pending upload reconciliation", () => {
       { artifactId: artifact.id, status: "dry_run_confirmable" },
     ]);
     expect(repository.requireActiveActor).not.toHaveBeenCalled();
-    expect(repository.confirmAvailable).not.toHaveBeenCalled();
+    expect(repository.confirmAwaitingReview).not.toHaveBeenCalled();
   });
 
   it("recovers only after actor and deliberate confirmation checks", async () => {
@@ -73,7 +73,10 @@ describe("pending upload reconciliation", () => {
     expect(repository.requireActiveActor).toHaveBeenCalledWith(
       "operator@example.test",
     );
-    expect(repository.confirmAvailable).toHaveBeenCalledWith(artifact.id, "v1");
+    expect(repository.confirmAwaitingReview).toHaveBeenCalledWith(
+      artifact.id,
+      "v1",
+    );
   });
 
   it("refuses mismatches and invalid recovery confirmation", async () => {
@@ -99,7 +102,7 @@ describe("pending upload reconciliation", () => {
     ).resolves.toEqual([
       { artifactId: artifact.id, status: "metadata_mismatch" },
     ]);
-    expect(repository.confirmAvailable).not.toHaveBeenCalled();
+    expect(repository.confirmAwaitingReview).not.toHaveBeenCalled();
     await expect(
       reconcilePendingUploads({
         artifacts: [artifact],
@@ -127,29 +130,41 @@ describe("pending upload reconciliation", () => {
       { artifactId: artifact.id, status: "already_resolved" },
     ]);
     expect(storage.latestVersionId).not.toHaveBeenCalled();
-    expect(repository.confirmAvailable).not.toHaveBeenCalled();
+    expect(repository.confirmAwaitingReview).not.toHaveBeenCalled();
   });
 
-  it("does not recover bank activity with the generic confirmation path", async () => {
+  it("recovers bank activity only into awaiting review", async () => {
     const bankArtifact: ArtifactRecord = {
       ...artifact,
       artifactProfile: "nab_transaction_history_csv_v1",
       kind: undefined,
       mediaType: "text/csv",
     };
-    const { repository, storage } = boundaries();
+    const { repository, storage } = boundaries({
+      headVersion: vi.fn().mockResolvedValue({
+        versionId: "v1",
+        contentLength: 5,
+        contentType: "text/csv",
+        checksumSha256: bankArtifact.checksumSha256,
+        metadata: { "folio-artifact-id": bankArtifact.id },
+      }),
+    });
     await expect(
       reconcilePendingUploads({
         artifacts: [bankArtifact],
         repository,
         storage,
         bucket: "test",
-        recover: false,
+        recover: true,
+        actorEmail: "operator@example.test",
+        confirmation: RECOVERY_CONFIRMATION,
       }),
     ).resolves.toEqual([
-      { artifactId: bankArtifact.id, status: "unsupported_profile" },
+      { artifactId: bankArtifact.id, status: "recovered" },
     ]);
-    expect(storage.latestVersionId).not.toHaveBeenCalled();
-    expect(repository.confirmAvailable).not.toHaveBeenCalled();
+    expect(repository.confirmAwaitingReview).toHaveBeenCalledWith(
+      bankArtifact.id,
+      "v1",
+    );
   });
 });

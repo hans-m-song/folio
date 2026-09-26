@@ -35,9 +35,13 @@ const current = vi.hoisted(() => ({
       recentBankRows: [],
     }),
   },
+  proposalRepository: {
+    getProposedEvidenceForDraft: vi.fn(),
+    discardProposedEvidenceForDraft: vi.fn(),
+  },
   documents: {
     startUpload: vi.fn(),
-    readAvailableText: vi.fn(),
+    readReviewText: vi.fn(),
     rejectArtifact: vi.fn(),
     deleteArtifact: vi.fn(),
   },
@@ -88,7 +92,9 @@ import { ArtifactPresignRecoveryError } from "../documents/service";
 import {
   createUser,
   deleteArtifact,
+  discardProposedDraftEvidence,
   getOverviewSummary,
+  getProposedDraftEvidence,
   getReport,
   listTransactionFormOptions,
   listTransactionPage,
@@ -153,10 +159,45 @@ describe("server operation authorization", () => {
     current.repository.createManual.mockReset();
     current.repository.updateManual.mockReset();
     current.documents.startUpload.mockReset();
-    current.documents.readAvailableText.mockReset();
+    current.documents.readReviewText.mockReset();
     current.documents.rejectArtifact.mockReset();
     current.documents.deleteArtifact.mockReset();
     current.repository.previewStripeImport.mockReset();
+  });
+
+  it("reads proposed draft evidence only through authenticated transaction access", async () => {
+    const transactionId = "11111111-1111-4111-8111-111111111111";
+    current.proposalRepository.getProposedEvidenceForDraft.mockResolvedValue({
+      transactionId,
+      artifactId: "22222222-2222-4222-8222-222222222222",
+    });
+    await expect(
+      getProposedDraftEvidence({ data: { transactionId } }),
+    ).resolves.toMatchObject({ transactionId });
+    expect(
+      current.proposalRepository.getProposedEvidenceForDraft,
+    ).toHaveBeenCalledWith(member.id, transactionId);
+
+    current.auth.session.mockResolvedValue(viewer);
+    await expect(
+      getProposedDraftEvidence({ data: { transactionId } }),
+    ).rejects.toThrow("Code PERMISSION_DENIED");
+  });
+
+  it("requires write and link authority to discard proposed PDF evidence", async () => {
+    const transactionId = "11111111-1111-4111-8111-111111111111";
+    current.proposalRepository.discardProposedEvidenceForDraft.mockResolvedValue(
+      null,
+    );
+    await discardProposedDraftEvidence({ data: { transactionId } });
+    expect(
+      current.proposalRepository.discardProposedEvidenceForDraft,
+    ).toHaveBeenCalledWith(member.id, transactionId);
+
+    current.auth.session.mockResolvedValue(viewer);
+    await expect(
+      discardProposedDraftEvidence({ data: { transactionId } }),
+    ).rejects.toThrow("Code PERMISSION_DENIED");
   });
 
   it("fails a protected operation closed without an authenticated session", async () => {
@@ -814,9 +855,9 @@ describe("server operation authorization", () => {
 
   it("previews parsed Stripe rows without importing them", async () => {
     current.auth.session.mockResolvedValue(administrator);
-    current.documents.readAvailableText.mockResolvedValue(
-      "balance_transaction_id,created,available_on,currency,gross,fee,net,reporting_category,description\ntxn_1,2026-09-01T00:00:00Z,,aud,10,0.3,9.7,charge,Sale",
-    );
+    current.documents.readReviewText.mockResolvedValue({
+      text: "balance_transaction_id,created,available_on,currency,gross,fee,net,reporting_category,description\ntxn_1,2026-09-01T00:00:00Z,,aud,10,0.3,9.7,charge,Sale",
+    });
     current.repository.previewStripeImport.mockResolvedValue(["will_import"]);
 
     await expect(
@@ -844,10 +885,10 @@ describe("server operation authorization", () => {
         },
       ],
     });
-    expect(current.documents.readAvailableText).toHaveBeenCalledWith(
+    expect(current.documents.readReviewText).toHaveBeenCalledWith(
       administrator.id,
       "44444444-4444-4444-8444-444444444444",
-      "stripe_csv",
+      "stripe_balance_itemised_csv_v1",
     );
     expect(current.repository.previewStripeImport).toHaveBeenCalledOnce();
   });
@@ -859,9 +900,9 @@ describe("server operation authorization", () => {
       (_, index) =>
         `txn_${index + 1},2026-09-01T00:00:00Z,,aud,10,0.3,9.7,charge,Sale`,
     );
-    current.documents.readAvailableText.mockResolvedValue(
-      `balance_transaction_id,created,available_on,currency,gross,fee,net,reporting_category,description\n${rows.join("\n")}`,
-    );
+    current.documents.readReviewText.mockResolvedValue({
+      text: `balance_transaction_id,created,available_on,currency,gross,fee,net,reporting_category,description\n${rows.join("\n")}`,
+    });
     current.repository.previewStripeImport.mockResolvedValue(
       Array.from({ length: 200 }, () => "will_import"),
     );
@@ -889,9 +930,9 @@ describe("server operation authorization", () => {
       (_, index) =>
         `txn_${index + 1},2026-09-01T00:00:00Z,,aud,10,0.3,9.7,charge,Sale`,
     );
-    current.documents.readAvailableText.mockResolvedValue(
-      `balance_transaction_id,created,available_on,currency,gross,fee,net,reporting_category,description\n${rows.join("\n")}`,
-    );
+    current.documents.readReviewText.mockResolvedValue({
+      text: `balance_transaction_id,created,available_on,currency,gross,fee,net,reporting_category,description\n${rows.join("\n")}`,
+    });
     current.repository.previewStripeImport.mockResolvedValue(
       Array.from({ length: 201 }, () => "conflict"),
     );

@@ -79,6 +79,7 @@ interface TestRouteData {
     };
     candidates: unknown[];
   };
+  suggestions: unknown[];
   users: {
     id: string;
     email: string;
@@ -154,6 +155,7 @@ const makeRouteData = (
       },
       candidates: [],
     },
+    suggestions: [],
     users: [
       {
         id: actorId,
@@ -235,6 +237,40 @@ afterEach(() => {
 });
 
 describe("bank reconciliation actions", () => {
+  it("shows a bank-linked draft for review without recording or matching it", () => {
+    (mocks.data as TestRouteData).suggestions = [
+      {
+        submissionId: "44444444-4444-4444-8444-444444444444",
+        kind: "draft_transaction",
+        note: "Review the invoice PDF.",
+        observedBankRevision: "3",
+        createdAt: "2026-09-26T00:00:00.000Z",
+        actionability: "actionable",
+        transaction: {
+          id: "55555555-5555-4555-8555-555555555555",
+          status: "draft",
+          kind: "supplier_expense",
+          counterparty: "Example supplier",
+          reference: null,
+          documentCurrency: "USD",
+          documentAmount: "35.19",
+          settlementCurrency: "AUD",
+          settlementAmount: "35.12",
+        },
+      },
+    ];
+    render(<ReconcilePage />);
+
+    expect(screen.getByText("Suggested draft")).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "Review draft" }).getAttribute("href"),
+    ).toBe(
+      `/transactions/55555555-5555-4555-8555-555555555555/edit?bank=${bankTransactionId}`,
+    );
+    expect(mocks.reconcileBankTransaction).not.toHaveBeenCalled();
+    expect(mocks.createAndMatchBankTransaction).not.toHaveBeenCalled();
+  });
+
   it("shows queue metadata above the description and keeps the selected row in its scroll area", () => {
     const rect = (top: number, bottom: number) =>
       ({

@@ -77,4 +77,22 @@ describe("artifact relationship migration", () => {
       '("version_id" IS NOT NULL AND "confirmed_at" IS NOT NULL)',
     );
   });
+
+  it("adds pinned awaiting review without rewriting available legacy rows", async () => {
+    const path = fileURLToPath(
+      new URL(
+        "../../migrations/0010_folio_artifact_review.sql",
+        import.meta.url,
+      ),
+    );
+    const migration = await readFile(path, "utf8");
+    expect(migration).toContain("'awaiting_review'");
+    expect(migration).toContain(
+      "'awaiting_review', 'available', 'rejected', 'superseded'",
+    );
+    expect(migration).toContain(
+      'DROP CONSTRAINT "source_artifacts_rejected_csv_check"',
+    );
+    expect(migration).not.toMatch(/UPDATE\s+"__FOLIO_SCHEMA__"/);
+  });
 });

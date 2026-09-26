@@ -53,7 +53,8 @@ describe("bank repository queries", () => {
             {
               id: artifactId,
               artifact_profile: "commbank_transaction_history_csv_v1",
-              state: "pending",
+              state: "awaiting_review",
+              version_id: "synthetic-version",
               checksum_sha256: "synthetic-checksum",
             },
           ],
@@ -158,7 +159,8 @@ describe("bank repository queries", () => {
           {
             id: "11111111-1111-4111-8111-111111111111",
             artifact_profile: "commbank_transaction_history_csv_v1",
-            state: "pending",
+            state: "awaiting_review",
+            version_id: "synthetic-version",
             checksum_sha256: "synthetic-checksum",
           },
         ],
@@ -219,7 +221,8 @@ describe("bank repository queries", () => {
           {
             id: "11111111-1111-4111-8111-111111111111",
             artifact_profile: "commbank_transaction_history_csv_v1",
-            state: "pending",
+            state: "awaiting_review",
+            version_id: "synthetic-version",
             checksum_sha256: "synthetic-checksum",
           },
         ],
@@ -252,6 +255,9 @@ describe("bank repository queries", () => {
       rowCount: 9,
     });
     expect(query.mock.calls[5]?.[0]).toMatch(/checksum_sha256=\$3/);
+    expect(query.mock.calls[6]?.[0]).toMatch(
+      /SET state='rejected'.*state='awaiting_review'/s,
+    );
     expect(query).toHaveBeenCalledTimes(9);
   });
 

@@ -1074,3 +1074,42 @@
   include original filenames without separate per-file approval or redaction.
   This is an input convention, not a Folio-verified guarantee, and grants no
   permission to inspect file contents.
+
+## 2026-09-26 — MCP implementation boundary and artifact review checkpoint
+
+- The user authorised MCP implementation with synthetic functional tests and
+  deferred end-to-end verification. Work is in progress, not a completed
+  milestone.
+- Validated uploads now enter a durable `awaiting_review` state. PDF approval
+  and CSV import are separate human actions; neither generic confirmation nor
+  a reload of the browser queue may promote a file to usable evidence or
+  imported financial records.
+- Stripe and CommBank review queues reload validated artifacts by ID. Their
+  Add-to-batch selections remain ephemeral. The manual transaction PDF path
+  requires explicit preview and approval before save can attach a new file.
+- At the 26 September 2026 checkpoint, synthetic Vitest ran 488 passing tests
+  with one skipped, and typecheck, scoped ESLint, and diff checks passed. No
+  live PostgreSQL, storage, real customer file, or end-to-end test was used.
+
+## 2026-09-26 — MCP synthetic implementation boundary
+
+- The initial MCP server binds only to `127.0.0.1`, checks Host and Origin,
+  authenticates each stateless Streamable HTTP request, and exposes domain
+  tools according to six persisted credential scopes. Bearer tokens are
+  stored as hashes, with a distinct actor and forced default owner.
+- Eight scoped tools cover bounded bank/transaction/artifact metadata, two-step
+  artifact upload, draft creation, existing-match suggestions, and own
+  submission status. Original-file retrieval, artifact approval, CSV import,
+  draft promotion, and bank matching are not MCP tools.
+- A credential-bound upload key now persists an artifact intent atomically.
+  Same-key/same-payload retries reuse the pending artifact with a fresh URL;
+  changed payloads conflict and terminal/deleted artifacts receive no URL.
+- The Reconcile suggestion UI keeps human recording distinct from bank
+  matching. Retained proposed PDF evidence must be approved and linked before
+  a draft can become recorded; the database has a deferred enforcement trigger.
+  The trigger has structural tests only until live PostgreSQL tests are
+  authorised.
+- The unified synthetic suite passed 559 tests in 63 files, with one skipped;
+  typecheck, lint, and diff checks passed on 26 September 2026. Live migration,
+  Codex-to-Folio connection, and browser E2E are deferred, so this is not a
+  deployed or operator-verified milestone.

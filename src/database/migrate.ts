@@ -65,6 +65,15 @@ try {
     `GRANT SELECT, INSERT, DELETE ON TABLE "${config.databaseSchema}"."auth_attempts" TO "${config.databaseAppRole}"`,
   );
   await pool.query(
+    `GRANT SELECT, INSERT, UPDATE ON TABLE "${config.databaseSchema}"."mcp_credentials" TO "${config.databaseAppRole}"`,
+  );
+  await pool.query(
+    `GRANT SELECT, INSERT, UPDATE ON TABLE "${config.databaseSchema}"."mcp_submissions" TO "${config.databaseAppRole}"`,
+  );
+  await pool.query(
+    `GRANT SELECT, INSERT ON TABLE "${config.databaseSchema}"."mcp_upload_intents" TO "${config.databaseAppRole}"`,
+  );
+  await pool.query(
     `GRANT SELECT ON TABLE "${config.databaseSchema}"."_migrations" TO "${config.databaseAppRole}"`,
   );
   await pool.query("COMMIT");

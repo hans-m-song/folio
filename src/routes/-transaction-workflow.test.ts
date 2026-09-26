@@ -9,18 +9,24 @@ import {
   within,
   waitFor,
 } from "@testing-library/react";
-import { createElement } from "react";
+import { createElement, type ReactNode } from "react";
 import type { TransactionRecord } from "../domain/types";
 
 const operations = vi.hoisted(() => ({
   getFolioUiConfig: vi.fn(),
+  getProposedDraftEvidence: vi.fn(),
+  discardProposedDraftEvidence: vi.fn(),
   getTransaction: vi.fn(),
+  listArtifacts: vi.fn(),
   listAvailableInvoiceArtifacts: vi.fn(),
   listTransactionFormOptions: vi.fn(),
   confirmArtifactUpload: vi.fn(),
+  approveArtifact: vi.fn(),
+  previewArtifactForReview: vi.fn(),
   findArtifactFilenameMatches: vi.fn(),
   importStripeCsv: vi.fn(),
   previewStripeCsv: vi.fn(),
+  getCsvDuplicateWarnings: vi.fn(),
   rejectArtifact: vi.fn(),
   saveManualTransaction: vi.fn(),
   startArtifactUpload: vi.fn(),
@@ -92,6 +98,7 @@ vi.mock("../components/manual-transaction-form", () => ({
     return createElement(
       "form",
       { className: "manual-entry-form" },
+      props.evidenceStatus as ReactNode,
       createElement(
         "div",
         { className: "actions wide" },
@@ -118,12 +125,18 @@ vi.mock("../components/manual-transaction-form", () => ({
 vi.mock("../server/operations", () => ({
   ...operations,
   confirmArtifactUpload: operations.confirmArtifactUpload,
+  approveArtifact: operations.approveArtifact,
+  previewArtifactForReview: operations.previewArtifactForReview,
   importStripeCsv: operations.importStripeCsv,
   previewStripeCsv: operations.previewStripeCsv,
   rejectArtifact: operations.rejectArtifact,
   saveManualTransaction: operations.saveManualTransaction,
   startArtifactUpload: operations.startArtifactUpload,
   voidTransaction: operations.voidTransaction,
+}));
+
+vi.mock("../server/bank-operations", () => ({
+  getCsvDuplicateWarnings: operations.getCsvDuplicateWarnings,
 }));
 
 import {
@@ -166,16 +179,30 @@ beforeEach(() => {
     gstRegistered: false,
     reportingTimezone: "Australia/Brisbane",
   });
+  operations.getProposedDraftEvidence.mockResolvedValue(null);
+  operations.discardProposedDraftEvidence.mockResolvedValue(null);
   operations.listAvailableInvoiceArtifacts.mockResolvedValue([]);
+  operations.listArtifacts.mockResolvedValue({ total: 0, rows: [] });
   operations.startArtifactUpload.mockResolvedValue({
     artifact: { id: "44444444-4444-4444-8444-444444444444" },
     uploadUrl: "https://uploads.example.test/stripe.csv",
   });
   operations.findArtifactFilenameMatches.mockResolvedValue([]);
   operations.confirmArtifactUpload.mockResolvedValue({});
+  operations.approveArtifact.mockResolvedValue({});
+  operations.previewArtifactForReview.mockResolvedValue(
+    "https://uploads.example.test/review.pdf",
+  );
   operations.voidTransaction.mockResolvedValue(undefined);
   operations.importStripeCsv.mockResolvedValue(1);
   operations.previewStripeCsv.mockResolvedValue(stripePreviewResult());
+  operations.getCsvDuplicateWarnings.mockResolvedValue({
+    artifactId: "44444444-4444-4444-8444-444444444444",
+    profile: "stripe_balance_itemised_csv_v1",
+    rowCount: 1,
+    rowIdentityLimitReached: false,
+    warnings: [],
+  });
   operations.rejectArtifact.mockResolvedValue(undefined);
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
   vi.stubGlobal("crypto", {
@@ -251,6 +278,7 @@ describe("transaction workflow route safety", () => {
     },
     availableArtifacts: [],
     transaction: null,
+    proposedDraftEvidence: null,
   });
 
   it("warns that restoring a voided transaction is not guaranteed", () => {
@@ -390,7 +418,11 @@ describe("transaction workflow route safety", () => {
       screen.getByRole("button", { name: "Save manual transaction" }),
     );
 
-    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        /Transaction saved. Return to the transaction list/,
+      ),
+    ).toBeTruthy();
     const returnLink = await screen.findByRole("link", {
       name: "Return to Transactions",
     });
@@ -399,6 +431,44 @@ describe("transaction workflow route safety", () => {
         returnLink.classList.contains("transaction-button-link--secondary"),
     ).toBe(true);
     expect(returnLink.closest(".manual-entry-form")).toBeNull();
+  });
+
+  it("returns a reviewed draft to its selected bank row without claiming a match", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const bankId = "22222222-2222-4222-8222-222222222222";
+    operations.saveManualTransaction.mockResolvedValue({
+      status: "saved",
+      transaction: { id },
+    });
+    render(
+      createElement(ManualTransactionRoute, {
+        data: {
+          ...routeData(),
+          transaction: {
+            id,
+            status: "draft",
+            sourceSystem: "manual",
+            sourceArtifacts: [],
+            sourceArtifactId: null,
+            kind: "supplier_expense",
+            documentCurrency: "AUD",
+          } as unknown as TransactionRecord,
+        },
+        mode: "edit",
+        returnTo: `/transactions/${id}/edit`,
+        reviewReturnTo: `/banking/reconcile?bank=${bankId}`,
+      }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save manual transaction" }),
+    );
+    expect(await screen.findByText(/Recording did not match it/)).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "Return to Reconcile" })
+        .getAttribute("href"),
+    ).toBe(`/banking/reconcile?bank=${bankId}`);
   });
 
   it("keeps a void failure in the confirmation dialog for retry", async () => {
@@ -515,6 +585,68 @@ describe("transaction workflow route safety", () => {
     expect(operations.importStripeCsv).not.toHaveBeenCalled();
   });
 
+  it("shows non-blocking duplicate CSV warnings after validation", async () => {
+    operations.getCsvDuplicateWarnings.mockResolvedValue({
+      artifactId: "44444444-4444-4444-8444-444444444444",
+      profile: "stripe_balance_itemised_csv_v1",
+      rowCount: 1,
+      rowIdentityLimitReached: false,
+      warnings: [
+        {
+          reason: "same_checksum",
+          totalArtifactCount: 1,
+          truncated: false,
+          matches: [
+            {
+              artifactId: "55555555-5555-4555-8555-555555555555",
+              filename: "prior.csv",
+              matchingRowCount: null,
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      createElement(StripeImportRoute, {
+        session: { authenticated: true, user: { id: "actor" } as never },
+      }),
+    );
+    addStripeFiles(
+      [new File(["csv"], "stripe.csv", { type: "text/csv" })],
+      true,
+    );
+
+    expect(await screen.findByText("Possible duplicate source")).toBeTruthy();
+    expect(screen.getByText(/prior\.csv/)).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: "Review stripe.csv" }),
+    ).toBeTruthy();
+  });
+
+  it("allows Stripe review when duplicate analysis is unavailable", async () => {
+    operations.getCsvDuplicateWarnings.mockRejectedValue(
+      new Error("unavailable"),
+    );
+    render(
+      createElement(StripeImportRoute, {
+        session: { authenticated: true, user: { id: "actor" } as never },
+      }),
+    );
+    addStripeFiles(
+      [new File(["csv"], "stripe.csv", { type: "text/csv" })],
+      true,
+    );
+
+    expect(
+      await screen.findByText(
+        "Could not check duplicate CSV content; review remains possible.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: "Review stripe.csv" }),
+    ).toBeTruthy();
+  });
+
   it("loads every preview page from the confirmed artifact", async () => {
     operations.previewStripeCsv
       .mockResolvedValueOnce(
@@ -579,7 +711,7 @@ describe("transaction workflow route safety", () => {
     const retry = await screen.findByRole("button", {
       name: "Retry preview stripe.csv",
     });
-    expect(screen.getByText(/confirmed artifact is available/)).toBeTruthy();
+    expect(screen.getByText(/validated artifact awaits review/)).toBeTruthy();
     fireEvent.click(retry);
     await screen.findByRole("heading", { name: "Review stripe.csv" });
     expect(operations.previewStripeCsv).toHaveBeenCalledTimes(2);
@@ -609,7 +741,7 @@ describe("transaction workflow route safety", () => {
     ).toBeNull();
   });
 
-  it("does not claim reuse when upload confirmation has an uncertain outcome", async () => {
+  it("retries uncertain upload confirmation against the same artifact", async () => {
     operations.confirmArtifactUpload.mockRejectedValueOnce(
       new Error("Confirmation response unavailable"),
     );
@@ -623,10 +755,20 @@ describe("transaction workflow route safety", () => {
       true,
     );
 
-    expect(await screen.findByText(/may be pending or confirmed/)).toBeTruthy();
+    const retry = await screen.findByRole("button", {
+      name: "Retry confirmation for stripe.csv",
+    });
+    expect(screen.getByText(/same uploaded artifact/)).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Retry preview stripe.csv" }),
     ).toBeNull();
+    fireEvent.click(retry);
+    await screen.findByRole("button", { name: "Add to batch" });
+    expect(operations.startArtifactUpload).toHaveBeenCalledOnce();
+    expect(operations.confirmArtifactUpload).toHaveBeenCalledTimes(2);
+    expect(operations.confirmArtifactUpload).toHaveBeenLastCalledWith({
+      data: { id: "44444444-4444-4444-8444-444444444444" },
+    });
   });
 
   it("imports only after explicit confirmation", async () => {
@@ -647,6 +789,55 @@ describe("transaction workflow route safety", () => {
     await screen.findAllByText(/Import complete/);
     expect(operations.importStripeCsv).toHaveBeenCalledWith({
       data: { artifactId: "44444444-4444-4444-8444-444444444444" },
+    });
+  });
+
+  it("restores a validated Stripe CSV without restoring its batch selection", async () => {
+    const artifactId = "77777777-7777-4777-8777-777777777777";
+    operations.listArtifacts.mockResolvedValue({
+      total: 1,
+      rows: [
+        {
+          id: artifactId,
+          filename: "saved.csv",
+          byteSize: "1024",
+          state: "awaiting_review",
+        },
+      ],
+    });
+    operations.previewStripeCsv.mockResolvedValue(
+      stripePreviewResult({ artifactId }),
+    );
+
+    const first = render(
+      createElement(StripeImportRoute, {
+        session: { authenticated: true, user: { id: "actor" } as never },
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Load preview for saved.csv" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add to batch" }),
+    );
+    expect(screen.getByText("1 files added to batch")).toBeTruthy();
+    first.unmount();
+
+    render(
+      createElement(StripeImportRoute, {
+        session: { authenticated: true, user: { id: "actor" } as never },
+      }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Load preview for saved.csv" }),
+    ).toBeTruthy();
+    expect(screen.getByText("0 files added to batch")).toBeTruthy();
+    expect(operations.startArtifactUpload).not.toHaveBeenCalled();
+    expect(operations.listArtifacts).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        profile: "stripe_balance_itemised_csv_v1",
+        state: "awaiting_review",
+      }),
     });
   });
 
@@ -860,7 +1051,9 @@ describe("transaction workflow route safety", () => {
         stripePreviewResult({ artifactId: firstArtifactId }),
       )
       .mockResolvedValueOnce(alreadyImportedPreview);
-    operations.importStripeCsv.mockResolvedValueOnce(1);
+    operations.importStripeCsv
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(0);
     render(
       createElement(StripeImportRoute, {
         session: { authenticated: true, user: { id: "actor" } as never },
@@ -897,12 +1090,15 @@ describe("transaction workflow route safety", () => {
       await screen.findByText(/Batch finished: 2 files completed/),
     ).toBeTruthy();
     expect(operations.previewStripeCsv).toHaveBeenCalledTimes(4);
-    expect(operations.importStripeCsv).toHaveBeenCalledOnce();
+    expect(operations.importStripeCsv).toHaveBeenCalledTimes(2);
     expect(operations.importStripeCsv).toHaveBeenCalledWith({
       data: { artifactId: firstArtifactId },
     });
+    expect(operations.importStripeCsv).toHaveBeenCalledWith({
+      data: { artifactId: secondArtifactId },
+    });
     expect(
-      await screen.findAllByText(/Already imported — no new rows/),
+      await screen.findAllByText(/Import complete — no new rows/),
     ).toHaveLength(2);
   });
 
@@ -1025,6 +1221,7 @@ describe("transaction workflow route safety", () => {
     operations.importStripeCsv.mockRejectedValueOnce(
       new Error("Database response unavailable. Code DB_OUTCOME_UNKNOWN."),
     );
+    operations.importStripeCsv.mockResolvedValueOnce(0);
     render(
       createElement(StripeImportRoute, {
         session: { authenticated: true, user: { id: "actor" } as never },
@@ -1055,9 +1252,9 @@ describe("transaction workflow route safety", () => {
       within(batch).getByRole("button", { name: "Confirm import" }),
     );
     expect(
-      await screen.findAllByText(/Already imported — no new rows/),
+      await screen.findAllByText(/Import complete — no new rows/),
     ).toHaveLength(2);
-    expect(operations.importStripeCsv).toHaveBeenCalledOnce();
+    expect(operations.importStripeCsv).toHaveBeenCalledTimes(2);
   });
 
   it("navigates a successful create to its saved record and removes the active form", async () => {
@@ -1094,5 +1291,201 @@ describe("transaction workflow route safety", () => {
         .getAttribute("href"),
     ).toBe(`/transactions/${id}`);
     expect(operations.saveManualTransaction).toHaveBeenCalledOnce();
+  });
+
+  it("requires explicit PDF review and approval before recording new evidence", async () => {
+    const artifactId = "44444444-4444-4444-8444-444444444444";
+    const file = new File(["synthetic pdf"], "invoice.pdf", {
+      type: "application/pdf",
+    });
+    operations.confirmArtifactUpload.mockResolvedValue({ id: artifactId });
+    operations.saveManualTransaction.mockResolvedValue({
+      status: "saved",
+      transaction: { id: "11111111-1111-4111-8111-111111111111" },
+    });
+    render(
+      createElement(ManualTransactionRoute, {
+        data: routeData(),
+        mode: "create",
+        returnTo: "/transactions/new",
+      }),
+    );
+
+    const submit = () => {
+      const props = manualFormProbe.props.mock.calls.at(-1)?.[0] as {
+        onSubmit: (submission: unknown) => void;
+      };
+      props.onSubmit({
+        action: "save_recorded",
+        transaction: { ownerId: "actor" },
+        artifactIds: [],
+        file,
+      });
+    };
+    submit();
+    expect(await screen.findByText(/Status: awaiting review/)).toBeTruthy();
+    expect(operations.saveManualTransaction).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Prepare PDF preview" }),
+    );
+    const preview = await screen.findByRole("link", {
+      name: "Open PDF preview",
+    });
+    expect(preview).toHaveProperty(
+      "href",
+      "https://uploads.example.test/review.pdf",
+    );
+    expect(operations.saveManualTransaction).not.toHaveBeenCalled();
+    expect(
+      (screen.getByRole("button", { name: "Approve PDF" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    fireEvent.click(preview);
+    fireEvent.click(screen.getByRole("button", { name: "Approve PDF" }));
+    expect(await screen.findByText(/Status: approved/)).toBeTruthy();
+    expect(operations.approveArtifact).toHaveBeenCalledWith({
+      data: { id: artifactId },
+    });
+    expect(operations.saveManualTransaction).not.toHaveBeenCalled();
+
+    submit();
+    await waitFor(() =>
+      expect(operations.saveManualTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ artifactIds: [artifactId] }),
+        }),
+      ),
+    );
+  });
+
+  it("holds a suggested draft until its proposed PDF is approved or removed", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const artifactId = "44444444-4444-4444-8444-444444444444";
+    const proposedDraftEvidence = {
+      submissionId: "55555555-5555-4555-8555-555555555555",
+      transactionId: id,
+      artifactId,
+      filename: "synthetic-invoice.pdf",
+      state: "awaiting_review",
+      note: "Review the PDF.",
+      discardedAt: null,
+    };
+    operations.saveManualTransaction.mockResolvedValue({
+      status: "saved",
+      transaction: { id },
+    });
+    render(
+      createElement(ManualTransactionRoute, {
+        data: {
+          ...routeData(),
+          transaction: {
+            id,
+            status: "draft",
+            sourceSystem: "manual",
+            sourceArtifacts: [],
+            sourceArtifactId: null,
+            kind: "supplier_expense",
+            documentCurrency: "AUD",
+          } as unknown as TransactionRecord,
+          proposedDraftEvidence,
+        },
+        mode: "edit",
+        returnTo: `/transactions/${id}/edit`,
+      }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save manual transaction" }),
+    );
+    expect(
+      await screen.findByText(
+        /Approve or remove the proposed PDF before recording/,
+      ),
+    ).toBeTruthy();
+    expect(operations.saveManualTransaction).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Prepare PDF preview" }),
+    );
+    const preview = await screen.findByRole("link", {
+      name: "Open PDF preview",
+    });
+    fireEvent.click(preview);
+    fireEvent.click(screen.getByRole("button", { name: "Approve PDF" }));
+    expect(
+      await screen.findByText(/approved PDF will be attached/),
+    ).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save manual transaction" }),
+    );
+    await waitFor(() =>
+      expect(operations.saveManualTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ artifactIds: [artifactId] }),
+        }),
+      ),
+    );
+  });
+
+  it("allows a reviewer to discard proposed evidence before recording a draft", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const proposedDraftEvidence = {
+      submissionId: "55555555-5555-4555-8555-555555555555",
+      transactionId: id,
+      artifactId: "44444444-4444-4444-8444-444444444444",
+      filename: "synthetic-invoice.pdf",
+      state: "awaiting_review",
+      note: null,
+      discardedAt: null,
+    };
+    operations.discardProposedDraftEvidence.mockResolvedValue({
+      ...proposedDraftEvidence,
+      discardedAt: "2026-09-26T00:00:00.000Z",
+    });
+    operations.saveManualTransaction.mockResolvedValue({
+      status: "saved",
+      transaction: { id },
+    });
+    render(
+      createElement(ManualTransactionRoute, {
+        data: {
+          ...routeData(),
+          transaction: {
+            id,
+            status: "draft",
+            sourceSystem: "manual",
+            sourceArtifacts: [],
+            sourceArtifactId: null,
+            kind: "supplier_expense",
+            documentCurrency: "AUD",
+          } as unknown as TransactionRecord,
+          proposedDraftEvidence,
+        },
+        mode: "edit",
+        returnTo: `/transactions/${id}/edit`,
+      }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove proposed PDF" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Proposed PDF evidence" }),
+      ).toBeNull(),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save manual transaction" }),
+    );
+    await waitFor(() =>
+      expect(operations.saveManualTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ artifactIds: [] }),
+        }),
+      ),
+    );
   });
 });

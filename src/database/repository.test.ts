@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { types as pgTypes } from "pg";
 
 import { FolioDiagnosticError } from "../domain/diagnostics";
+import { ArtifactUploadIdempotencyConflictError } from "../documents/service";
 import type { StripeImportRow } from "../domain/stripe-csv";
 import { transactionInputSchema } from "../domain/types";
 import { FolioRepository } from "./repository";
@@ -25,7 +26,7 @@ describe("Folio repository health", () => {
           },
         ],
       })
-      .mockResolvedValueOnce({ rowCount: 9 });
+      .mockResolvedValueOnce({ rowCount: 12 });
     const repository = new FolioRepository({ query } as never, "folio", false);
 
     await expect(repository.health()).resolves.toBeUndefined();
@@ -42,6 +43,9 @@ describe("Folio repository health", () => {
           "0007_folio_bank_reconciliation",
           "0008_folio_rejected_artifacts",
           "0009_folio_unlinked_artifact_deletion",
+          "0010_folio_artifact_review",
+          "0011_folio_mcp_proposals",
+          "0012_folio_mcp_upload_intents",
         ],
       ],
     );
@@ -133,6 +137,7 @@ describe("Folio artifact library", () => {
             media_type: "text/csv",
             state: "available",
             byte_size: "182",
+            checksum_sha256: "synthetic-checksum",
             created_at: new Date("2026-09-01T00:00:00Z"),
             transaction_count: 0,
             bank_row_count: 3,
@@ -162,6 +167,7 @@ describe("Folio artifact library", () => {
           mediaType: "text/csv",
           state: "available",
           byteSize: "182",
+          checksumSha256: "synthetic-checksum",
           createdAt: "2026-09-01T00:00:00.000Z",
           transactionCount: 0,
           bankRowCount: 3,
@@ -214,6 +220,193 @@ describe("Folio artifact library", () => {
     expect(query.mock.calls[1]?.[1]).toEqual([
       "stripe_balance_itemised_csv_v1",
       ["Export.csv", "report.csv"],
+    ]);
+  });
+
+  it("returns a narrow artifact creator lookup for credential ownership checks", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{ created_by_id: "11111111-1111-4111-8111-111111111111" }],
+    });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await expect(
+      repository.getArtifactCreatorId("22222222-2222-4222-8222-222222222222"),
+    ).resolves.toBe("11111111-1111-4111-8111-111111111111");
+    expect(query).toHaveBeenCalledWith(
+      'SELECT created_by_id FROM "folio"."source_artifacts" WHERE id=$1',
+      ["22222222-2222-4222-8222-222222222222"],
+    );
+  });
+
+  it("reports bounded Stripe checksum, filename, and imported-row duplicate warnings", async () => {
+    const artifactId = "11111111-1111-4111-8111-111111111111";
+    const checksumArtifactId = "22222222-2222-4222-8222-222222222222";
+    const filenameArtifactId = "33333333-3333-4333-8333-333333333333";
+    const rowArtifactId = "44444444-4444-4444-8444-444444444444";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: artifactId,
+            filename: "display.csv",
+            original_filename: "Export.csv",
+            checksum_sha256: "synthetic-checksum",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: checksumArtifactId,
+            filename: "prior.csv",
+            reason: "same_checksum",
+            total_artifact_count: 1,
+          },
+          {
+            id: filenameArtifactId,
+            filename: "Export.csv",
+            reason: "same_filename",
+            total_artifact_count: 26,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: rowArtifactId,
+            filename: "rows.csv",
+            matching_row_count: 2,
+            total_artifact_count: 1,
+          },
+        ],
+      });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await expect(
+      repository.findCsvDuplicateWarnings(
+        "actor",
+        artifactId,
+        "stripe_balance_itemised_csv_v1",
+        {
+          rowCount: 2,
+          rowIdentityLimitReached: false,
+          identities: [
+            { kind: "stripe_reference", reference: "txn_1" },
+            { kind: "stripe_reference", reference: "txn_2" },
+          ],
+        },
+      ),
+    ).resolves.toEqual({
+      artifactId,
+      profile: "stripe_balance_itemised_csv_v1",
+      rowCount: 2,
+      rowIdentityLimitReached: false,
+      warnings: [
+        {
+          reason: "same_checksum",
+          totalArtifactCount: 1,
+          truncated: false,
+          matches: [
+            {
+              artifactId: checksumArtifactId,
+              filename: "prior.csv",
+              matchingRowCount: null,
+            },
+          ],
+        },
+        {
+          reason: "same_filename",
+          totalArtifactCount: 26,
+          truncated: true,
+          matches: [
+            {
+              artifactId: filenameArtifactId,
+              filename: "Export.csv",
+              matchingRowCount: null,
+            },
+          ],
+        },
+        {
+          reason: "overlapping_rows",
+          totalArtifactCount: 1,
+          truncated: false,
+          matches: [
+            {
+              artifactId: rowArtifactId,
+              filename: "rows.csv",
+              matchingRowCount: 2,
+            },
+          ],
+        },
+      ],
+    });
+    expect(query.mock.calls[2]?.[0]).toContain("rank<=25");
+    expect(query.mock.calls[2]?.[1]).toEqual([
+      artifactId,
+      "stripe_balance_itemised_csv_v1",
+      "synthetic-checksum",
+      "Export.csv",
+    ]);
+    expect(query.mock.calls[3]?.[0]).toContain(
+      "transaction.reference=ANY($2::text[])",
+    );
+    expect(query.mock.calls[3]?.[1]).toEqual([artifactId, ["txn_1", "txn_2"]]);
+  });
+
+  it("matches CommBank row identities without treating source row numbers as global", async () => {
+    const artifactId = "11111111-1111-4111-8111-111111111111";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: artifactId,
+            filename: "current.csv",
+            original_filename: "current.csv",
+            checksum_sha256: "synthetic-checksum",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await expect(
+      repository.findCsvDuplicateWarnings(
+        "actor",
+        artifactId,
+        "commbank_transaction_history_csv_v1",
+        {
+          rowCount: 1,
+          rowIdentityLimitReached: false,
+          identities: [
+            {
+              kind: "commbank_row",
+              rowIndex: 0,
+              postedDate: "2026-09-01",
+              amountAud: "-10.0000",
+              description: "Synthetic movement",
+              runningBalance: "90.00",
+            },
+          ],
+        },
+      ),
+    ).resolves.toMatchObject({ warnings: [] });
+    expect(query.mock.calls[3]?.[0]).toContain(
+      "(bank.metadata->>'runningBalance')::numeric=requested.\"runningBalance\"",
+    );
+    expect(query.mock.calls[3]?.[0]).not.toContain("source_row");
+    expect(JSON.parse(query.mock.calls[3]?.[1]?.[1] as string)).toEqual([
+      {
+        rowIndex: 0,
+        postedDate: "2026-09-01",
+        amountAud: "-10.0000",
+        description: "Synthetic movement",
+        runningBalance: "90.00",
+      },
     ]);
   });
 });
@@ -293,7 +486,7 @@ describe("Folio transaction projections", () => {
       'NOT EXISTS (SELECT 1 FROM "folio"."transaction_artifacts"',
     );
     expect(query.mock.calls[1]?.[0]).toMatch(
-      /artifact_profile IN \('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1'\).*state='pending'/s,
+      /artifact_profile IN \('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1'\).*state IN \('pending', 'awaiting_review'\)/s,
     );
     expect(query.mock.calls[1]?.[0]).toMatch(
       /artifact_profile IN \('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1'\).*state='abandoned'/s,
@@ -671,6 +864,62 @@ describe("Folio Stripe imports", () => {
         "Australia/Brisbane",
       ),
     ).resolves.toBe(0);
+    expect(clientQuery.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it("atomically publishes an awaiting-review Stripe CSV when all rows already exist", async () => {
+    const awaitingArtifact = { ...artifactRow, state: "awaiting_review" };
+    const clientQuery = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [actorRow] })
+      .mockResolvedValueOnce({ rows: [awaitingArtifact] })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "existing-transaction",
+            kind: "sale",
+            description: stripeRow.description,
+            occurred_at: new Date(stripeRow.occurredAt),
+            available_at: new Date(stripeRow.availableAt!),
+            source_currency: stripeRow.sourceCurrency,
+            source_gross: stripeRow.sourceGross,
+            source_fee: stripeRow.sourceFee,
+            source_net: stripeRow.sourceNet,
+            metadata: { reportingCategory: stripeRow.reportingCategory },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({});
+    const repository = new FolioRepository(
+      {
+        connect: vi.fn().mockResolvedValue({
+          query: clientQuery,
+          release: vi.fn(),
+        }),
+      } as never,
+      "folio",
+      false,
+    );
+
+    await expect(
+      repository.importStripe(
+        actorRow.id,
+        artifactRow.id,
+        [stripeRow],
+        "Australia/Brisbane",
+      ),
+    ).resolves.toBe(0);
+    expect(clientQuery.mock.calls[3]?.[0]).toMatch(
+      /SET state='available'.*state='awaiting_review'.*version_id=\$2/s,
+    );
+    expect(clientQuery.mock.calls[6]?.[0]).toContain(
+      "ON CONFLICT (transaction_id, source_artifact_id) DO NOTHING",
+    );
     expect(clientQuery.mock.calls.at(-1)?.[0]).toBe("COMMIT");
   });
 
@@ -1119,7 +1368,164 @@ describe("Folio artifact lifecycle", () => {
       false,
     );
 
-  it("rejects only an unlinked CSV artifact while pinning its version", async () => {
+  const uploadIntentInput = {
+    credentialId: "44444444-4444-4444-8444-444444444444",
+    requestKey: "upload-request-1",
+    payloadSha256: "a".repeat(64),
+    id: "55555555-5555-4555-8555-555555555555",
+    actorId: "77777777-7777-4777-8777-777777777777",
+    ownerId: "66666666-6666-4666-8666-666666666666",
+    artifactProfile: "manual_invoice_pdf_v1" as const,
+    objectKey: "private/manual_invoice_pdf_v1/object",
+    filename: "invoice.pdf",
+    mediaType: "application/pdf",
+    byteSize: "10",
+    checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  };
+
+  it("atomically creates a credential-bound upload intent and pending artifact", async () => {
+    const pending = {
+      id: uploadIntentInput.id,
+      artifact_profile: uploadIntentInput.artifactProfile,
+      object_key: uploadIntentInput.objectKey,
+      version_id: null,
+      filename: uploadIntentInput.filename,
+      original_filename: uploadIntentInput.filename,
+      media_type: uploadIntentInput.mediaType,
+      byte_size: uploadIntentInput.byteSize,
+      checksum_sha256: uploadIntentInput.checksumSha256,
+      state: "pending",
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            actor_user_id: uploadIntentInput.actorId,
+            default_owner_id: uploadIntentInput.ownerId,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [pending] })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({});
+
+    await expect(
+      repositoryWithClient(query).createPendingUploadIntent(uploadIntentInput),
+    ).resolves.toMatchObject({
+      status: "created",
+      artifact: { id: uploadIntentInput.id, state: "pending" },
+    });
+    expect(query.mock.calls[1]?.[0]).toContain(
+      "'artifacts:upload'=ANY(credential.scopes)",
+    );
+    expect(query.mock.calls[4]?.[0]).toContain("source_artifacts");
+    expect(query.mock.calls[5]?.[0]).toContain("mcp_upload_intents");
+    expect(query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it("replays only the same pending payload and reports terminal intents without reuse", async () => {
+    const replayRow = {
+      intent_payload_sha256: uploadIntentInput.payloadSha256,
+      intent_artifact_id: uploadIntentInput.id,
+      id: uploadIntentInput.id,
+      artifact_profile: uploadIntentInput.artifactProfile,
+      object_key: uploadIntentInput.objectKey,
+      version_id: null,
+      filename: uploadIntentInput.filename,
+      original_filename: uploadIntentInput.filename,
+      media_type: uploadIntentInput.mediaType,
+      byte_size: uploadIntentInput.byteSize,
+      checksum_sha256: uploadIntentInput.checksumSha256,
+      state: "pending",
+    };
+    const queryFor = (row: Record<string, unknown>) =>
+      vi
+        .fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              actor_user_id: uploadIntentInput.actorId,
+              default_owner_id: uploadIntentInput.ownerId,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ rows: [row] })
+        .mockResolvedValueOnce({});
+
+    await expect(
+      repositoryWithClient(queryFor(replayRow)).createPendingUploadIntent(
+        uploadIntentInput,
+      ),
+    ).resolves.toMatchObject({
+      status: "replayed",
+      artifact: { id: uploadIntentInput.id },
+    });
+    await expect(
+      repositoryWithClient(
+        queryFor({ ...replayRow, state: "awaiting_review" }),
+      ).createPendingUploadIntent(uploadIntentInput),
+    ).resolves.toEqual({
+      status: "not_uploadable",
+      artifactId: uploadIntentInput.id,
+      artifactState: "awaiting_review",
+    });
+    await expect(
+      repositoryWithClient(
+        queryFor({
+          intent_payload_sha256: uploadIntentInput.payloadSha256,
+          intent_artifact_id: uploadIntentInput.id,
+          id: null,
+          state: null,
+        }),
+      ).createPendingUploadIntent(uploadIntentInput),
+    ).resolves.toEqual({
+      status: "not_uploadable",
+      artifactId: uploadIntentInput.id,
+      artifactState: "deleted",
+    });
+  });
+
+  it("conflicts before artifact creation when an upload key payload changes", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            actor_user_id: uploadIntentInput.actorId,
+            default_owner_id: uploadIntentInput.ownerId,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            intent_payload_sha256: "b".repeat(64),
+            intent_artifact_id: uploadIntentInput.id,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+
+    await expect(
+      repositoryWithClient(query).createPendingUploadIntent(uploadIntentInput),
+    ).rejects.toBeInstanceOf(ArtifactUploadIdempotencyConflictError);
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).startsWith("INSERT"),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects an unlinked awaiting-review PDF or CSV at its pinned version", async () => {
     const rejected = {
       id: previousId,
       artifact_profile: "stripe_balance_itemised_csv_v1",
@@ -1138,12 +1544,42 @@ describe("Folio artifact lifecycle", () => {
       repository.rejectArtifact(previousId, "version-1"),
     ).resolves.toMatchObject({ state: "rejected", versionId: "version-1" });
     expect(query.mock.calls[0]?.[0]).toContain(
-      "artifact.media_type='text/csv'",
+      "artifact.media_type IN ('application/pdf', 'text/csv')",
     );
     expect(query.mock.calls[0]?.[0]).toContain(
-      "artifact.artifact_profile='commbank_transaction_history_csv_v1'",
+      "artifact.state='awaiting_review'",
     );
     expect(query.mock.calls[0]?.[0]).toContain("NOT EXISTS");
+  });
+
+  it("pins confirmation for review and explicitly approves only the same PDF version", async () => {
+    const approved = {
+      id: previousId,
+      artifact_profile: "manual_invoice_pdf_v1",
+      object_key: "private/pdf/object",
+      version_id: "version-1",
+      filename: "invoice.pdf",
+      media_type: "application/pdf",
+      byte_size: "10",
+      checksum_sha256: "checksum",
+      state: "available",
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [approved], rowCount: 1 });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await expect(
+      repository.confirmAwaitingReview(previousId, "version-1"),
+    ).resolves.toBeUndefined();
+    await expect(
+      repository.approveArtifact(previousId, "version-1"),
+    ).resolves.toMatchObject({ state: "available", versionId: "version-1" });
+    expect(query.mock.calls[0]?.[0]).toContain("state='awaiting_review'");
+    expect(query.mock.calls[1]?.[0]).toMatch(
+      /state='available'.*state='awaiting_review'.*version_id=\$2.*artifact_profile='manual_invoice_pdf_v1'/s,
+    );
   });
 
   it("claims deletion only after locking and checking both link tables", async () => {

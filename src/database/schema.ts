@@ -5,6 +5,7 @@ import {
   check,
   date,
   index,
+  integer,
   jsonb,
   numeric,
   primaryKey,
@@ -70,7 +71,7 @@ export function createFolioSchema(schemaName: string) {
       ),
       check(
         "source_artifacts_state_check",
-        sql`${table.state} in ('pending', 'available', 'rejected', 'superseded', 'abandoned', 'deleting')`,
+        sql`${table.state} in ('pending', 'awaiting_review', 'available', 'rejected', 'superseded', 'abandoned', 'deleting')`,
       ),
       check("source_artifacts_byte_size_check", sql`${table.byteSize} > 0`),
       index("source_artifacts_owner_id_idx").on(table.ownerId),
@@ -81,7 +82,7 @@ export function createFolioSchema(schemaName: string) {
       ),
       check(
         "source_artifacts_confirmation_check",
-        sql`(${table.state} in ('pending', 'abandoned') and ${table.versionId} is null and ${table.confirmedAt} is null) or (${table.state} in ('available', 'rejected', 'superseded') and ${table.versionId} is not null and ${table.confirmedAt} is not null) or (${table.state} = 'deleting' and ((${table.versionId} is null and ${table.confirmedAt} is null) or (${table.versionId} is not null and ${table.confirmedAt} is not null)))`,
+        sql`(${table.state} in ('pending', 'abandoned') and ${table.versionId} is null and ${table.confirmedAt} is null) or (${table.state} in ('awaiting_review', 'available', 'rejected', 'superseded') and ${table.versionId} is not null and ${table.confirmedAt} is not null) or (${table.state} = 'deleting' and ((${table.versionId} is null and ${table.confirmedAt} is null) or (${table.versionId} is not null and ${table.confirmedAt} is not null)))`,
       ),
       check(
         "source_artifacts_checksum_check",
@@ -347,6 +348,180 @@ export function createFolioSchema(schemaName: string) {
       index("auth_sessions_expires_at_idx").on(table.expiresAt),
     ],
   );
+  const mcpCredentials = namespace.table(
+    "mcp_credentials",
+    {
+      id: uuid().primaryKey().defaultRandom(),
+      label: text().notNull(),
+      tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+      actorUserId: uuid("actor_user_id")
+        .notNull()
+        .references(() => users.id, { onDelete: "restrict" }),
+      defaultOwnerId: uuid("default_owner_id")
+        .notNull()
+        .references(() => users.id, { onDelete: "restrict" }),
+      scopes: text().array().notNull(),
+      createdById: uuid("created_by_id")
+        .notNull()
+        .references(() => users.id, { onDelete: "restrict" }),
+      revokedAt: timestamp("revoked_at", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      uniqueIndex("mcp_credentials_token_hash_uidx").on(table.tokenHash),
+      check(
+        "mcp_credentials_token_hash_check",
+        sql`${table.tokenHash} ~ '^[a-f0-9]{64}$'`,
+      ),
+      check(
+        "mcp_credentials_actor_owner_check",
+        sql`${table.actorUserId} <> ${table.defaultOwnerId}`,
+      ),
+      check(
+        "mcp_credentials_dedicated_actor_check",
+        sql`${table.actorUserId} <> ${table.createdById}`,
+      ),
+      check(
+        "mcp_credentials_scopes_check",
+        sql`cardinality(${table.scopes}) between 1 and 6 and ${table.scopes} <@ array['bank_rows:read', 'transactions:search', 'artifacts:read', 'artifacts:upload', 'proposals:submit', 'submissions:read']::text[]`,
+      ),
+      index("mcp_credentials_actor_user_id_idx").on(table.actorUserId),
+      index("mcp_credentials_default_owner_id_idx").on(table.defaultOwnerId),
+    ],
+  );
+  const mcpSubmissions = namespace.table(
+    "mcp_submissions",
+    {
+      id: uuid().primaryKey().defaultRandom(),
+      credentialId: uuid("credential_id")
+        .notNull()
+        .references(() => mcpCredentials.id, { onDelete: "restrict" }),
+      requestKey: varchar("request_key", { length: 200 }).notNull(),
+      payloadSha256: varchar("payload_sha256", { length: 64 }).notNull(),
+      kind: text().notNull(),
+      draftTransactionId: uuid("draft_transaction_id").references(
+        () => transactions.id,
+        { onDelete: "restrict" },
+      ),
+      proposedTransactionId: uuid("proposed_transaction_id").references(
+        () => transactions.id,
+        { onDelete: "restrict" },
+      ),
+      bankTransactionId: uuid("bank_transaction_id").references(
+        () => bankTransactions.id,
+        { onDelete: "restrict" },
+      ),
+      observedBankRevision: bigint("observed_bank_revision", {
+        mode: "bigint",
+      }),
+      sourceArtifactId: uuid("source_artifact_id").references(
+        () => sourceArtifacts.id,
+        { onDelete: "restrict" },
+      ),
+      sourceRow: integer("source_row"),
+      proposedEvidenceArtifactId: uuid(
+        "proposed_evidence_artifact_id",
+      ).references(() => sourceArtifacts.id, { onDelete: "restrict" }),
+      evidenceDiscardedAt: timestamp("evidence_discarded_at", {
+        withTimezone: true,
+      }),
+      evidenceDiscardedById: uuid("evidence_discarded_by_id").references(
+        () => users.id,
+        { onDelete: "restrict" },
+      ),
+      note: text(),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      uniqueIndex("mcp_submissions_idempotency_uidx").on(
+        table.credentialId,
+        table.requestKey,
+      ),
+      check(
+        "mcp_submissions_payload_sha256_check",
+        sql`${table.payloadSha256} ~ '^[a-f0-9]{64}$'`,
+      ),
+      check(
+        "mcp_submissions_kind_check",
+        sql`${table.kind} in ('draft_transaction', 'existing_match')`,
+      ),
+      check(
+        "mcp_submissions_request_key_check",
+        sql`${table.requestKey} ~ '^[A-Za-z0-9._:-]+$'`,
+      ),
+      check(
+        "mcp_submissions_result_check",
+        sql`(${table.kind} = 'draft_transaction' and ${table.draftTransactionId} is not null and ${table.proposedTransactionId} is null) or (${table.kind} = 'existing_match' and ${table.draftTransactionId} is null and ${table.proposedTransactionId} is not null)`,
+      ),
+      check(
+        "mcp_submissions_direct_target_check",
+        sql`(${table.bankTransactionId} is null) = (${table.observedBankRevision} is null) and (${table.observedBankRevision} is null or ${table.observedBankRevision} > 0)`,
+      ),
+      check(
+        "mcp_submissions_locator_check",
+        sql`(${table.sourceArtifactId} is null) = (${table.sourceRow} is null) and (${table.sourceRow} is null or ${table.sourceRow} > 0) and not (${table.bankTransactionId} is not null and ${table.sourceArtifactId} is not null)`,
+      ),
+      check(
+        "mcp_submissions_match_target_check",
+        sql`${table.kind} <> 'existing_match' or (${table.bankTransactionId} is not null and ${table.sourceArtifactId} is null and ${table.proposedEvidenceArtifactId} is null)`,
+      ),
+      check(
+        "mcp_submissions_draft_evidence_check",
+        sql`${table.proposedEvidenceArtifactId} is null or ${table.kind} = 'draft_transaction'`,
+      ),
+      check(
+        "mcp_submissions_evidence_discard_check",
+        sql`(${table.evidenceDiscardedAt} is null) = (${table.evidenceDiscardedById} is null) and (${table.evidenceDiscardedAt} is null or ${table.proposedEvidenceArtifactId} is not null)`,
+      ),
+      uniqueIndex("mcp_submissions_draft_transaction_uidx")
+        .on(table.draftTransactionId)
+        .where(sql`${table.draftTransactionId} is not null`),
+      index("mcp_submissions_bank_transaction_id_idx").on(
+        table.bankTransactionId,
+        table.createdAt,
+        table.id,
+      ),
+      index("mcp_submissions_locator_idx").on(
+        table.sourceArtifactId,
+        table.sourceRow,
+        table.createdAt,
+        table.id,
+      ),
+    ],
+  );
+  const mcpUploadIntents = namespace.table(
+    "mcp_upload_intents",
+    {
+      credentialId: uuid("credential_id")
+        .notNull()
+        .references(() => mcpCredentials.id, { onDelete: "restrict" }),
+      requestKey: varchar("request_key", { length: 200 }).notNull(),
+      payloadSha256: varchar("payload_sha256", { length: 64 }).notNull(),
+      artifactId: uuid("artifact_id").notNull(),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      primaryKey({
+        name: "mcp_upload_intents_pkey",
+        columns: [table.credentialId, table.requestKey],
+      }),
+      uniqueIndex("mcp_upload_intents_artifact_id_uidx").on(table.artifactId),
+      check(
+        "mcp_upload_intents_request_key_check",
+        sql`${table.requestKey} ~ '^[A-Za-z0-9._:-]+$'`,
+      ),
+      check(
+        "mcp_upload_intents_payload_sha256_check",
+        sql`${table.payloadSha256} ~ '^[a-f0-9]{64}$'`,
+      ),
+    ],
+  );
   return {
     namespace,
     users,
@@ -357,5 +532,8 @@ export function createFolioSchema(schemaName: string) {
     bankTransactionArtifacts,
     authAttempts,
     authSessions,
+    mcpCredentials,
+    mcpSubmissions,
+    mcpUploadIntents,
   };
 }

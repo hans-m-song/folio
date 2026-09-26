@@ -1311,3 +1311,30 @@ li {
     padding-inline: 0.75rem;
   }
 }
+.csv-duplicate-warnings {
+  display: grid;
+  gap: 0.45rem;
+  margin-block: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid #d49a43;
+  border-radius: 0.5rem;
+  background: #fff8e9;
+  color: #5c3b13;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.csv-duplicate-warnings p,
+.csv-duplicate-warnings ul {
+  margin: 0;
+}
+
+.csv-duplicate-warnings ul {
+  padding-inline-start: 1.2rem;
+}
+
+.artifact-duplicate-warning {
+  margin-block: 0.5rem;
+  color: var(--warning);
+  font-size: 0.84rem;
+}

@@ -346,11 +346,25 @@ navigation can be developed separately from candidate-query changes.
 
 ### BILL-M6 — Local Codex MCP artifact and draft intake
 
-Status: planning boundary confirmed on 26 September 2026; implementation not
-started. Next planned milestone, ahead of BILL-M5 and BILL-M7. Task:
+Status: implementation passes synthetic functional tests as of 26 September
+2026; local rollout and live-database verification remain, ahead of BILL-M5
+and BILL-M7. Task:
 BILL-T34 — Upload source artifacts, submit drafts and match suggestions, and
 review them through existing Folio workflows. Detailed tentative contract:
 [MCP artifact and draft intake](mcp-plan.md).
+
+Implementation checklist (synthetic functional tests only; end-to-end deferred):
+
+- [x] Persist validated PDF and CSV uploads in a shared Awaiting review inbox;
+      retain human approval/import gates and reload-safe file listing.
+- [x] Expose loopback-only, scoped MCP metadata and two-step upload tools.
+- [x] Accept idempotent draft and match suggestions without recording or matching;
+      show them in existing Reconcile and transaction-review workflows.
+- [x] Verify functional requirements with synthetic fixtures, typecheck, and lint
+      (559 tests passed, one skipped on 26 September 2026).
+- [ ] Verify migrations and deferred evidence trigger against a live local
+      PostgreSQL instance; run local Codex-to-Folio smoke and browser E2E only
+      when the operator authorises that later test phase.
 
 Goal: let local Codex submit source artifacts, draft-transaction and match
 suggestions through a stateless MCP endpoint, without recording a transaction,
@@ -418,8 +432,10 @@ URLs and binary responses. Codex may inspect a specific file containing PII
 only after the operator explicitly submits it for review or approves its read;
 no background inspection is authorised. Remote access also depends on
 BILL-T09B, BILL-T10, and public-exposure verification. Parallel
-boundary: protocol endpoint and Reconcile suggestion UI should share one domain
-contract but can be built independently after that contract is approved.
+boundary: protocol endpoint and Reconcile suggestion UI share one domain
+contract. Synthetic functional verification is complete; PostgreSQL-backed
+workflow, local Codex smoke, and browser E2E gates are deferred at the user's
+request and are not evidence of current runtime readiness.
 
 ### BILL-M7 — Dark appearance
 

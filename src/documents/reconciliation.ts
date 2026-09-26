@@ -4,10 +4,7 @@ import {
   type ArtifactRepository,
 } from "./service";
 import type { ObjectStorage, StoredObjectHead } from "./storage";
-import {
-  getArtifactProfile,
-  isBankArtifactProfile,
-} from "../artifacts/profiles";
+import { getArtifactProfile } from "../artifacts/profiles";
 
 export const RECOVERY_CONFIRMATION = "RECOVER_EXACT_PENDING_UPLOADS";
 
@@ -18,7 +15,6 @@ export type UploadReconciliation =
   | "missing_immutable_version"
   | "metadata_mismatch"
   | "invalid_pdf_signature"
-  | "unsupported_profile"
   | "object_unavailable_or_denied";
 
 export interface ReconciliationResult {
@@ -60,10 +56,6 @@ export async function reconcilePendingUploads(input: {
   for (const artifact of input.artifacts) {
     if (artifact.state !== "pending" || artifact.versionId !== null) {
       results.push({ artifactId: artifact.id, status: "already_resolved" });
-      continue;
-    }
-    if (isBankArtifactProfile(artifactProfileOf(artifact))) {
-      results.push({ artifactId: artifact.id, status: "unsupported_profile" });
       continue;
     }
     let versionId: string | undefined;
@@ -130,7 +122,7 @@ export async function reconcilePendingUploads(input: {
       continue;
     }
     try {
-      await input.repository.confirmAvailable(artifact.id, versionId);
+      await input.repository.confirmAwaitingReview(artifact.id, versionId);
       results.push({ artifactId: artifact.id, status: "recovered" });
     } catch (error) {
       const current = await input.repository.getArtifact(artifact.id);

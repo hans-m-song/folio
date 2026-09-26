@@ -25,6 +25,7 @@ import {
   ManualTransactionForm,
   type ManualTransactionSubmission,
 } from "../components/manual-transaction-form";
+import { BankProposalSuggestions } from "../components/bank-proposal-suggestions";
 import type { ManualTransactionServerIssue } from "../domain/manual-transaction";
 import type {
   BankClassification,
@@ -968,6 +969,11 @@ function BankReconcilePage() {
                 </div>
               )}
             </dl>
+
+            <BankProposalSuggestions
+              bankTransactionId={selected.id}
+              suggestions={data.suggestions}
+            />
 
             <fieldset
               className="banking-candidate-fieldset"

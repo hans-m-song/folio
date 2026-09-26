@@ -6,8 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   findArtifactFilenameMatches: vi.fn(),
+  listArtifacts: vi.fn(),
   startArtifactUpload: vi.fn(),
+  confirmArtifactUpload: vi.fn(),
   previewBankCsv: vi.fn(),
+  getCsvDuplicateWarnings: vi.fn(),
   confirmBankImport: vi.fn(),
   cancelBankImport: vi.fn(),
   rejectArtifact: vi.fn(),
@@ -20,12 +23,15 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("../server/operations", () => ({
   findArtifactFilenameMatches: mocks.findArtifactFilenameMatches,
+  listArtifacts: mocks.listArtifacts,
   startArtifactUpload: mocks.startArtifactUpload,
+  confirmArtifactUpload: mocks.confirmArtifactUpload,
   rejectArtifact: mocks.rejectArtifact,
 }));
 
 vi.mock("../server/bank-operations", () => ({
   previewBankCsv: mocks.previewBankCsv,
+  getCsvDuplicateWarnings: mocks.getCsvDuplicateWarnings,
   confirmBankImport: mocks.confirmBankImport,
   cancelBankImport: mocks.cancelBankImport,
 }));
@@ -40,6 +46,7 @@ beforeEach(() => {
   });
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
   mocks.findArtifactFilenameMatches.mockReset().mockResolvedValue([]);
+  mocks.listArtifacts.mockReset().mockResolvedValue({ total: 0, rows: [] });
   mocks.startArtifactUpload.mockReset().mockImplementation(({ data }) =>
     Promise.resolve({
       artifact: {
@@ -67,11 +74,21 @@ beforeEach(() => {
     earliestDate: "2026-08-27",
     latestDate: "2026-08-27",
   });
+  mocks.getCsvDuplicateWarnings.mockReset().mockResolvedValue({
+    artifactId: "11111111-1111-4111-8111-111111111111",
+    profile: "commbank_transaction_history_csv_v1",
+    rowCount: 1,
+    rowIdentityLimitReached: false,
+    warnings: [],
+  });
   mocks.confirmBankImport.mockReset().mockImplementation(async ({ data }) => ({
     status: "imported",
     artifactId: data.artifactId,
     rowCount: 1,
   }));
+  mocks.confirmArtifactUpload.mockReset().mockResolvedValue({
+    state: "awaiting_review",
+  });
   mocks.cancelBankImport.mockReset();
   mocks.rejectArtifact.mockReset().mockResolvedValue({ status: "rejected" });
 });
@@ -119,6 +136,39 @@ const prepareTwoFileBatch = async (
 };
 
 describe("CommBank batch import interaction", () => {
+  it("shows a duplicate content warning without blocking per-file review", async () => {
+    mocks.getCsvDuplicateWarnings.mockResolvedValue({
+      artifactId: "11111111-1111-4111-8111-111111111111",
+      profile: "commbank_transaction_history_csv_v1",
+      rowCount: 1,
+      rowIdentityLimitReached: false,
+      warnings: [
+        {
+          reason: "same_checksum",
+          totalArtifactCount: 1,
+          truncated: false,
+          matches: [
+            {
+              artifactId: "55555555-5555-4555-8555-555555555555",
+              filename: "earlier.csv",
+              matchingRowCount: null,
+            },
+          ],
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<NewBankImportPage embedded />);
+    await user.upload(screen.getByLabelText(/CSV files/), [
+      makeFile("bank-a.csv", [1]),
+    ]);
+    await uploadAndPreview(user);
+
+    expect(await screen.findByText("Possible duplicate source")).toBeTruthy();
+    expect(screen.getByText(/earlier\.csv/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add to batch" })).toBeTruthy();
+  });
+
   it("supports embedding without adding another Banking shell", () => {
     render(<NewBankImportPage embedded />);
 
@@ -168,6 +218,9 @@ describe("CommBank batch import interaction", () => {
       makeFile("bank.csv", [1]),
     );
     await uploadAndPreview(user);
+    expect(mocks.confirmArtifactUpload).toHaveBeenCalledWith({
+      data: { id: "33333333-3333-4333-8333-333333333333" },
+    });
     expect(mocks.confirmBankImport).not.toHaveBeenCalled();
 
     await addActiveFileToBatch(user);
@@ -193,6 +246,51 @@ describe("CommBank batch import interaction", () => {
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
+  });
+
+  it("restores a validated CommBank CSV without restoring batch admission", async () => {
+    const user = userEvent.setup();
+    const artifactId = "88888888-8888-4888-8888-888888888888";
+    mocks.listArtifacts.mockResolvedValue({
+      total: 1,
+      rows: [
+        {
+          id: artifactId,
+          filename: "saved-bank.csv",
+          state: "awaiting_review",
+        },
+      ],
+    });
+
+    const first = render(<NewBankImportPage />);
+    await user.click(
+      await screen.findByRole("button", { name: /saved-bank\.csv/ }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Load saved preview" }),
+    );
+    await screen.findByText("Example movement");
+    await user.click(screen.getByRole("button", { name: "Add to batch" }));
+    expect(
+      screen.getByRole("button", { name: "Review batch (1 file)" }),
+    ).toBeTruthy();
+    first.unmount();
+
+    render(<NewBankImportPage />);
+    expect(
+      await screen.findByRole("button", { name: /saved-bank\.csv/ }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Review batch (1 file)" }),
+    ).toBeNull();
+    expect(mocks.startArtifactUpload).not.toHaveBeenCalled();
+    expect(mocks.confirmBankImport).not.toHaveBeenCalled();
+    expect(mocks.listArtifacts).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        profile: "commbank_transaction_history_csv_v1",
+        state: "awaiting_review",
+      }),
+    });
   });
 
   it("rejects duplicate contents while keeping a single queued file", async () => {
@@ -424,7 +522,7 @@ describe("CommBank batch import interaction", () => {
     ).toEqual([artifactA, artifactB, artifactB]);
   });
 
-  it("retries only the failed preview upload and keeps other queued files", async () => {
+  it("retries the saved preview without re-uploading and keeps other queued files", async () => {
     const user = userEvent.setup();
     render(<NewBankImportPage />);
     mocks.previewBankCsv
@@ -452,7 +550,9 @@ describe("CommBank batch import interaction", () => {
     await user.click(
       screen.getByRole("button", { name: "Upload and preview" }),
     );
-    expect((await screen.findAllByText(/could not be parsed/i)).length).toBe(2);
+    expect(
+      await screen.findByRole("button", { name: "Load saved preview" }),
+    ).toBeTruthy();
     expect(screen.getByRole("button", { name: /bank-b\.csv/ })).toBeTruthy();
     expect(
       screen
@@ -462,7 +562,7 @@ describe("CommBank batch import interaction", () => {
     ).toBe(true);
 
     await user.click(
-      screen.getByRole("button", { name: "Retry upload and preview" }),
+      screen.getByRole("button", { name: "Load saved preview" }),
     );
     await screen.findByText("Example movement");
     await user.click(screen.getByRole("button", { name: /bank-b\.csv/ }));
@@ -476,6 +576,6 @@ describe("CommBank batch import interaction", () => {
 
     expect(
       mocks.startArtifactUpload.mock.calls.map(([call]) => call.data.filename),
-    ).toEqual(["bank-a.csv", "bank-a.csv", "bank-b.csv"]);
+    ).toEqual(["bank-a.csv", "bank-b.csv"]);
   });
 });

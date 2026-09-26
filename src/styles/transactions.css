@@ -69,6 +69,25 @@ button.transaction-table-action {
   max-width: 72rem;
 }
 
+.transaction-proposed-evidence {
+  display: grid;
+  gap: 0.65rem;
+  margin-block: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: var(--surface-muted);
+}
+
+.transaction-proposed-evidence h2,
+.transaction-proposed-evidence p {
+  margin: 0;
+}
+
+.transaction-proposed-evidence .actions {
+  align-items: center;
+}
+
 .transaction-workflow-page__void-actions {
   margin-top: 1rem;
   padding-top: 1rem;

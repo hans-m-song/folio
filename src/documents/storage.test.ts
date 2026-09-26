@@ -75,6 +75,40 @@ describe("S3 object storage", () => {
     expect(internalSend).toHaveBeenCalledOnce();
   });
 
+  it("signs an exact-version inline URL without changing download disposition", async () => {
+    vi.mocked(getSignedUrl).mockClear();
+    const presignClient = {} as never;
+    const storage = new S3ObjectStorage({} as never, presignClient);
+
+    await storage.presignInline(
+      "private-bucket",
+      "private/pdf/opaque",
+      "version-1",
+      "invoice.pdf",
+    );
+    await storage.presignGet(
+      "private-bucket",
+      "private/pdf/opaque",
+      "version-1",
+      "invoice.pdf",
+    );
+
+    const inline = vi.mocked(getSignedUrl).mock.calls[0]!;
+    const download = vi.mocked(getSignedUrl).mock.calls[1]!;
+    expect(inline[0]).toBe(presignClient);
+    expect((inline[1] as GetObjectCommand).input).toMatchObject({
+      Bucket: "private-bucket",
+      Key: "private/pdf/opaque",
+      VersionId: "version-1",
+      ResponseContentDisposition:
+        "inline; filename=\"invoice.pdf\"; filename*=UTF-8''invoice.pdf",
+    });
+    expect((download[1] as GetObjectCommand).input.ResponseContentDisposition)
+      .toBe(
+        "attachment; filename=\"invoice.pdf\"; filename*=UTF-8''invoice.pdf",
+      );
+  });
+
   it("keeps control characters out of the fallback filename", async () => {
     vi.mocked(getSignedUrl).mockClear();
     const storage = new S3ObjectStorage({} as never);

@@ -1,15 +1,20 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { SourceTabs } from "../components/import-profile-tabs";
+import { CsvDuplicateWarnings } from "../components/csv-duplicate-warnings";
 import type { BankCsvPreview } from "../domain/bank-transactions";
+import type { CsvDuplicateWarningReport } from "../database/repository";
 import {
   cancelBankImport,
   confirmBankImport,
+  getCsvDuplicateWarnings,
   previewBankCsv,
 } from "../server/bank-operations";
 import {
+  confirmArtifactUpload,
   findArtifactFilenameMatches,
+  listArtifacts,
   rejectArtifact,
   startArtifactUpload,
 } from "../server/operations";
@@ -125,13 +130,14 @@ export const abandonFailedBankUpload = async (
 };
 
 export const bankUploadFailureMessage = (
-  stage: "prepare" | "upload" | "preview",
+  stage: "prepare" | "upload" | "confirm" | "preview",
   cleanup: FailedBankUploadCleanup,
 ): string => {
   const failure = {
     prepare:
       "The import could not be prepared. Check the selected file and retry.",
     upload: "The browser upload failed. Check the connection and retry.",
+    confirm: "Upload confirmation failed. Retry the saved artifact.",
     preview:
       "The uploaded CSV could not be parsed. Check the fixed CommBank format and retry.",
   }[stage];
@@ -158,6 +164,8 @@ interface BankOverlapWarning {
 type Stage =
   | "choose"
   | "uploading"
+  | "confirm_failed"
+  | "preview_failed"
   | "review"
   | "rejecting"
   | "confirming"
@@ -165,7 +173,8 @@ type Stage =
 
 interface BankImportQueueItem extends BankImportConfirmationCandidate {
   id: string;
-  file: File;
+  file: File | null;
+  filename: string;
   checksumSha256: string | null;
   completedArtifactId: string | null;
   stage: Stage;
@@ -174,6 +183,8 @@ interface BankImportQueueItem extends BankImportConfirmationCandidate {
   overlapWarning: BankOverlapWarning | null;
   filenameMatchCount: number | null;
   filenameMatchCheckFailed: boolean;
+  duplicateWarnings: CsvDuplicateWarningReport | null;
+  duplicateWarningCheckFailed: boolean;
 }
 
 const bankImportQueueStatus = (item: BankImportQueueItem): string => {
@@ -181,6 +192,8 @@ const bankImportQueueStatus = (item: BankImportQueueItem): string => {
   if (item.confirmationStatus === "imported") return "Imported";
   if (item.confirmationStatus === "already_imported") return "Already imported";
   if (item.stage === "uploading") return "Uploading";
+  if (item.stage === "confirm_failed") return "Confirm upload to continue";
+  if (item.stage === "preview_failed") return "Load preview to continue";
   if (item.stage === "rejecting") return "Rejecting";
   if (item.stage === "confirming") return "Importing";
   if (item.confirmationStatus === "overlap") return "Needs acknowledgement";
@@ -286,6 +299,9 @@ export function NewBankImportPage({
   const [batchMessage, setBatchMessage] = useState("");
   const [checkingFiles, setCheckingFiles] = useState(false);
   const [batchConfirming, setBatchConfirming] = useState(false);
+  const [savedQueueOffset, setSavedQueueOffset] = useState(0);
+  const [savedQueueTotal, setSavedQueueTotal] = useState(0);
+  const [loadingSavedQueue, setLoadingSavedQueue] = useState(false);
   const activeItem = queue.find((item) => item.id === activeId) ?? null;
   const acceptedItems = queue.filter((item) => item.decision === "accepted");
   const pendingPreviewCount = queue.filter(
@@ -321,6 +337,83 @@ export function NewBankImportPage({
     );
   };
 
+  const checkDuplicateWarnings = async (id: string, artifactId: string) => {
+    try {
+      const duplicateWarnings = await getCsvDuplicateWarnings({
+        data: { artifactId },
+      });
+      updateItem(id, (current) => ({
+        ...current,
+        duplicateWarnings,
+        duplicateWarningCheckFailed: false,
+      }));
+    } catch {
+      updateItem(id, (current) => ({
+        ...current,
+        duplicateWarningCheckFailed: true,
+      }));
+    }
+  };
+
+  const loadSavedQueue = async (offset: number) => {
+    setLoadingSavedQueue(true);
+    try {
+      const result = await listArtifacts({
+        data: {
+          search: "",
+          profile: "commbank_transaction_history_csv_v1",
+          state: "awaiting_review",
+          from: null,
+          to: null,
+          linkage: "all",
+          limit: 100,
+          offset,
+        },
+      });
+      const existingIds = new Set(
+        queueRef.current.map((item) => item.artifactId),
+      );
+      const restored = result.rows
+        .filter((row) => !existingIds.has(row.id))
+        .map(
+          (row): BankImportQueueItem => ({
+            id: `saved-bank-import-${row.id}`,
+            file: null,
+            filename: row.filename,
+            checksumSha256: null,
+            artifactId: row.id,
+            completedArtifactId: null,
+            preview: null,
+            decision: "pending",
+            confirmationStatus: null,
+            overlapFingerprint: null,
+            acknowledgedOverlapFingerprint: null,
+            stage: "preview_failed",
+            message: "Validated upload awaits preview and a per-file decision.",
+            errorMessage: null,
+            overlapWarning: null,
+            filenameMatchCount: 0,
+            filenameMatchCheckFailed: false,
+            duplicateWarnings: null,
+            duplicateWarningCheckFailed: false,
+          }),
+        );
+      commitQueue([...queueRef.current, ...restored]);
+      setSavedQueueOffset(offset + result.rows.length);
+      setSavedQueueTotal(result.total);
+    } catch {
+      setQueueMessage(
+        "Saved CommBank files could not be loaded. Retry from the file library.",
+      );
+    } finally {
+      setLoadingSavedQueue(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadSavedQueue(0);
+  }, []);
+
   const addFiles = async (files: File[]) => {
     if (!files.length) return;
     setView("files");
@@ -352,6 +445,7 @@ export function NewBankImportPage({
       added.push({
         id,
         file: item.file,
+        filename: item.file.name,
         checksumSha256: item.checksumSha256,
         artifactId: null,
         completedArtifactId: null,
@@ -368,6 +462,8 @@ export function NewBankImportPage({
         overlapWarning: null,
         filenameMatchCount: null,
         filenameMatchCheckFailed: false,
+        duplicateWarnings: null,
+        duplicateWarningCheckFailed: false,
       });
     }
     if (added.length) {
@@ -376,7 +472,7 @@ export function NewBankImportPage({
       void findArtifactFilenameMatches({
         data: {
           profile: "commbank_transaction_history_csv_v1",
-          filenames: added.map((item) => item.file.name),
+          filenames: added.map((item) => item.filename),
         },
       })
         .then((matchCounts) => {
@@ -413,11 +509,12 @@ export function NewBankImportPage({
 
   const upload = async (id: string) => {
     const item = queueRef.current.find((candidate) => candidate.id === id);
-    if (!item || item.stage !== "choose" || item.artifactId) return;
+    if (!item?.file || item.stage !== "choose" || item.artifactId) return;
+    const file = item.file;
     let checksumSha256 = item.checksumSha256;
     if (!checksumSha256) {
       try {
-        checksumSha256 = await sha256Base64(item.file);
+        checksumSha256 = await sha256Base64(file);
       } catch {
         updateItem(id, (current) => ({
           ...current,
@@ -451,16 +548,17 @@ export function NewBankImportPage({
     }));
     cancellationRequested.current.delete(id);
     let pendingArtifactId: string | null = null;
-    let failureStage: "prepare" | "upload" | "preview" = "prepare";
+    let failureStage: "prepare" | "upload" | "confirm" | "preview" = "prepare";
+    let confirmed = false;
     try {
       if (cancellationRequested.current.has(id)) throw new Error("Cancelled");
       const started = await startArtifactUpload({
         data: {
           ownerId: null,
           artifactProfile: "commbank_transaction_history_csv_v1",
-          filename: item.file.name,
+          filename: item.filename,
           mediaType: "text/csv",
-          byteSize: item.file.size,
+          byteSize: file.size,
           checksumSha256,
         },
       });
@@ -475,7 +573,7 @@ export function NewBankImportPage({
       if (cancellationRequested.current.has(id)) controller.abort();
       const response = await fetch(started.uploadUrl, {
         method: "PUT",
-        body: item.file,
+        body: file,
         signal: controller.signal,
         headers: {
           "content-type": "text/csv",
@@ -486,6 +584,9 @@ export function NewBankImportPage({
       if (!response.ok) throw new Error("The CSV upload failed");
       if (cancellationRequested.current.has(id))
         throw new Error("The import was cancelled");
+      failureStage = "confirm";
+      await confirmArtifactUpload({ data: { id: started.artifact.id } });
+      confirmed = true;
       failureStage = "preview";
       const parsed = await previewBankCsv({
         data: { artifactId: started.artifact.id },
@@ -501,7 +602,28 @@ export function NewBankImportPage({
           ? "Choose whether to add this preview to the batch or reject it. Files with errors cannot be imported."
           : `Review all ${parsed.rows.length} rows, then add this file to the batch or reject it.`,
       }));
+      void checkDuplicateWarnings(id, started.artifact.id);
     } catch {
+      if (confirmed && pendingArtifactId) {
+        updateItem(id, (current) => ({
+          ...current,
+          stage: "preview_failed",
+          message:
+            "The validated CSV is retained for review. Retry loading its preview.",
+          errorMessage: "Preview could not be loaded.",
+        }));
+        return;
+      }
+      if (failureStage === "confirm" && pendingArtifactId) {
+        updateItem(id, (current) => ({
+          ...current,
+          stage: "confirm_failed",
+          message:
+            "Upload confirmation is uncertain. Retry confirmation for this artifact; do not upload it again.",
+          errorMessage: "Confirmation could not be verified.",
+        }));
+        return;
+      }
       const cleanup = await abandonFailedBankUpload(
         pendingArtifactId,
         async (artifactId) => cancelBankImport({ data: { artifactId } }),
@@ -526,6 +648,38 @@ export function NewBankImportPage({
     } finally {
       abortControllers.current.delete(id);
       cancellationRequested.current.delete(id);
+    }
+  };
+
+  const resumeReview = async (item: BankImportQueueItem) => {
+    if (!item.artifactId) return;
+    const mustConfirm = item.stage === "confirm_failed";
+    try {
+      if (mustConfirm)
+        await confirmArtifactUpload({ data: { id: item.artifactId } });
+      const parsed = await previewBankCsv({
+        data: { artifactId: item.artifactId },
+      });
+      updateItem(item.id, (current) => ({
+        ...current,
+        preview: parsed,
+        decision: "pending",
+        stage: "review",
+        message: parsed.errors.length
+          ? "Review the errors, then add this file to the batch or reject it."
+          : `Review all ${parsed.rows.length} rows, then add this file to the batch or reject it.`,
+        errorMessage: null,
+      }));
+      void checkDuplicateWarnings(item.id, item.artifactId);
+    } catch {
+      updateItem(item.id, (current) => ({
+        ...current,
+        stage: mustConfirm ? "confirm_failed" : "preview_failed",
+        message: mustConfirm
+          ? "Confirmation could not be verified. Retry the same artifact."
+          : "Preview could not be loaded. Retry the saved artifact.",
+        errorMessage: "Review could not continue.",
+      }));
     }
   };
 
@@ -840,7 +994,7 @@ export function NewBankImportPage({
                     }}
                   >
                     <span className="banking-import-queue-file">
-                      <strong>{item.file.name}</strong>
+                      <strong>{item.filename}</strong>
                       {item.preview && (
                         <small>
                           {item.preview.rows.length} valid rows ·{" "}
@@ -878,7 +1032,7 @@ export function NewBankImportPage({
                           role="status"
                         >
                           Could not check this filename; upload remains
-                          available.
+                          possible.
                         </small>
                       )}
                     </span>
@@ -892,6 +1046,13 @@ export function NewBankImportPage({
                       {bankImportQueueStatus(item)}
                     </span>
                   </button>
+                  <CsvDuplicateWarnings report={item.duplicateWarnings} />
+                  {item.duplicateWarningCheckFailed && (
+                    <p className="artifact-duplicate-warning" role="status">
+                      Could not check duplicate CSV content; review remains
+                      possible.
+                    </p>
+                  )}
                   {item.decision === "rejected" && (
                     <a
                       className="banking-import-rejected-link"
@@ -907,6 +1068,18 @@ export function NewBankImportPage({
             <p className="banking-import-queue-empty">
               No files queued. Select one or more CSVs to begin.
             </p>
+          )}
+          {savedQueueOffset < savedQueueTotal && (
+            <button
+              type="button"
+              className="secondary"
+              disabled={loadingSavedQueue || batchConfirming}
+              onClick={() => void loadSavedQueue(savedQueueOffset)}
+            >
+              {loadingSavedQueue
+                ? "Loading saved files…"
+                : "Load more saved files"}
+            </button>
           )}
           {acceptedItems.length > 0 && (
             <div className="actions banking-action-row banking-import-queue-actions">
@@ -951,7 +1124,7 @@ export function NewBankImportPage({
               <>
                 <h3 id="file-stage-heading">Upload selected file</h3>
                 <p className="banking-selected-file">
-                  Selected: <strong>{activeItem.file.name}</strong>
+                  Selected: <strong>{activeItem.filename}</strong>
                 </p>
                 {activeItem.stage === "uploading" && (
                   <p className="banking-import-progress" role="status">
@@ -994,6 +1167,26 @@ export function NewBankImportPage({
                     </button>
                   )}
                 </div>
+              </>
+            )}
+
+            {(activeItem.stage === "confirm_failed" ||
+              activeItem.stage === "preview_failed") && (
+              <>
+                <h3 id="file-stage-heading">Continue file review</h3>
+                <p className="banking-selected-file">
+                  Saved file: <strong>{activeItem.filename}</strong>
+                </p>
+                <p className="banking-muted">{activeItem.message}</p>
+                <button
+                  type="button"
+                  disabled={batchConfirming}
+                  onClick={() => void resumeReview(activeItem)}
+                >
+                  {activeItem.stage === "confirm_failed"
+                    ? "Retry upload confirmation"
+                    : "Load saved preview"}
+                </button>
               </>
             )}
 
@@ -1097,7 +1290,7 @@ export function NewBankImportPage({
                 aria-labelledby="import-result-heading"
               >
                 <p className="banking-kicker">Import result</p>
-                <h3 id="import-result-heading">{activeItem.file.name}</h3>
+                <h3 id="import-result-heading">{activeItem.filename}</h3>
                 <p>{activeItem.message}</p>
                 <div className="actions banking-action-row">
                   <a
@@ -1178,7 +1371,7 @@ export function NewBankImportPage({
                   >
                     <div className="banking-import-batch-file-heading">
                       <div>
-                        <h4 id={`batch-file-${item.id}`}>{item.file.name}</h4>
+                        <h4 id={`batch-file-${item.id}`}>{item.filename}</h4>
                         <p
                           className="banking-import-batch-status"
                           role="status"

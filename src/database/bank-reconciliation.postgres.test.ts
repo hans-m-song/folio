@@ -58,14 +58,20 @@ const insertArtifact = async (
   return id;
 };
 
-const insertPendingBankArtifact = async () => {
+const insertAwaitingBankArtifact = async () => {
   const id = randomUUID();
   const checksum = createHash("sha256").update(id).digest("base64");
 
   await pool.query(
-    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, media_type, byte_size, checksum_sha256, state)
-     VALUES ($1,$2,$2,'commbank_transaction_history_csv_v1',$3,'synthetic-bank-history.csv','text/csv',1,$4,'pending')`,
-    [id, actorId, `tests/bill-t41/${id}`, checksum],
+    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, version_id, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
+     VALUES ($1,$2,$2,'commbank_transaction_history_csv_v1',$3,$4,'synthetic-bank-history.csv','text/csv',1,$5,'awaiting_review',now())`,
+    [
+      id,
+      actorId,
+      `tests/bill-t41/${id}`,
+      `synthetic-version-${id}`,
+      checksum,
+    ],
   );
   createdArtifactIds.push(id);
   return id;
@@ -253,8 +259,8 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
     await pool.end();
   });
 
-  it("confirms a pending CommBank artifact before linking imported rows", async () => {
-    const artifactId = await insertPendingBankArtifact();
+  it("publishes an awaiting-review CommBank artifact with its imported rows", async () => {
+    const artifactId = await insertAwaitingBankArtifact();
     const row = importedBankRow(artifactId);
 
     const result = await bankRepository.confirmImport({
@@ -291,7 +297,7 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
   });
 
   it("rolls back artifact confirmation and inserted rows when a bank link fails", async () => {
-    const artifactId = await insertPendingBankArtifact();
+    const artifactId = await insertAwaitingBankArtifact();
     const row = importedBankRow(artifactId);
 
     await pool.query(`
@@ -326,9 +332,9 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
       [artifactId, row.description],
     );
     expect(persisted.rows[0]).toMatchObject({
-      state: "pending",
-      version_id: null,
-      confirmed_at: null,
+      state: "awaiting_review",
+      version_id: `synthetic-version-${artifactId}`,
+      confirmed_at: expect.any(Date),
       link_count: 0,
       bank_row_count: 0,
     });

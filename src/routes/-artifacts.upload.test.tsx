@@ -101,7 +101,10 @@ beforeEach(() => {
       uploadUrl: `https://upload.example.test/${encodeURIComponent(data.filename)}`,
     }),
   );
-  operations.confirmArtifactUpload.mockImplementation(async ({ data }) => data);
+  operations.confirmArtifactUpload.mockImplementation(async ({ data }) => ({
+    ...data,
+    state: "awaiting_review",
+  }));
   vi.stubGlobal("XMLHttpRequest", FakeXmlHttpRequest);
   vi.stubGlobal("crypto", {
     subtle: { digest: vi.fn().mockResolvedValue(new ArrayBuffer(32)) },
@@ -208,7 +211,16 @@ describe("bulk invoice PDF upload", () => {
     expect(secondRequest.body).toBe(second);
     secondRequest.finish(200);
     await screen.findByText(
-      "Confirmed and available as reusable evidence in the file library.",
+      "Upload confirmed. This PDF is awaiting human review and is not available as evidence yet.",
+    );
+    expect(
+      screen
+        .getByRole("link", {
+          name: "Review this PDF in the file library",
+        })
+        .getAttribute("href"),
+    ).toBe(
+      "/imports/library?profile=manual_invoice_pdf_v1&state=awaiting_review&linkage=unlinked",
     );
     expect(operations.confirmArtifactUpload).toHaveBeenCalledTimes(1);
 
@@ -220,7 +232,7 @@ describe("bulk invoice PDF upload", () => {
     expect(operations.startArtifactUpload).toHaveBeenCalledTimes(3);
     FakeXmlHttpRequest.requests[2]!.finish(200);
     await waitFor(() =>
-      expect(screen.getAllByText("Available in file library").length).toBe(2),
+      expect(screen.getAllByText("Awaiting review").length).toBe(2),
     );
     expect(operations.confirmArtifactUpload).toHaveBeenCalledTimes(2);
   });
@@ -258,10 +270,13 @@ describe("bulk invoice PDF upload", () => {
     expect(operations.startArtifactUpload).not.toHaveBeenCalled();
   });
 
-  it("does not offer a blind retry after uncertain PDF confirmation", async () => {
-    operations.confirmArtifactUpload.mockRejectedValueOnce(
-      new Error("Confirmation response unavailable"),
-    );
+  it("retries uncertain confirmation against the retained artifact ID", async () => {
+    operations.confirmArtifactUpload
+      .mockRejectedValueOnce(new Error("Confirmation response unavailable"))
+      .mockResolvedValueOnce({
+        id: "artifact-1",
+        state: "awaiting_review",
+      });
     const file = new File(["%PDF-data"], "invoice.pdf", {
       type: "application/pdf",
     });
@@ -277,18 +292,37 @@ describe("bulk invoice PDF upload", () => {
 
     expect(
       await screen.findByText(
-        "Confirmation could not be verified. Check the file library before retrying this PDF.",
+        "Confirmation response was uncertain. Retry confirmation for this uploaded PDF. The retry handle lasts only while this page is open; after reload, check the file library before uploading it again.",
       ),
     ).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Retry upload for invoice.pdf" }),
     ).toBeNull();
+    const retryButton = screen.getByRole("button", {
+      name: "Retry confirmation for invoice.pdf",
+    });
+    expect(retryButton).toBeTruthy();
     expect(
-      screen.getByRole("link", {
-        name: "Check the file library before adding this file again",
-      }),
+      screen.getByRole("link", { name: "Check the file library" }),
     ).toBeTruthy();
     expect(operations.startArtifactUpload).toHaveBeenCalledOnce();
+    expect(operations.confirmArtifactUpload).toHaveBeenNthCalledWith(1, {
+      data: { id: "artifact-1" },
+    });
+
+    fireEvent.click(retryButton);
+
+    expect(
+      await screen.findByText(
+        "Upload confirmed. This PDF is awaiting human review and is not available as evidence yet.",
+      ),
+    ).toBeTruthy();
+    expect(operations.startArtifactUpload).toHaveBeenCalledOnce();
+    expect(operations.confirmArtifactUpload).toHaveBeenCalledTimes(2);
+    expect(operations.confirmArtifactUpload).toHaveBeenNthCalledWith(2, {
+      data: { id: "artifact-1" },
+    });
+    expect(FakeXmlHttpRequest.requests).toHaveLength(1);
   });
 
   it("retries a known pre-commit storage failure against the existing artifact", async () => {
@@ -314,12 +348,13 @@ describe("bulk invoice PDF upload", () => {
       }),
     );
     await screen.findByText(
-      "Confirmed and available as reusable evidence in the file library.",
+      "Upload confirmed. This PDF is awaiting human review and is not available as evidence yet.",
     );
     expect(operations.startArtifactUpload).toHaveBeenCalledOnce();
     expect(operations.confirmArtifactUpload).toHaveBeenCalledTimes(2);
     expect(operations.confirmArtifactUpload).toHaveBeenNthCalledWith(2, {
       data: { id: "artifact-1" },
     });
+    expect(FakeXmlHttpRequest.requests).toHaveLength(1);
   });
 });

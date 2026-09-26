@@ -1009,8 +1009,49 @@ inspect contents; background reads remain prohibited. No real file has been
 read for this planning decision. `docs/mcp-plan.md` and BILL-M6 in
 `docs/roadmap.md` have been updated; no MCP code has started.
 
+## BILL-M6 implementation checkpoint — 2026-09-26
+
+The user authorised implementation with synthetic functional tests only;
+end-to-end testing is deferred. The shared artifact-review core now confirms
+validated uploads into `awaiting_review`, requires explicit PDF approval, and
+publishes CSV artifacts only through human-confirmed import. Stripe and
+CommBank queues can reload validated files by artifact ID after a page reload;
+batch selections remain temporary. Manual transaction upload now stages a new
+PDF for explicit preview and approval before the transaction can be saved with
+that evidence. The focused tests, full synthetic Vitest suite (488 passed, one
+skipped), typecheck, scoped ESLint, and `git diff --check` passed at this
+checkpoint. No live data or end-to-end services were used.
+
+MCP data/provenance and loopback transport are being implemented on separate
+file surfaces. Neither is integrated yet. Remaining gates include credential
+provisioning, all eight scoped tools, duplicate warnings shared by UI/MCP,
+draft/PDF promotion rules, Reconcile suggestion UI, and protocol/security
+verification with synthetic data. Do not represent BILL-M6 as complete.
+
 The user further confirmed that artifact filenames will not contain PII.
 `list_artifacts` may therefore return original filenames without per-file
 approval or redaction. This is an operator-provided convention, not a
 guarantee verified by Folio; it does not authorise original-file content
 reads. No artifact metadata or original files were inspected for this decision.
+
+## BILL-M6 synthetic implementation checkpoint — 2026-09-26
+
+The loopback-only stateless MCP server, six credential scopes, eight domain
+tools, durable credential-bound upload intents, draft and match-suggestion
+persistence, Reconcile suggestion cards, proposed-PDF review gate, and shared
+CSV duplicate warnings are integrated. The MCP upload profiles are invoice
+PDF, Stripe itemised CSV, and CommBank history CSV; original-file retrieval is
+absent. Repeating a begin-upload key with the same canonical payload reuses
+the pending artifact and signs a fresh URL; conflicting payloads fail. Human
+PDF approval, CSV import, draft recording, and bank matching remain separate
+actions. Stale and resolved suggestions have explicit warnings.
+
+Unified synthetic `pnpm test` passed: 63 files and 559 tests, with one skipped.
+`pnpm typecheck`, `pnpm lint`, and `git diff --check` passed. No live database,
+real artifact, browser E2E, or Codex-to-Folio smoke test ran, per the user's
+testing boundary. The deferred PostgreSQL evidence trigger has structural
+tests but has not been executed against a live database. Before operator use,
+apply migrations 0010–0012 in the local environment, provision a distinct
+credential actor and permitted owner, issue a restricted bearer credential,
+and verify the local connection. Do not claim rollout complete until those
+steps succeed.

@@ -331,6 +331,39 @@ export const getTransaction = createServerFn({ method: "GET" })
     }),
   );
 
+export const getProposedDraftEvidence = createServerFn({ method: "GET" })
+  .validator(z.object({ transactionId: z.string().uuid() }).strict())
+  .handler(async ({ data }) =>
+    runOperation("Load proposed draft evidence", async () => {
+      const { actor, current } = await authorize(
+        operationPermissions.getTransaction,
+      );
+      return current.proposalRepository.getProposedEvidenceForDraft(
+        actor.id,
+        data.transactionId,
+      );
+    }),
+  );
+
+export const discardProposedDraftEvidence = createServerFn({ method: "POST" })
+  .validator(z.object({ transactionId: z.string().uuid() }).strict())
+  .handler(async ({ data }) =>
+    runOperation(
+      "Discard proposed draft evidence",
+      async () => {
+        const { actor, current } = await authorize(
+          operationPermissions.saveManualTransaction,
+        );
+        return current.proposalRepository.discardProposedEvidenceForDraft(
+          actor.id,
+          data.transactionId,
+        );
+      },
+      {},
+      { mutation: true },
+    ),
+  );
+
 export const saveManualTransaction = createServerFn({ method: "POST" })
   .validator(z.unknown())
   .handler(async ({ data }) =>
@@ -506,7 +539,30 @@ export const confirmArtifactUpload = createServerFn({ method: "POST" })
         const { actor, current } = await authorize(
           operationPermissions.confirmArtifactUpload,
         );
+        const artifact = await current.repository.getArtifact(data.id);
+        if (
+          artifact?.artifactProfile &&
+          isBankArtifactProfile(artifact.artifactProfile)
+        )
+          requirePermission(actor, permissions.bankActivityImport);
         return current.documents.confirmUpload(actor.id, data.id);
+      },
+      {},
+      { mutation: true },
+    ),
+  );
+
+export const approveArtifact = createServerFn({ method: "POST" })
+  .validator(z.object({ id: z.string().uuid() }).strict())
+  .handler(async ({ data }) =>
+    runOperation(
+      "Approve PDF artifact",
+      async () => {
+        const { actor, current } = await authorize(
+          operationPermissions.confirmArtifactUpload,
+        );
+        requirePermission(actor, permissions.artifactDownload);
+        return current.documents.approveArtifact(actor.id, data.id);
       },
       {},
       { mutation: true },
@@ -521,6 +577,17 @@ export const downloadArtifact = createServerFn({ method: "POST" })
         operationPermissions.downloadArtifact,
       );
       return current.documents.download(actor.id, data.id);
+    }),
+  );
+
+export const previewArtifactForReview = createServerFn({ method: "POST" })
+  .validator(z.object({ id: z.string().uuid() }).strict())
+  .handler(async ({ data }) =>
+    runOperation("Preview PDF artifact for review", async () => {
+      const { actor, current } = await authorize(
+        operationPermissions.downloadArtifact,
+      );
+      return current.documents.previewArtifactForReview(actor.id, data.id);
     }),
   );
 
@@ -578,6 +645,7 @@ export const listArtifacts = createServerFn({ method: "GET" })
         state: z
           .enum([
             "pending",
+            "awaiting_review",
             "available",
             "rejected",
             "superseded",
@@ -690,12 +758,12 @@ export const importStripeCsv = createServerFn({ method: "POST" })
         const { actor, current } = await authorize(
           operationPermissions.importStripeCsv,
         );
-        const csv = await current.documents.readAvailableText(
+        const object = await current.documents.readReviewText(
           actor.id,
           data.artifactId,
-          "stripe_csv",
+          "stripe_balance_itemised_csv_v1",
         );
-        const rows = parseStripeBalanceCsv(csv, {
+        const rows = parseStripeBalanceCsv(object.text, {
           reportingTimezone: current.config.reportingTimezone,
         });
         return current.repository.importStripe(
@@ -726,12 +794,12 @@ export const previewStripeCsv = createServerFn({ method: "POST" })
       const { actor, current } = await authorize(
         operationPermissions.importStripeCsv,
       );
-      const csv = await current.documents.readAvailableText(
+      const object = await current.documents.readReviewText(
         actor.id,
         data.artifactId,
-        "stripe_csv",
+        "stripe_balance_itemised_csv_v1",
       );
-      const rows = parseStripeBalanceCsv(csv, {
+      const rows = parseStripeBalanceCsv(object.text, {
         reportingTimezone: current.config.reportingTimezone,
       });
       const statuses = await current.repository.previewStripeImport(

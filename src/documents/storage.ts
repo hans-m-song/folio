@@ -45,9 +45,18 @@ export interface ObjectStorage {
     versionId: string,
     filename: string,
   ): Promise<string>;
+  presignInline(
+    bucket: string,
+    key: string,
+    versionId: string,
+    filename: string,
+  ): Promise<string>;
 }
 
-const contentDisposition = (filename: string): string => {
+const contentDisposition = (
+  disposition: "attachment" | "inline",
+  filename: string,
+): string => {
   const safeFilename = [...filename]
     .map((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
@@ -75,7 +84,7 @@ const contentDisposition = (filename: string): string => {
     /[!'()*]/g,
     (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
   );
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 };
 
 export class S3ObjectStorage implements ObjectStorage {
@@ -231,7 +240,25 @@ export class S3ObjectStorage implements ObjectStorage {
         Bucket: bucket,
         Key: key,
         VersionId: versionId,
-        ResponseContentDisposition: contentDisposition(filename),
+        ResponseContentDisposition: contentDisposition("attachment", filename),
+      }),
+      { expiresIn: 300 },
+    );
+  }
+
+  async presignInline(
+    bucket: string,
+    key: string,
+    versionId: string,
+    filename: string,
+  ): Promise<string> {
+    return getSignedUrl(
+      this.presignClient,
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        VersionId: versionId,
+        ResponseContentDisposition: contentDisposition("inline", filename),
       }),
       { expiresIn: 300 },
     );
