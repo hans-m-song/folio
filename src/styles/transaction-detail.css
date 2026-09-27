@@ -5,6 +5,14 @@
 .transaction-detail-page > section {
   margin-top: 0;
 }
+.transaction-detail-page > header {
+  display: grid;
+  justify-items: start;
+  gap: 0.5rem;
+}
+.transaction-detail-page > header > * {
+  margin: 0;
+}
 .transaction-detail-back {
   width: fit-content;
   color: var(--accent-strong);
