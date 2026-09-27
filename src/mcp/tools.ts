@@ -16,6 +16,7 @@ import type {
 } from "../database/repository";
 import {
   ProposalAuthorizationError,
+  ProposalDraftNotEditableError,
   ProposalIdempotencyConflictError,
   type ProposalRepository,
 } from "../database/proposal-repository";
@@ -67,6 +68,7 @@ type McpPublicErrorCode =
   | "INVALID_BANK_ROW_LOCATOR"
   | "MATCH_CANDIDATE_NOT_ELIGIBLE"
   | "EVIDENCE_NOT_REVIEWABLE"
+  | "DRAFT_NOT_EDITABLE"
   | "REQUEST_FAILED";
 
 class McpToolError extends Error {
@@ -88,6 +90,11 @@ const safeError = (
     };
   if (error instanceof ProposalAuthorizationError)
     return { code: "NOT_AUTHORIZED", message: "Credential is not authorized." };
+  if (error instanceof ProposalDraftNotEditableError)
+    return {
+      code: "DRAFT_NOT_EDITABLE",
+      message: "The draft is no longer editable by this credential.",
+    };
   if (
     error instanceof ProposalIdempotencyConflictError ||
     error instanceof ArtifactUploadIdempotencyConflictError
@@ -259,6 +266,15 @@ const draftInput = z
   })
   .strict();
 
+const editDraftInput = z
+  .object({
+    transactionId: z.string().uuid(),
+    changes: draftTransactionFieldsSchema
+      .partial()
+      .refine((changes) => Object.keys(changes).length > 0),
+  })
+  .strict();
+
 const suggestMatchInput = z
   .object({
     idempotencyKey: z.string().min(1).max(200),
@@ -321,6 +337,11 @@ const draftTransactionJsonSchema = jsonObject(
   },
   ["kind"],
 );
+
+const draftTransactionChangesJsonSchema: JsonSchemaType = {
+  ...draftTransactionJsonSchema,
+  required: [],
+};
 
 const directBankTargetJsonSchema = jsonObject(
   {
@@ -788,6 +809,41 @@ const registerToolsForPrincipal = (
     );
 
     server.registerTool(
+      "edit_draft_transaction",
+      {
+        description:
+          "Change fields on a still-draft transaction submitted by this credential. Omitted fields stay unchanged; this cannot record, attach evidence, or match a bank row.",
+        inputSchema: fromJsonSchema<{
+          transactionId: string;
+          changes: Record<string, unknown>;
+        }>(
+          jsonObject(
+            {
+              transactionId: { type: "string", format: "uuid" },
+              changes: draftTransactionChangesJsonSchema,
+            },
+            ["transactionId", "changes"],
+          ),
+        ),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async (input) =>
+        runTool(async () => {
+          const request = editDraftInput.parse(input);
+          return dependencies.proposalRepository.updateDraft(
+            principal.credentialId,
+            request.transactionId,
+            request.changes,
+          );
+        }),
+    );
+
+    server.registerTool(
       "suggest_existing_match",
       {
         description:
@@ -913,7 +969,7 @@ export interface McpToolDependencies {
   >;
   proposalRepository: Pick<
     ProposalRepository,
-    "submit" | "getSubmissionStatus"
+    "submit" | "updateDraft" | "getSubmissionStatus"
   >;
   getCsvDuplicateWarnings?: (
     actorId: string,

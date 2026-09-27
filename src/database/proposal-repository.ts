@@ -13,6 +13,7 @@ import {
   type ValidatedCommBankArtifactRowLocator,
 } from "../domain/proposals";
 import type { TransactionInput } from "../domain/types";
+import { transactionInputSchema } from "../domain/types";
 import { assertTransactionRules } from "../domain/workflow";
 
 export class ProposalIdempotencyConflictError extends Error {
@@ -26,6 +27,30 @@ export class ProposalAuthorizationError extends Error {
   constructor() {
     super("Proposal credential is not authorized");
     this.name = "ProposalAuthorizationError";
+  }
+}
+
+export class ProposalDraftNotEditableError extends Error {
+  constructor() {
+    super("Draft is no longer editable by this credential");
+    this.name = "ProposalDraftNotEditableError";
+  }
+}
+
+export type CredentialParticipant = "administrator" | "actor" | "owner";
+export type CredentialEligibilityReason =
+  | "not_found"
+  | "inactive"
+  | "wrong_role"
+  | "not_distinct";
+
+export class ProposalCredentialEligibilityError extends ProposalAuthorizationError {
+  constructor(
+    readonly participant: CredentialParticipant,
+    readonly reason: CredentialEligibilityReason,
+  ) {
+    super();
+    this.name = "ProposalCredentialEligibilityError";
   }
 }
 
@@ -113,6 +138,7 @@ export class ProposalRepository {
   private readonly transactionsTable: string;
   private readonly bankTransactionsTable: string;
   private readonly artifactsTable: string;
+  private readonly transactionArtifactsTable: string;
   private readonly bankArtifactsTable: string;
 
   constructor(
@@ -128,6 +154,7 @@ export class ProposalRepository {
     this.transactionsTable = `"${schema}"."transactions"`;
     this.bankTransactionsTable = `"${schema}"."bank_transactions"`;
     this.artifactsTable = `"${schema}"."source_artifacts"`;
+    this.transactionArtifactsTable = `"${schema}"."transaction_artifacts"`;
     this.bankArtifactsTable = `"${schema}"."bank_transaction_artifacts"`;
   }
 
@@ -149,15 +176,33 @@ export class ProposalRepository {
       const administrator = byId.get(administratorId);
       const actor = byId.get(credential.actorUserId);
       const owner = byId.get(credential.defaultOwnerId);
-      if (
-        !administrator?.active ||
-        administrator.role !== "administrator" ||
-        credential.actorUserId === administratorId ||
-        !actor?.active ||
-        !["administrator", "member"].includes(String(actor.role)) ||
-        !owner?.active
-      )
-        throw new ProposalAuthorizationError();
+      if (!administrator)
+        throw new ProposalCredentialEligibilityError(
+          "administrator",
+          "not_found",
+        );
+      if (!administrator.active)
+        throw new ProposalCredentialEligibilityError(
+          "administrator",
+          "inactive",
+        );
+      if (administrator.role !== "administrator")
+        throw new ProposalCredentialEligibilityError(
+          "administrator",
+          "wrong_role",
+        );
+      if (credential.actorUserId === administratorId)
+        throw new ProposalCredentialEligibilityError("actor", "not_distinct");
+      if (!actor)
+        throw new ProposalCredentialEligibilityError("actor", "not_found");
+      if (!actor.active)
+        throw new ProposalCredentialEligibilityError("actor", "inactive");
+      if (!["administrator", "member"].includes(String(actor.role)))
+        throw new ProposalCredentialEligibilityError("actor", "wrong_role");
+      if (!owner)
+        throw new ProposalCredentialEligibilityError("owner", "not_found");
+      if (!owner.active)
+        throw new ProposalCredentialEligibilityError("owner", "inactive");
       const result = await client.query(
         `INSERT INTO ${this.credentialsTable} (label, token_hash, actor_user_id, default_owner_id, scopes, created_by_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
         [
@@ -337,6 +382,118 @@ export class ProposalRepository {
       ],
     );
     return String(result.rows[0]!.id);
+  }
+
+  async updateDraft(
+    credentialId: string,
+    transactionId: string,
+    changes: Partial<TransactionInput>,
+  ): Promise<{ transactionId: string; updatedAt: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const credential = await this.requireCredential(
+        client,
+        credentialId,
+        "proposals:submit",
+      );
+      const result = await client.query(
+        `SELECT transaction.*, transaction.invoice_date::text AS invoice_date_text FROM ${this.transactionsTable} transaction
+         JOIN ${this.submissionsTable} submission ON submission.draft_transaction_id=transaction.id
+         WHERE transaction.id=$1 AND submission.credential_id=$2 AND submission.kind='draft_transaction'
+         FOR UPDATE OF transaction`,
+        [transactionId, credentialId],
+      );
+      const row = result.rows[0];
+      if (!row) throw new ProposalAuthorizationError();
+      if (row.status !== "draft" || row.source_system !== "manual")
+        throw new ProposalDraftNotEditableError();
+
+      const linkedEvidence = await client.query(
+        `SELECT artifact.id, artifact.artifact_profile, artifact.state
+         FROM ${this.transactionArtifactsTable} link
+         JOIN ${this.artifactsTable} artifact ON artifact.id=link.source_artifact_id
+         WHERE link.transaction_id=$1 ORDER BY artifact.id LIMIT 1`,
+        [transactionId],
+      );
+      const evidence = linkedEvidence.rows[0] ?? null;
+
+      const current = transactionInputSchema.parse({
+        ownerId: row.owner_id,
+        sourceArtifactId: evidence ? String(evidence.id) : null,
+        kind: row.kind,
+        reference: row.reference,
+        counterparty: row.counterparty,
+        description: row.description,
+        status: "draft",
+        category: row.category,
+        notes: row.notes,
+        occurredAt: row.occurred_at ? iso(row.occurred_at) : null,
+        availableAt: row.available_at ? iso(row.available_at) : null,
+        invoiceDate: row.invoice_date_text ?? null,
+        settledAt: row.settled_at ? iso(row.settled_at) : null,
+        documentCurrency: row.document_currency,
+        documentAmount: row.document_amount,
+        documentTaxAmount: row.document_tax_amount,
+        taxTreatment: row.tax_treatment,
+        settlementCurrency: row.settlement_currency,
+        settlementAmount: row.settlement_amount,
+        gstCreditStatus: row.gst_credit_status,
+        claimableGstAud: row.claimable_gst_aud,
+      });
+      const next = transactionInputSchema.parse({
+        ...current,
+        ...changes,
+        ownerId: current.ownerId,
+        sourceArtifactId: current.sourceArtifactId,
+        status: "draft",
+      });
+      assertTransactionRules(
+        next,
+        this.gstRegistered,
+        evidence
+          ? {
+              artifactProfile: evidence.artifact_profile,
+              state: evidence.state,
+            }
+          : null,
+      );
+      const updated = await client.query(
+        `UPDATE ${this.transactionsTable} SET owner_id=$2, updated_by_id=$3, kind=$4, reference=$5, counterparty=$6, description=$7, category=$8, notes=$9, occurred_at=$10, available_at=$11, invoice_date=$12, settled_at=$13, document_currency=$14, document_amount=$15, document_tax_amount=$16, tax_treatment=$17, settlement_currency=$18, settlement_amount=$19, gst_credit_status=$20, claimable_gst_aud=$21, updated_at=now()
+         WHERE id=$1 AND status='draft' RETURNING updated_at`,
+        [
+          transactionId,
+          next.ownerId,
+          credential.actor_user_id,
+          next.kind,
+          next.reference,
+          next.counterparty,
+          next.description,
+          next.category,
+          next.notes,
+          next.occurredAt,
+          next.availableAt,
+          next.invoiceDate,
+          next.settledAt,
+          next.documentCurrency,
+          next.documentAmount,
+          next.documentTaxAmount,
+          next.taxTreatment,
+          next.settlementCurrency,
+          next.settlementAmount,
+          next.gstCreditStatus,
+          next.claimableGstAud,
+        ],
+      );
+      if (!updated.rows[0]) throw new ProposalDraftNotEditableError();
+      await client.query("COMMIT");
+      return { transactionId, updatedAt: iso(updated.rows[0].updated_at) };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async submit(

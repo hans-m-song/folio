@@ -7,6 +7,7 @@ import {
 } from "../domain/proposals";
 import {
   ProposalAuthorizationError,
+  ProposalDraftNotEditableError,
   ProposalIdempotencyConflictError,
   ProposalRepository,
 } from "./proposal-repository";
@@ -14,6 +15,7 @@ import {
 const credentialId = "11111111-1111-4111-8111-111111111111";
 const actorId = "22222222-2222-4222-8222-222222222222";
 const ownerId = "33333333-3333-4333-8333-333333333333";
+const humanOwnerId = "88888888-8888-4888-8888-888888888888";
 const administratorId = "44444444-4444-4444-8444-444444444444";
 const draftId = "55555555-5555-4555-8555-555555555555";
 const bankId = "66666666-6666-4666-8666-666666666666";
@@ -59,6 +61,92 @@ const repositoryWithClients = (...queries: Array<ReturnType<typeof vi.fn>>) => {
 };
 
 describe("proposal repository", () => {
+  const editableDraftRow = {
+    id: draftId,
+    owner_id: humanOwnerId,
+    source_system: "manual",
+    status: "draft",
+    kind: "supplier_expense",
+    reference: null,
+    counterparty: "Synthetic supplier",
+    description: null,
+    category: null,
+    notes: null,
+    occurred_at: null,
+    available_at: null,
+    invoice_date: new Date("2026-05-30T14:00:00.000Z"),
+    invoice_date_text: "2026-05-31",
+    settled_at: null,
+    document_currency: "AUD",
+    document_amount: "10.0000",
+    document_tax_amount: null,
+    tax_treatment: "no_tax",
+    settlement_currency: null,
+    settlement_amount: null,
+    gst_credit_status: "not_registered",
+    claimable_gst_aud: "0.0000",
+  };
+
+  it("updates only its credential-owned draft fields without a revision token", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({ rows: [editableDraftRow] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{ updated_at: new Date("2026-09-27T00:00:00.000Z") }],
+      })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.updateDraft(credentialId, draftId, {
+        reference: "INV-42",
+        documentAmount: "37.0800",
+      }),
+    ).resolves.toEqual({
+      transactionId: draftId,
+      updatedAt: "2026-09-27T00:00:00.000Z",
+    });
+    expect(query.mock.calls[2]?.[0]).toContain("submission.credential_id=$2");
+    expect(query.mock.calls[4]?.[0]).toContain("status='draft'");
+    expect(query.mock.calls[4]?.[1]).toContain("INV-42");
+    expect(query.mock.calls[4]?.[1]).toContain("37.0800");
+    expect(query.mock.calls[4]?.[1]).toContain("2026-05-31");
+    expect(query.mock.calls[4]?.[1]).toContain(humanOwnerId);
+    expect(query.mock.calls[4]?.[1]).toContain(actorId);
+  });
+
+  it.each([
+    { row: null, error: ProposalAuthorizationError },
+    {
+      row: { ...editableDraftRow, status: "recorded" },
+      error: ProposalDraftNotEditableError,
+    },
+  ])(
+    "rejects another credential's or no-longer-draft record",
+    async ({ row, error }) => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ rows: [credentialRow] })
+        .mockResolvedValueOnce({ rows: row ? [row] : [] })
+        .mockResolvedValueOnce({});
+      const { repository } = repositoryWithClients(query);
+
+      await expect(
+        repository.updateDraft(credentialId, draftId, { reference: "INV-42" }),
+      ).rejects.toBeInstanceOf(error);
+      expect(
+        query.mock.calls.some(([statement]) =>
+          String(statement).startsWith("UPDATE"),
+        ),
+      ).toBe(false);
+      expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    },
+  );
+
   it("stores only a hash while binding a distinct actor and owner", async () => {
     const tokenHash = "a".repeat(64);
     const query = vi
@@ -119,6 +207,74 @@ describe("proposal repository", () => {
       ),
     ).toBe(false);
   });
+
+  it.each([
+    {
+      label: "missing administrator",
+      users: [{ id: actorId, role: "member", active: true }],
+      participant: "administrator",
+      reason: "not_found",
+    },
+    {
+      label: "inactive actor",
+      users: [
+        { id: administratorId, role: "administrator", active: true },
+        { id: actorId, role: "member", active: false },
+        { id: ownerId, role: "member", active: true },
+      ],
+      participant: "actor",
+      reason: "inactive",
+    },
+    {
+      label: "actor with an unsupported role",
+      users: [
+        { id: administratorId, role: "administrator", active: true },
+        { id: actorId, role: "viewer", active: true },
+        { id: ownerId, role: "member", active: true },
+      ],
+      participant: "actor",
+      reason: "wrong_role",
+    },
+    {
+      label: "missing owner",
+      users: [
+        { id: administratorId, role: "administrator", active: true },
+        { id: actorId, role: "member", active: true },
+      ],
+      participant: "owner",
+      reason: "not_found",
+    },
+  ])(
+    "identifies the $label before inserting",
+    async ({ users, participant, reason }) => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ rows: users })
+        .mockResolvedValueOnce({});
+      const { repository } = repositoryWithClients(query);
+
+      await expect(
+        repository.createCredential(administratorId, {
+          label: credentialRow.label,
+          tokenHash: "d".repeat(64),
+          actorUserId: actorId,
+          defaultOwnerId: ownerId,
+          scopes: ["proposals:submit"],
+        }),
+      ).rejects.toMatchObject({
+        name: "ProposalCredentialEligibilityError",
+        participant,
+        reason,
+      });
+      expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+      expect(
+        query.mock.calls.some(([statement]) =>
+          String(statement).startsWith("INSERT"),
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("resolves only active, unrevoked credentials with the requested scope", async () => {
     const tokenHash = "b".repeat(64);

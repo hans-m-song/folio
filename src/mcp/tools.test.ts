@@ -156,6 +156,10 @@ const createDependencies = () => {
           : submission.existingTransactionId,
       replayed: false,
     })),
+    updateDraft: vi.fn(async () => ({
+      transactionId: ids.transaction,
+      updatedAt: "2026-09-27T00:00:00.000Z",
+    })),
     getSubmissionStatus: vi.fn(async () => ({
       submissionId: ids.submission,
       kind: "draft_transaction" as const,
@@ -297,7 +301,11 @@ describe("Folio MCP tools", () => {
       ],
       [
         "proposals:submit",
-        ["submit_draft_transaction", "suggest_existing_match"],
+        [
+          "submit_draft_transaction",
+          "edit_draft_transaction",
+          "suggest_existing_match",
+        ],
       ],
       ["submissions:read", ["get_submission_status"]],
     ] as const;
@@ -585,6 +593,29 @@ describe("Folio MCP tools", () => {
         "INVALID_BANK_ROW_LOCATOR",
       );
       expect(fakes.proposalRepository.submit).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("passes only parsed draft field changes to the credential-bound update", async () => {
+    const fakes = createDependencies();
+    await withServer(fakes.dependencies, principal(), async ({ address }) => {
+      const edited = await call(address.port, "edit_draft_transaction", {
+        transactionId: ids.transaction,
+        changes: { reference: "INV-42", documentAmount: "37.08" },
+      });
+      expect(toolValue(edited).value?.transactionId).toBe(ids.transaction);
+      expect(fakes.proposalRepository.updateDraft).toHaveBeenCalledWith(
+        ids.credential,
+        ids.transaction,
+        { reference: "INV-42", documentAmount: "37.08" },
+      );
+
+      const forbidden = await call(address.port, "edit_draft_transaction", {
+        transactionId: ids.transaction,
+        changes: { status: "recorded" },
+      });
+      expect(toolValue(forbidden).result?.isError).toBe(true);
+      expect(fakes.proposalRepository.updateDraft).toHaveBeenCalledTimes(1);
     });
   });
 
