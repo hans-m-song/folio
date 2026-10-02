@@ -1,0 +1,487 @@
+.recurring-bills-page {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.recurring-bills-page a {
+  color: var(--accent);
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.recurring-bills-page a:hover,
+.recurring-bills-page a:focus-visible {
+  color: var(--accent-strong);
+}
+
+.recurring-bills-header,
+.recurring-bills-section-heading,
+.recurring-bill-card__header,
+.recurring-bill-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.recurring-bills-header p,
+.recurring-bills-section-heading p,
+.recurring-bill-card__header p {
+  margin-block: 0.35rem;
+  color: var(--muted);
+}
+
+.recurring-bills-section-heading {
+  align-items: end;
+  margin-bottom: 0.75rem;
+}
+
+.recurring-bills-section-heading > strong {
+  color: var(--muted);
+}
+
+.recurring-bills-list,
+.recurring-bills-suggestions {
+  display: grid;
+  gap: 0.8rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recurring-bill-card,
+.recurring-bill-editor,
+.recurring-bills-suggestion,
+.recurring-bills-empty,
+.recurring-bills-feedback {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: #fff;
+}
+
+.recurring-bill-card {
+  display: grid;
+  gap: 1rem;
+}
+
+.recurring-bill-card--due {
+  border-color: #dfaa8d;
+}
+
+.recurring-bill-card__header {
+  align-items: center;
+}
+
+.recurring-bill-card__header h3,
+.recurring-bills-suggestion h3 {
+  margin: 0 0 0.35rem;
+}
+
+.recurring-bill-card__actions,
+.recurring-bill-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.recurring-bill-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.4rem;
+  margin: 0;
+}
+
+.recurring-bill-summary > div {
+  min-width: 9rem;
+}
+
+.recurring-bill-summary dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.recurring-bill-summary dd {
+  margin: 0.15rem 0 0;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.recurring-bill-summary .recurring-bill-amount-estimate {
+  font-weight: 400;
+}
+
+.recurring-bill-amount-estimate__values {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 0.2rem 0.35rem;
+  font-weight: 400;
+}
+
+.recurring-bill-amount-estimate__value.money-text {
+  display: inline;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.recurring-bill-description-match,
+.recurring-bill-suggestion-review p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.recurring-bill-occurrences {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recurring-bill-occurrence {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.25fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 0.75rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border);
+}
+
+.recurring-bill-occurrence__date {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.recurring-bill-status {
+  display: inline-flex;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #38475b;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.recurring-bill-status--pending {
+  background: #fff2e7;
+  color: #81430e;
+}
+
+.recurring-bill-status--due {
+  background: #fff0ee;
+  color: #7d2117;
+}
+
+.recurring-bill-recorded-state {
+  color: #215b41;
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.recurring-bill-occurrence__details {
+  display: grid;
+  justify-items: start;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.recurring-bill-occurrence__details p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.recurring-bill-occurrence__warning {
+  color: #81430e;
+}
+
+.recurring-bill-candidate-control {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) auto;
+  align-items: end;
+  gap: 0.6rem;
+  width: min(100%, 54rem);
+}
+
+.recurring-bill-candidate-control label,
+.recurring-bill-fields label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.recurring-bill-candidate-help {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 400;
+}
+
+.recurring-bill-editor {
+  display: grid;
+  gap: 1rem;
+}
+
+.recurring-bill-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.recurring-bill-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.recurring-bill-fields input,
+.recurring-bill-fields select,
+.recurring-bill-fields .folio-autocomplete,
+.recurring-bill-candidate-control .folio-autocomplete {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.recurring-bill-field-help {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 400;
+}
+
+.recurring-bill-field-error {
+  color: #7d2117;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.recurring-bill-fields__wide {
+  grid-column: 1 / -1;
+}
+
+.recurring-bill-suggestion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.recurring-bill-suggestion p {
+  margin: 0.25rem 0;
+  color: var(--muted);
+}
+
+.recurring-bills-source-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  overflow-wrap: anywhere;
+}
+
+.recurring-bill-suggestion-review {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.recurring-bill-preview {
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: #f8fafc;
+}
+
+.recurring-bill-preview__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.recurring-bill-preview__header h3,
+.recurring-bill-preview__header p {
+  margin: 0;
+}
+
+.recurring-bill-preview__header p {
+  margin-top: 0.3rem;
+  color: var(--muted);
+}
+
+.recurring-bill-preview-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.65rem;
+  margin: 0;
+}
+
+.recurring-bill-preview-counts > div {
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: #fff;
+}
+
+.recurring-bill-preview-counts dt {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.recurring-bill-preview-counts dd {
+  margin: 0.2rem 0 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.recurring-bill-preview__estimate {
+  grid-column: 1 / -1;
+}
+
+.recurring-bill-preview__estimate dd {
+  font-size: 1rem;
+  font-weight: 400;
+}
+
+.recurring-bill-preview__table-scroll {
+  overflow-x: auto;
+}
+
+.recurring-bill-preview table {
+  width: 100%;
+  min-width: 58rem;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: #fff;
+}
+
+.recurring-bill-preview caption {
+  padding: 0.5rem;
+  color: var(--muted);
+  text-align: left;
+}
+
+.recurring-bill-preview th,
+.recurring-bill-preview td {
+  padding: 0.55rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.recurring-bill-preview th {
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.recurring-bill-preview th:nth-child(1),
+.recurring-bill-preview td:nth-child(1) {
+  width: 8rem;
+  white-space: nowrap;
+}
+
+.recurring-bill-preview th:nth-child(2),
+.recurring-bill-preview td:nth-child(2) {
+  width: auto;
+  overflow-wrap: anywhere;
+}
+
+.recurring-bill-preview th:nth-child(3),
+.recurring-bill-preview td:nth-child(3) {
+  width: 9rem;
+  white-space: nowrap;
+}
+
+.recurring-bill-preview th:nth-child(4),
+.recurring-bill-preview td:nth-child(4) {
+  width: 11rem;
+  white-space: nowrap;
+}
+
+.recurring-bill-preview__match,
+.recurring-bill-preview__mismatch,
+.recurring-bill-preview__offset {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.8rem;
+}
+
+.recurring-bill-preview__match {
+  color: #215b41;
+}
+
+.recurring-bill-preview__mismatch,
+.recurring-bill-preview__error {
+  color: #7d2117;
+}
+
+.recurring-bill-preview__offset {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.recurring-bill-preview__empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+.recurring-bill-association-details {
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border);
+}
+
+.recurring-bill-association-details summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.recurring-bill-association-details .recurring-bill-occurrence:first-child {
+  margin-top: 0.6rem;
+}
+
+.recurring-bill-page-error {
+  margin: 0;
+  color: #7d2117;
+}
+
+.recurring-bills-feedback--error {
+  border-color: #e0a199;
+  background: #fff2ef;
+  color: #7d2117;
+}
+
+.recurring-bills-feedback--status {
+  border-color: #b7d8c7;
+  background: #f1faf4;
+  color: #215b41;
+}
+
+.recurring-bills-state {
+  align-content: start;
+  min-height: 18rem;
+}
+
+@media (max-width: 46rem) {
+  .recurring-bill-occurrence {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .recurring-bill-candidate-control,
+  .recurring-bill-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .recurring-bill-fields__wide {
+    grid-column: auto;
+  }
+}
