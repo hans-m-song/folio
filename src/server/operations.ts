@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
+import { invoiceStatusSchema } from "../domain/invoice-status";
 
 import {
   artifactProfileSchema,
@@ -32,6 +33,8 @@ import {
 } from "./authorization";
 import { runOperation, writeClientRenderFailure } from "./diagnostics";
 import { runtime } from "./runtime";
+import { enumFilterSchema } from "../domain/enum-filter";
+import { bulkTransactionRequestSchema } from "../domain/bulk-transactions";
 
 const authorize = async (required: readonly Permission[]) => {
   const current = runtime();
@@ -112,80 +115,159 @@ export const transactionPageQuerySchema = z
     search: z.string().trim().max(200).default(""),
     filters: z
       .array(
-        z.discriminatedUnion("field", [
-          z
-            .object({
-              field: z.enum(["counterparty", "description"]),
-              operator: z.enum([
-                "equals",
-                "not_equals",
-                "contains",
-                "not_contains",
-              ]),
-              value: z.string().trim().min(1).max(2_000),
-            })
-            .strict(),
-          z
-            .object({
-              field: z.literal("date"),
-              operator: transactionComparisonOperatorSchema,
-              value: z.string().date(),
-            })
-            .strict(),
-          z
-            .object({
-              field: z.literal("amount"),
-              operator: transactionComparisonOperatorSchema,
-              value: z
-                .string()
-                .trim()
-                .min(1)
-                .max(100)
-                .regex(
-                  /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/,
-                  "Expected a number",
-                )
-                .refine((value) => Number.isFinite(Number(value)), {
-                  message: "Expected a finite number",
-                }),
-            })
-            .strict(),
-          z
-            .object({
-              field: z.literal("kind"),
-              operator: z.enum(["is", "is_not"]),
-              value: transactionKindSchema,
-            })
-            .strict(),
-          z
-            .object({
-              field: z.literal("status"),
-              operator: z.enum(["is", "is_not"]),
-              value: transactionStatusSchema,
-            })
-            .strict(),
-          z
-            .object({
-              field: z.literal("source"),
-              operator: z.enum(["is", "is_not"]),
-              value: z.enum(["manual", "stripe"]),
-            })
-            .strict(),
-          z
-            .object({
-              field: z.literal("settlement"),
-              operator: z.enum(["is", "is_not"]),
-              value: z.enum(["settled", "pending", "not_applicable"]),
-            })
-            .strict(),
-          z
-            .object({
-              field: z.literal("evidence"),
-              operator: z.enum(["is", "is_not"]),
-              value: z.enum(["attached", "missing"]),
-            })
-            .strict(),
-        ]),
+        z
+          .discriminatedUnion("field", [
+            z
+              .object({
+                field: z.enum(["counterparty", "description"]),
+                operator: z.enum([
+                  "equals",
+                  "not_equals",
+                  "contains",
+                  "not_contains",
+                ]),
+                value: z.string().trim().min(1).max(2_000),
+              })
+              .strict(),
+            z
+              .object({
+                field: z.literal("date"),
+                operator: transactionComparisonOperatorSchema,
+                value: z.string().date(),
+              })
+              .strict(),
+            z
+              .object({
+                field: z.literal("amount"),
+                operator: transactionComparisonOperatorSchema,
+                value: z
+                  .string()
+                  .trim()
+                  .min(1)
+                  .max(100)
+                  .regex(
+                    /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/,
+                    "Expected a number",
+                  )
+                  .refine((value) => Number.isFinite(Number(value)), {
+                    message: "Expected a finite number",
+                  }),
+              })
+              .strict(),
+            z
+              .object({
+                field: z.literal("kind"),
+                operator: z.enum([
+                  "is",
+                  "is_not",
+                  "contains_any",
+                  "contains_none",
+                ]),
+                value: z.union([
+                  transactionKindSchema,
+                  z.array(transactionKindSchema).max(20),
+                ]),
+              })
+              .strict(),
+            z
+              .object({
+                field: z.literal("status"),
+                operator: z.enum([
+                  "is",
+                  "is_not",
+                  "contains_any",
+                  "contains_none",
+                ]),
+                value: z.union([
+                  transactionStatusSchema,
+                  z.array(transactionStatusSchema).max(20),
+                ]),
+              })
+              .strict(),
+            z
+              .object({
+                field: z.literal("source"),
+                operator: z.enum([
+                  "is",
+                  "is_not",
+                  "contains_any",
+                  "contains_none",
+                ]),
+                value: z.union([
+                  z.enum(["manual", "stripe"]),
+                  z.array(z.enum(["manual", "stripe"])).max(20),
+                ]),
+              })
+              .strict(),
+            z
+              .object({
+                field: z.literal("settlement"),
+                operator: z.enum([
+                  "is",
+                  "is_not",
+                  "contains_any",
+                  "contains_none",
+                ]),
+                value: z.union([
+                  z.enum(["settled", "pending", "not_applicable"]),
+                  z
+                    .array(z.enum(["settled", "pending", "not_applicable"]))
+                    .max(20),
+                ]),
+              })
+              .strict(),
+            z
+              .object({
+                field: z.literal("evidence"),
+                operator: z.enum([
+                  "is",
+                  "is_not",
+                  "contains_any",
+                  "contains_none",
+                ]),
+                value: z.union([
+                  z.enum(["attached", "missing"]),
+                  z.array(z.enum(["attached", "missing"])).max(20),
+                ]),
+              })
+              .strict(),
+            z
+              .object({
+                field: z.literal("invoice"),
+                operator: z.enum([
+                  "is",
+                  "is_not",
+                  "contains_any",
+                  "contains_none",
+                ]),
+                value: z.union([
+                  invoiceStatusSchema,
+                  z.array(invoiceStatusSchema).max(20),
+                ]),
+              })
+              .strict(),
+          ])
+          .superRefine((filter, context) => {
+            if (
+              filter.field === "counterparty" ||
+              filter.field === "description" ||
+              filter.field === "date" ||
+              filter.field === "amount"
+            )
+              return;
+
+            const membershipOperator =
+              filter.operator === "contains_any" ||
+              filter.operator === "contains_none";
+            if (membershipOperator !== Array.isArray(filter.value))
+              context.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ["value"],
+                message: membershipOperator
+                  ? "Choose one or more enum values."
+                  : "Choose one enum value.",
+              });
+          }),
       )
       .max(20)
       .default([]),
@@ -196,15 +278,32 @@ export const transactionPageQuerySchema = z
       })
       .strict()
       .default({ key: "date", direction: "desc" }),
+    sortClauses: z
+      .array(
+        z
+          .object({
+            key: z.enum(["date", "counterparty", "amount", "state"]),
+            direction: z.enum(["asc", "desc"]),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(4)
+      .optional(),
     page: z.number().int().min(1).max(2_001).default(1),
   })
   .strict();
 
 export const privateGate = createServerFn({ method: "GET" }).handler(async () =>
-  runOperation("Folio access", async () => {
-    runtime();
-    return true;
-  }),
+  runOperation(
+    "Folio access",
+    async () => {
+      runtime();
+      return true;
+    },
+    {},
+    { log: "failures" },
+  ),
 );
 
 export const getFolioUiConfig = createServerFn({ method: "GET" }).handler(
@@ -221,11 +320,16 @@ export const getFolioUiConfig = createServerFn({ method: "GET" }).handler(
 );
 
 export const healthCheck = createServerFn({ method: "GET" }).handler(async () =>
-  runOperation("Folio health check", async () => {
-    const current = runtime();
-    await current.repository.health();
-    return { status: "ok" as const };
-  }),
+  runOperation(
+    "Folio health check",
+    async () => {
+      const current = runtime();
+      await current.repository.health();
+      return { status: "ok" as const };
+    },
+    {},
+    { log: "none" },
+  ),
 );
 
 export const reportClientRenderFailure = createServerFn({ method: "POST" })
@@ -285,6 +389,33 @@ export const listTransactionPage = createServerFn({ method: "GET" })
     }),
   );
 
+export const previewBulkTransactionEdit = createServerFn({ method: "POST" })
+  .validator(bulkTransactionRequestSchema)
+  .handler(async ({ data }) =>
+    runOperation("Preview transaction bulk edit", async () => {
+      const { actor, current } = await authorize(
+        operationPermissions.previewBulkTransactionEdit,
+      );
+      return current.repository.previewBulkTransactionEdit(actor.id, data);
+    }),
+  );
+
+export const applyBulkTransactionEdit = createServerFn({ method: "POST" })
+  .validator(bulkTransactionRequestSchema)
+  .handler(async ({ data }) =>
+    runOperation(
+      "Apply transaction bulk edit",
+      async () => {
+        const { actor, current } = await authorize(
+          operationPermissions.applyBulkTransactionEdit,
+        );
+        return current.repository.applyBulkTransactionEdit(actor.id, data);
+      },
+      {},
+      { mutation: true },
+    ),
+  );
+
 export const getOverviewSummary = createServerFn({ method: "GET" }).handler(
   async () =>
     runOperation("Load overview summary", async () => {
@@ -300,8 +431,8 @@ export const getOverviewSummary = createServerFn({ method: "GET" }).handler(
         attention: {
           unresolvedBankRows: banking.unresolvedBankRows,
           importsWithUnresolvedRows: banking.importsWithUnresolvedRows,
-          transactionLinkedEvidenceGaps:
-            transactions.transactionLinkedEvidenceGaps,
+          missingInvoiceOrCreditNoteCount:
+            transactions.missingInvoiceOrCreditNoteCount,
           pendingImportUploads: transactions.pendingImportUploads,
           abandonedImportUploads: transactions.abandonedImportUploads,
         },
@@ -427,6 +558,33 @@ export const voidTransaction = createServerFn({ method: "POST" })
           operationPermissions.voidTransaction,
         );
         return current.repository.voidTransaction(
+          actor.id,
+          data.id,
+          data.expectedUpdatedAt,
+        );
+      },
+      {},
+      { mutation: true },
+    ),
+  );
+
+export const deleteDraftTransaction = createServerFn({ method: "POST" })
+  .validator(
+    z
+      .object({
+        id: z.string().uuid(),
+        expectedUpdatedAt: z.string().datetime(),
+      })
+      .strict(),
+  )
+  .handler(async ({ data }) =>
+    runOperation(
+      "Delete draft transaction",
+      async () => {
+        const { actor, current } = await authorize(
+          operationPermissions.deleteDraftTransaction,
+        );
+        return current.repository.deleteDraftTransaction(
           actor.id,
           data.id,
           data.expectedUpdatedAt,
@@ -636,12 +794,80 @@ export const listAvailableInvoiceArtifacts = createServerFn({
   }),
 );
 
+const artifactListFilterSchema = z.union([
+  z
+    .object({
+      field: z.literal("filename"),
+      operator: z.enum(["equals", "not_equals", "contains", "not_contains"]),
+      value: z.string().trim().min(1).max(200),
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("uploaded"),
+      operator: z.enum([
+        "equals",
+        "not_equals",
+        "greater_than",
+        "greater_than_or_equal",
+        "less_than",
+        "less_than_or_equal",
+      ]),
+      value: z.string().date(),
+    })
+    .strict(),
+  z
+    .object({
+      field: z.enum(["transactions", "bank_activity"]),
+      operator: z.enum([
+        "equals",
+        "not_equals",
+        "greater_than",
+        "greater_than_or_equal",
+        "less_than",
+        "less_than_or_equal",
+      ]),
+      value: z.string().trim().min(1).max(9).regex(/^\d+$/),
+    })
+    .strict(),
+  enumFilterSchema("profile", artifactProfileSchema),
+  enumFilterSchema("type", z.enum(["application/pdf", "text/csv"])),
+  enumFilterSchema(
+    "state",
+    z.enum([
+      "pending",
+      "awaiting_review",
+      "available",
+      "rejected",
+      "superseded",
+      "abandoned",
+      "deleting",
+    ]),
+  ),
+  enumFilterSchema("linkage", z.enum(["linked", "unlinked"])),
+]);
+
+const artifactListSortSchema = z
+  .object({
+    field: z.enum([
+      "filename",
+      "profile",
+      "type",
+      "uploaded",
+      "state",
+      "transactions",
+      "bank_activity",
+    ]),
+    direction: z.enum(["asc", "desc"]),
+  })
+  .strict();
+
 export const listArtifacts = createServerFn({ method: "GET" })
   .validator(
     z
       .object({
-        search: z.string().max(200).default(""),
-        profile: artifactProfileSchema.nullable().default(null),
+        search: z.string().max(200).optional(),
+        profile: artifactProfileSchema.nullable().optional(),
         state: z
           .enum([
             "pending",
@@ -653,14 +879,63 @@ export const listArtifacts = createServerFn({ method: "GET" })
             "deleting",
           ])
           .nullable()
-          .default(null),
-        from: z.string().date().nullable().default(null),
-        to: z.string().date().nullable().default(null),
-        linkage: z.enum(["all", "linked", "unlinked"]).default("all"),
+          .optional(),
+        from: z.string().date().nullable().optional(),
+        to: z.string().date().nullable().optional(),
+        linkage: z.enum(["all", "linked", "unlinked"]).optional(),
+        filters: z.array(artifactListFilterSchema).max(20).optional(),
+        sort: z.array(artifactListSortSchema).max(7).optional(),
         limit: z.number().int().min(1).max(100).default(25),
         offset: z.number().int().min(0).max(100_000).default(0),
       })
-      .strict(),
+      .strict()
+      .transform((input) => {
+        const legacyFilters: z.infer<typeof artifactListFilterSchema>[] = [];
+        const search = input.search?.trim();
+        if (search)
+          legacyFilters.push({
+            field: "filename",
+            operator: "contains",
+            value: search,
+          });
+        if (input.profile)
+          legacyFilters.push({
+            field: "profile",
+            operator: "is",
+            value: input.profile,
+          });
+        if (input.state)
+          legacyFilters.push({
+            field: "state",
+            operator: "is",
+            value: input.state,
+          });
+        if (input.from)
+          legacyFilters.push({
+            field: "uploaded",
+            operator: "greater_than_or_equal",
+            value: input.from,
+          });
+        if (input.to)
+          legacyFilters.push({
+            field: "uploaded",
+            operator: "less_than_or_equal",
+            value: input.to,
+          });
+        if (input.linkage && input.linkage !== "all")
+          legacyFilters.push({
+            field: "linkage",
+            operator: "is",
+            value: input.linkage,
+          });
+
+        return {
+          filters: input.filters ?? legacyFilters,
+          sort: input.sort ?? [{ field: "uploaded", direction: "desc" }],
+          limit: input.limit,
+          offset: input.offset,
+        };
+      }),
   )
   .handler(async ({ data }) =>
     runOperation("List artifacts", async () => {

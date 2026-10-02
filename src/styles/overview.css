@@ -52,7 +52,7 @@
   padding-left: 0;
   border-left: 0;
 }
-.overview-metrics span {
+.overview-metrics > div > span {
   color: #53637e;
 }
 .overview-metrics strong {

@@ -7,6 +7,79 @@ import type { StripeImportRow } from "../domain/stripe-csv";
 import { transactionInputSchema } from "../domain/types";
 import { FolioRepository } from "./repository";
 
+describe("tax partner options", () => {
+  it("returns active user IDs and unambiguous labels without private profile fields", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({
+        rows: [
+          { id: "user-a", display_name: " Shared label " },
+          { id: "user-b", display_name: "shared label" },
+          { id: "user-c", display_name: null },
+          { id: "user-d", display_name: "Unique label" },
+        ],
+      });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await expect(repository.listTaxPartnerOptions("actor")).resolves.toEqual([
+      { id: "user-a", label: "Shared label (user-a)" },
+      { id: "user-b", label: "shared label (user-b)" },
+      { id: "user-c", label: "User (user-c)" },
+      { id: "user-d", label: "Unique label" },
+    ]);
+    expect(query).toHaveBeenLastCalledWith(
+      'SELECT id, display_name FROM "folio"."users" WHERE active=true ORDER BY lower(display_name) NULLS LAST, id',
+    );
+  });
+
+  it("does not query partner labels for an inactive actor", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await expect(repository.listTaxPartnerOptions("actor")).rejects.toThrow();
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("invoice duplicate review hints", () => {
+  it("returns advisory counts without changing evidence or imposing uniqueness", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            linked_transactions: 2,
+            matching_reference_transactions: 1,
+            matching_checksum_artifacts: 3,
+          },
+        ],
+      });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+    await expect(
+      repository.invoiceDuplicateHints(
+        "actor",
+        "artifact",
+        "SYN-1",
+        "synthetic-checksum",
+      ),
+    ).resolves.toEqual({
+      linkedTransactions: 2,
+      matchingReferenceTransactions: 1,
+      matchingChecksumArtifacts: 3,
+    });
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining("SELECT"), [
+      "artifact",
+      "SYN-1",
+      "synthetic-checksum",
+    ]);
+    expect(query.mock.calls.at(-1)?.[0]).not.toMatch(
+      /INSERT|UPDATE|DELETE|ON CONFLICT/,
+    );
+  });
+});
+
 describe("Folio repository health", () => {
   it("requires all tables and the reviewed migration ledger entry", async () => {
     const query = vi
@@ -23,13 +96,19 @@ describe("Folio repository health", () => {
             auth_sessions: "folio.auth_sessions",
             bank_transactions: "folio.bank_transactions",
             bank_transaction_artifacts: "folio.bank_transaction_artifacts",
+            recurring_bill_schedules: "folio.recurring_bill_schedules",
+            recurring_bill_links: "folio.recurring_bill_links",
           },
         ],
       })
-      .mockResolvedValueOnce({ rowCount: 12 });
+      .mockResolvedValueOnce({ rowCount: 18 });
     const repository = new FolioRepository({ query } as never, "folio", false);
 
     await expect(repository.health()).resolves.toBeUndefined();
+    expect(query.mock.calls[0]?.[1]).toContain(
+      "folio.recurring_bill_schedules",
+    );
+    expect(query.mock.calls[0]?.[1]).toContain("folio.recurring_bill_links");
     expect(query).toHaveBeenLastCalledWith(
       'SELECT id FROM "folio"."_migrations" WHERE id = ANY($1::text[])',
       [
@@ -46,6 +125,12 @@ describe("Folio repository health", () => {
           "0010_folio_artifact_review",
           "0011_folio_mcp_proposals",
           "0012_folio_mcp_upload_intents",
+          "0013_folio_mcp_transaction_scopes",
+          "0014_folio_tax_review_snapshots",
+          "0015_folio_matched_transaction_edits",
+          "0016_folio_owner_loan_repayments",
+          "0017_folio_recurring_bills",
+          "0018_folio_recurring_bill_rules",
         ],
       ],
     );
@@ -66,6 +151,8 @@ describe("Folio repository health", () => {
               auth_sessions: "folio.auth_sessions",
               bank_transactions: "folio.bank_transactions",
               bank_transaction_artifacts: null,
+              recurring_bill_schedules: "folio.recurring_bill_schedules",
+              recurring_bill_links: "folio.recurring_bill_links",
             },
           ],
         }),
@@ -91,6 +178,8 @@ describe("Folio repository health", () => {
                 auth_sessions: "folio.auth_sessions",
                 bank_transactions: "folio.bank_transactions",
                 bank_transaction_artifacts: "folio.bank_transaction_artifacts",
+                recurring_bill_schedules: "folio.recurring_bill_schedules",
+                recurring_bill_links: "folio.recurring_bill_links",
               },
             ],
           })
@@ -180,16 +269,117 @@ describe("Folio artifact library", () => {
     expect(query.mock.calls[2]?.[0]).toContain(
       'FROM "folio"."source_artifacts" artifact',
     );
-    expect(query.mock.calls[2]?.[0]).toContain("LIMIT $7 OFFSET $8");
+    expect(query.mock.calls[2]?.[0]).toContain("LIMIT $6 OFFSET $7");
     expect(query.mock.calls[2]?.[1]).toEqual([
       "statement",
       "commbank_transaction_history_csv_v1",
       "available",
-      "linked",
       "2026-09-01",
       "2026-09-30",
       25,
       0,
+    ]);
+  });
+
+  it("applies artifact filters and ordered sorts before SQL pagination", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "actor",
+            email: "owner@example.test",
+            display_name: "Owner",
+            role: "owner",
+            active: true,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ total: 2 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    const result = await repository.listArtifacts("actor", {
+      filters: [
+        { field: "state", operator: "is", value: "available" },
+        { field: "linkage", operator: "is", value: "linked" },
+        { field: "transactions", operator: "greater_than", value: "2" },
+      ],
+      sort: [
+        { field: "state", direction: "asc" },
+        { field: "uploaded", direction: "desc" },
+        { field: "filename", direction: "asc" },
+      ],
+      limit: 25,
+      offset: 50,
+    });
+
+    expect(result).toEqual({ total: 2, rows: [] });
+    const sql = query.mock.calls[2]?.[0] as string;
+    const orderByIndex = sql.indexOf(
+      "ORDER BY artifact.state ASC, artifact.created_at DESC, artifact.filename ASC, artifact.id DESC",
+    );
+    const limitIndex = sql.indexOf("LIMIT $3 OFFSET $4");
+    expect(sql).toContain("artifact.state = $1");
+    expect(sql).toContain(
+      'count(*)::integer FROM "folio"."transaction_artifacts"',
+    );
+    expect(orderByIndex).toBeGreaterThan(-1);
+    expect(limitIndex).toBeGreaterThan(orderByIndex);
+    expect(query.mock.calls[2]?.[1]).toEqual(["available", "2", 25, 50]);
+  });
+
+  it("filters artifact enum membership and computed linkage before pagination", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: "actor", active: true, role: "administrator" }],
+      })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+    await repository.listArtifacts("actor", {
+      filters: [
+        {
+          field: "state",
+          operator: "contains_any",
+          value: ["available", "awaiting_review"],
+        },
+        {
+          field: "type",
+          operator: "contains_none",
+          value: ["application/pdf"],
+        },
+        {
+          field: "linkage",
+          operator: "contains_any",
+          value: ["linked", "unlinked"],
+        },
+      ],
+      sort: [{ field: "uploaded", direction: "desc" }],
+      limit: 25,
+      offset: 50,
+    });
+    const sql = query.mock.calls[2][0] as string;
+    expect(sql).toContain("artifact.state = ANY($1::text[])");
+    expect(sql).toContain("artifact.media_type <> ALL($2::text[])");
+    expect(sql).toContain(
+      "THEN 'linked' ELSE 'unlinked' END) = ANY($3::text[])",
+    );
+    expect(sql.indexOf("= ANY($3::text[])")).toBeLessThan(
+      sql.indexOf("LIMIT $4 OFFSET $5"),
+    );
+    expect(query.mock.calls[1][1]).toEqual([
+      ["available", "awaiting_review"],
+      ["application/pdf"],
+      ["linked", "unlinked"],
+    ]);
+    expect(query.mock.calls[2][1]).toEqual([
+      ["available", "awaiting_review"],
+      ["application/pdf"],
+      ["linked", "unlinked"],
+      25,
+      50,
     ]);
   });
 
@@ -440,14 +630,14 @@ describe("Folio transaction projections", () => {
     );
   });
 
-  it("returns an exact linked-evidence gap count and bounded recent snapshots", async () => {
+  it("counts recorded expected invoices or credit notes and bounds recent snapshots", async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
       .mockResolvedValueOnce({
         rows: [
           {
-            linked_evidence_gaps: 4,
+            missing_invoice_or_credit_note_count: 4,
             pending_import_uploads: 2,
             abandoned_import_uploads: 3,
           },
@@ -469,7 +659,7 @@ describe("Folio transaction projections", () => {
     await expect(
       repository.transactionOverviewSummary("actor"),
     ).resolves.toEqual({
-      transactionLinkedEvidenceGaps: 4,
+      missingInvoiceOrCreditNoteCount: 4,
       pendingImportUploads: 2,
       abandonedImportUploads: 3,
       recentTransactions: [
@@ -483,7 +673,13 @@ describe("Folio transaction projections", () => {
       ],
     });
     expect(query.mock.calls[1]?.[0]).toContain(
-      'NOT EXISTS (SELECT 1 FROM "folio"."transaction_artifacts"',
+      "transactions.status='recorded'",
+    );
+    expect(query.mock.calls[1]?.[0]).toContain(
+      "transactions.kind NOT IN ('supplier_expense', 'supplier_credit')",
+    );
+    expect(query.mock.calls[1]?.[0]).toContain(
+      "invoice_artifact.artifact_profile='manual_invoice_pdf_v1' AND invoice_artifact.state='available'",
     );
     expect(query.mock.calls[1]?.[0]).toMatch(
       /artifact_profile IN \('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1'\).*state IN \('pending', 'awaiting_review'\)/s,
@@ -498,6 +694,42 @@ describe("Folio transaction projections", () => {
       /counterparty|description|reference|notes/,
     );
     expect(query.mock.calls[2]).toHaveLength(1);
+  });
+
+  it("filters invoices by kind and available PDF profile before counting and paging", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({ rows: [{ total: 1 }] })
+      .mockResolvedValueOnce({ rows: [transactionRow] });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await repository.listTransactionPage("actor", {
+      search: "",
+      filters: [
+        { field: "invoice", operator: "contains_any", value: ["missing"] },
+      ],
+      sort: { key: "date", direction: "desc" },
+      page: 1,
+      reportingTimezone: "Australia/Brisbane",
+    });
+
+    for (const index of [1, 2]) {
+      const sql = String(query.mock.calls[index]?.[0]);
+      expect(sql).toContain(
+        "transactions.kind NOT IN ('supplier_expense', 'supplier_credit')",
+      );
+      expect(sql).toContain("invoice_artifact.state='available'");
+      expect(sql).toContain(
+        "invoice_artifact.artifact_profile='manual_invoice_pdf_v1'",
+      );
+      expect(sql).toContain("= ANY($3::text[])");
+    }
+    expect(query.mock.calls[1]?.[1]).toEqual([
+      "",
+      "Australia/Brisbane",
+      ["missing"],
+    ]);
   });
 
   it("applies the same bounded predicate to transaction rows and total", async () => {
@@ -542,6 +774,9 @@ describe("Folio transaction projections", () => {
       "ORDER BY CASE\n      WHEN transactions.source_system='stripe'",
     );
     expect(pageSql).toContain(
+      "WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'owner_loan_repayment') THEN -transactions.settlement_amount",
+    );
+    expect(pageSql).toContain(
       "DESC NULLS LAST, transactions.id DESC LIMIT 50 OFFSET $6",
     );
     expect(query.mock.calls[1]?.[1]).toEqual([
@@ -559,6 +794,106 @@ describe("Folio transaction projections", () => {
       "attached",
       50,
     ]);
+  });
+
+  it("uses the persisted repayment label in transaction description filters", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({ rows: [{ total: 1 }] })
+      .mockResolvedValueOnce({ rows: [transactionRow] });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await repository.listTransactionPage("actor", {
+      search: "",
+      filters: [
+        { field: "description", operator: "contains", value: "repayment" },
+      ],
+      sort: { key: "date", direction: "desc" },
+      page: 1,
+      reportingTimezone: "Australia/Brisbane",
+    });
+
+    expect(String(query.mock.calls[1]?.[0])).toContain(
+      "WHEN 'owner_loan_repayment' THEN 'Owner loan repayment'",
+    );
+  });
+
+  it("binds enum membership arrays before transaction pagination", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({ rows: [{ total: 51 }] })
+      .mockResolvedValueOnce({ rows: [transactionRow] });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await repository.listTransactionPage("actor", {
+      search: "",
+      filters: [
+        {
+          field: "kind",
+          operator: "contains_any",
+          value: ["sale", "sale_refund"],
+        },
+        { field: "source", operator: "contains_none", value: ["stripe"] },
+        { field: "status", operator: "contains_any", value: [] },
+      ],
+      sort: { key: "date", direction: "desc" },
+      page: 2,
+      reportingTimezone: "Australia/Brisbane",
+    });
+
+    const countSql = String(query.mock.calls[1]?.[0]);
+    const pageSql = String(query.mock.calls[2]?.[0]);
+    expect(countSql).toContain("transactions.kind = ANY($3::text[])");
+    expect(countSql).toContain("transactions.source_system <> ALL($4::text[])");
+    expect(countSql).not.toContain("transactions.status = ANY");
+    const pageWhereStart = pageSql.lastIndexOf(" WHERE ");
+    expect(
+      pageSql.slice(pageWhereStart + 1, pageSql.lastIndexOf(" ORDER BY ")),
+    ).toBe(countSql.slice(countSql.indexOf("WHERE")));
+    expect(pageSql).toContain("OFFSET $5");
+    expect(query.mock.calls[1]?.[1]).toEqual([
+      "",
+      "Australia/Brisbane",
+      ["sale", "sale_refund"],
+      ["stripe"],
+    ]);
+    expect(query.mock.calls[2]?.[1]).toEqual([
+      "",
+      "Australia/Brisbane",
+      ["sale", "sale_refund"],
+      ["stripe"],
+      50,
+    ]);
+  });
+
+  it("orders transaction pages by each requested clause before pagination", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({ rows: [{ total: 51 }] })
+      .mockResolvedValueOnce({ rows: [transactionRow] });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await repository.listTransactionPage("actor", {
+      search: "",
+      filters: [],
+      sort: { key: "date", direction: "desc" },
+      sortClauses: [
+        { key: "state", direction: "asc" },
+        { key: "amount", direction: "desc" },
+      ],
+      page: 2,
+      reportingTimezone: "Australia/Brisbane",
+    });
+
+    const pageSql = String(query.mock.calls[2]?.[0]);
+    const order = pageSql.slice(pageSql.lastIndexOf(" ORDER BY "));
+    expect(order).toMatch(
+      /lower\([\s\S]* ASC NULLS LAST, CASE[\s\S]* DESC NULLS LAST, transactions\.id ASC LIMIT 50 OFFSET \$3/,
+    );
+    expect(query.mock.calls[2]?.[1]).toEqual(["", "Australia/Brisbane", 50]);
   });
 
   it("clamps an out-of-range transaction page before applying its offset", async () => {
@@ -581,7 +916,7 @@ describe("Folio transaction projections", () => {
     expect(query.mock.calls[2]?.[1]).toEqual(["", "Australia/Brisbane", 0]);
   });
 
-  it("returns only distinct manual counterparty and category suggestions", async () => {
+  it("returns historical category suggestions and preserves supplier mappings", async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce({
@@ -596,7 +931,7 @@ describe("Folio transaction projections", () => {
         ],
       })
       .mockResolvedValueOnce({
-        rows: [{ value: "Acme" }, { value: "Paper Co" }],
+        rows: [{ value: "Acme" }, { value: "CommBank" }, { value: "Paper Co" }],
       })
       .mockResolvedValueOnce({ rows: [{ value: "Office and stationery" }] })
       .mockResolvedValueOnce({
@@ -608,7 +943,7 @@ describe("Folio transaction projections", () => {
     const repository = new FolioRepository({ query } as never, "folio", false);
 
     await expect(repository.listEntrySuggestions("actor")).resolves.toEqual({
-      counterparties: ["Acme", "Paper Co"],
+      counterparties: ["Acme", "CommBank", "Paper Co"],
       categories: ["Office and stationery"],
       supplierCategories: [
         { counterparty: "Acme", category: "Office and stationery" },
@@ -620,11 +955,16 @@ describe("Folio transaction projections", () => {
       ["actor"],
     ]);
     expect(query.mock.calls[1]?.[0]).toMatch(
-      /SELECT DISTINCT btrim\(counterparty\).*source_system='manual'.*status <> 'void'.*kind IN \('supplier_expense', 'supplier_credit'\)/,
+      /SELECT DISTINCT btrim\(counterparty\) AS value FROM .*WHERE status <> 'void' AND counterparty IS NOT NULL AND btrim\(counterparty\) <> ''\) values ORDER BY lower\(value\), value LIMIT 200/,
     );
-    expect(query.mock.calls[2]?.[0]).toMatch(
-      /SELECT DISTINCT btrim\(category\).*source_system='manual'.*status <> 'void'.*kind IN \('supplier_expense', 'supplier_credit', 'processing_fee', 'dispute'\)/,
+    expect(query.mock.calls[1]?.[0]).not.toMatch(/source_system|kind IN \(/);
+    expect(query.mock.calls[1]?.[0]).not.toMatch(/status\s*=\s*'recorded'/);
+    const categorySql = String(query.mock.calls[2]?.[0]);
+    expect(categorySql).toMatch(
+      /SELECT DISTINCT btrim\(category\) AS value FROM .*WHERE status <> 'void' AND category IS NOT NULL AND btrim\(category\) <> ''\) values ORDER BY lower\(value\), value LIMIT 200/,
     );
+    expect(categorySql).not.toMatch(/source_system|kind\s+IN\s*\(/);
+    expect(categorySql).not.toMatch(/status\s*=\s*'recorded'/);
     expect(query.mock.calls[1]?.[0]).not.toMatch(/email|description|notes/);
     expect(query.mock.calls[2]?.[0]).not.toMatch(/email|description|notes/);
     expect(query.mock.calls[3]?.[0]).toMatch(
@@ -1004,6 +1344,102 @@ describe("Folio Stripe imports", () => {
 });
 
 describe("Folio transaction revisions", () => {
+  const matchedEditFixture = (amountAud = "-41.0000") => {
+    const updatedAt = "2026-01-01T00:00:00.123456Z";
+    const existing = {
+      ...transactionRow,
+      status: "recorded",
+      source_artifact_id: null,
+      source_artifact_ids: [],
+      updated_at_token: updatedAt,
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [{ id: "actor", active: true, role: "administrator" }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: "bank", amount_aud: amountAud }] })
+      .mockResolvedValueOnce({ rows: [existing] })
+      .mockResolvedValue({ rows: [existing], rowCount: 1 });
+    const repository = new FolioRepository(
+      {
+        connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+      } as never,
+      "folio",
+      false,
+    );
+    const input = transactionInputSchema.parse({
+      ownerId: "33333333-3333-4333-8333-333333333333",
+      kind: "supplier_expense",
+      status: "recorded",
+      settledAt: "2026-01-02T00:00:00.000Z",
+      settlementCurrency: "AUD",
+      settlementAmount: "41.0000",
+      documentCurrency: "USD",
+      documentAmount: "25.0000",
+    });
+    return { query, repository, input, updatedAt, id: existing.id };
+  };
+
+  it.each(["supplier_expense", "processing_fee", "sale_refund"] as const)(
+    "keeps an exact bank match when editing date, document facts and kind to %s",
+    async (kind) => {
+      const { query, repository, input, updatedAt, id } = matchedEditFixture();
+      await repository.updateManual("actor", id, { ...input, kind }, updatedAt);
+      expect(query.mock.calls[2][0]).toContain("ORDER BY id FOR UPDATE");
+      expect(query.mock.calls[4][0]).toContain('UPDATE "folio"."transactions"');
+      expect(query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+      expect(
+        query.mock.calls.some(([sql]) => /UPDATE.*bank_transactions/.test(sql)),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    { settlementAmount: "42.0000" },
+    { settlementAmount: "41.0001" },
+    { settlementCurrency: "USD" },
+    { settledAt: null },
+    { settlementAmount: null },
+    { kind: "sale" as const },
+    { kind: "transfer" as const },
+  ])(
+    "rejects a matched edit that changes eligibility or exact signed AUD effect: %j",
+    async (changes) => {
+      const { query, repository, input, updatedAt, id } = matchedEditFixture();
+      await expect(
+        repository.updateManual(
+          "actor",
+          id,
+          { ...input, ...changes },
+          updatedAt,
+        ),
+      ).rejects.toMatchObject({
+        diagnostic: {
+          code: "BANK_MATCH_EDIT_CONFLICT",
+          httpStatus: 409,
+          retryable: false,
+        },
+      });
+      expect(query.mock.calls.some(([sql]) => sql.startsWith("UPDATE"))).toBe(
+        false,
+      );
+      expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    },
+  );
+
+  it("requires explicit unmatching before voiding a matched transaction", async () => {
+    const { query, repository, updatedAt, id } = matchedEditFixture();
+    await expect(
+      repository.voidTransaction("actor", id, updatedAt),
+    ).rejects.toMatchObject({ code: "BANK_MATCH_EDIT_CONFLICT" });
+    expect(query.mock.calls.some(([sql]) => sql.startsWith("UPDATE"))).toBe(
+      false,
+    );
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
   it("matches manual updates at exact PostgreSQL microsecond precision", async () => {
     const expectedUpdatedAt = "2026-01-01T00:00:00.123456Z";
     const existing = {
@@ -1230,6 +1666,81 @@ describe("Folio transaction revisions", () => {
         "2026-01-01T00:00:00.123456Z",
       ),
     ).rejects.toBeInstanceOf(FolioDiagnosticError);
+  });
+
+  it("permanently deletes only the current manual draft and its MCP submission", async () => {
+    const expectedUpdatedAt = "2026-09-27T00:00:00.123456Z";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({ rows: [{ id: transactionRow.id }] })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({});
+    const repository = new FolioRepository(
+      {
+        connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+      } as never,
+      "folio",
+      false,
+    );
+
+    await expect(
+      repository.deleteDraftTransaction(
+        "actor",
+        transactionRow.id,
+        expectedUpdatedAt,
+      ),
+    ).resolves.toBeUndefined();
+    expect(query.mock.calls[2]?.[0]).toContain(
+      "source_system='manual' AND status='draft'",
+    );
+    expect(query.mock.calls[2]?.[1]).toEqual([
+      transactionRow.id,
+      expectedUpdatedAt,
+    ]);
+    expect(query.mock.calls[3]?.[0]).toContain(
+      'DELETE FROM "folio"."mcp_submissions"',
+    );
+    expect(query.mock.calls[4]?.[0]).toContain(
+      'DELETE FROM "folio"."transactions"',
+    );
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).includes('DELETE FROM "folio"."source_artifacts"'),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not delete a recorded or changed transaction", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [{ id: "actor", active: true }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({});
+    const repository = new FolioRepository(
+      {
+        connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+      } as never,
+      "folio",
+      false,
+    );
+
+    await expect(
+      repository.deleteDraftTransaction(
+        "actor",
+        transactionRow.id,
+        "2026-09-27T00:00:00.123456Z",
+      ),
+    ).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).startsWith("DELETE"),
+      ),
+    ).toBe(false);
   });
 });
 

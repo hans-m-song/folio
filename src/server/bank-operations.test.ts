@@ -6,7 +6,17 @@ const current = vi.hoisted(() => ({
   repository: {
     getArtifact: vi.fn(),
     findCsvDuplicateWarnings: vi.fn(),
+    listUsers: vi.fn(),
+    listEntrySuggestions: vi.fn(),
+    listAvailableInvoiceArtifacts: vi.fn(),
   },
+  bankRepository: {
+    listImports: vi.fn(),
+    listTransactions: vi.fn(),
+    reconciliationCounts: vi.fn(),
+    nextReconciliationTarget: vi.fn(),
+  },
+  proposalRepository: { listSuggestionsForBankRow: vi.fn() },
   documents: { readReviewText: vi.fn() },
   config: { reportingTimezone: "Australia/Brisbane" },
 }));
@@ -34,7 +44,13 @@ vi.mock("@tanstack/react-start", () => ({
 
 vi.mock("./runtime", () => ({ runtime: () => current }));
 
-import { getCsvDuplicateWarnings } from "./bank-operations";
+import {
+  getCsvDuplicateWarnings,
+  getBankReconciliation,
+  getNextBankReconciliation,
+  listBankImports,
+  listBankTransactions,
+} from "./bank-operations";
 
 const actor = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -52,6 +68,217 @@ describe("CSV duplicate warning operation", () => {
       artifactId,
       warnings: [],
     });
+    current.bankRepository.listImports.mockResolvedValue([]);
+    current.bankRepository.listTransactions.mockResolvedValue([]);
+    current.bankRepository.reconciliationCounts.mockResolvedValue({
+      total: 0,
+      unresolved: 0,
+    });
+    current.bankRepository.nextReconciliationTarget.mockResolvedValue({
+      status: "none",
+    });
+    current.repository.listUsers.mockResolvedValue([]);
+    current.repository.listEntrySuggestions.mockResolvedValue({});
+    current.repository.listAvailableInvoiceArtifacts.mockResolvedValue([]);
+  });
+
+  it("loads unresolved reconciliation rows with server-side filtering", async () => {
+    await getBankReconciliation({
+      data: { unresolvedOnly: true, offset: 100, windowDays: 31 },
+    });
+
+    expect(current.bankRepository.listTransactions).toHaveBeenCalledWith(
+      actor.id,
+      {
+        limit: 100,
+        offset: 100,
+        artifactId: undefined,
+        state: "unresolved",
+      },
+    );
+  });
+
+  it("selects the next row through the authorized read-only queue operation", async () => {
+    current.bankRepository.nextReconciliationTarget.mockResolvedValue({
+      status: "target",
+      bankId: "33333333-3333-4333-8333-333333333333",
+      page: 2,
+    });
+
+    await expect(
+      getNextBankReconciliation({
+        data: {
+          bankTransactionId: "44444444-4444-4444-8444-444444444444",
+          artifactId,
+          unresolvedOnly: true,
+        },
+      }),
+    ).resolves.toEqual({
+      status: "target",
+      bankId: "33333333-3333-4333-8333-333333333333",
+      page: 2,
+    });
+
+    expect(
+      current.bankRepository.nextReconciliationTarget,
+    ).toHaveBeenCalledWith(
+      actor.id,
+      "44444444-4444-4444-8444-444444444444",
+      artifactId,
+      true,
+    );
+    await expect(
+      Promise.resolve().then(() =>
+        getNextBankReconciliation({
+          data: {
+            bankTransactionId: "not-a-uuid",
+            unresolvedOnly: false,
+          } as never,
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(
+      current.bankRepository.nextReconciliationTarget,
+    ).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects actors without the bank reconciliation read permission", async () => {
+    current.auth.session.mockResolvedValue({ ...actor, role: "viewer" });
+
+    await expect(
+      getNextBankReconciliation({
+        data: {
+          bankTransactionId: "44444444-4444-4444-8444-444444444444",
+          unresolvedOnly: false,
+        },
+      }),
+    ).rejects.toThrow();
+    expect(
+      current.bankRepository.nextReconciliationTarget,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("validates field-specific bank query clauses before repository access", async () => {
+    const filters = [
+      {
+        field: "postedDate" as const,
+        operator: "greater_than" as const,
+        value: "2026-09-01",
+      },
+      {
+        field: "reviewState" as const,
+        operator: "is" as const,
+        value: "unresolved" as const,
+      },
+    ];
+    const sort = [
+      { key: "amountAud" as const, direction: "asc" as const },
+      { key: "postedDate" as const, direction: "desc" as const },
+    ];
+
+    await listBankTransactions({
+      data: { limit: 51, offset: 50, filters, sort },
+    });
+
+    expect(current.bankRepository.listTransactions).toHaveBeenCalledWith(
+      actor.id,
+      { limit: 51, offset: 50, filters, sort },
+    );
+    await expect(
+      Promise.resolve().then(() =>
+        listBankImports({
+          data: {
+            filters: [
+              { field: "filename", operator: "is", value: "bank.csv" },
+            ] as never,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(current.bankRepository.listImports).not.toHaveBeenCalled();
+  });
+
+  it("validates bounded enum membership arrays and accepts empty inactive arrays", async () => {
+    const activityFilters = [
+      {
+        field: "reviewState" as const,
+        operator: "is_not" as const,
+        value: "private" as const,
+      },
+      {
+        field: "reviewState" as const,
+        operator: "contains_any" as const,
+        value: ["unresolved" as const, "matched" as const],
+      },
+      {
+        field: "matchStatus" as const,
+        operator: "contains_none" as const,
+        value: [],
+      },
+    ];
+    await listBankTransactions({ data: { filters: activityFilters } });
+    expect(current.bankRepository.listTransactions).toHaveBeenCalledWith(
+      actor.id,
+      expect.objectContaining({ filters: activityFilters }),
+    );
+
+    const importFilters = [
+      {
+        field: "state" as const,
+        operator: "is" as const,
+        value: "available" as const,
+      },
+      {
+        field: "state" as const,
+        operator: "contains_none" as const,
+        value: ["rejected" as const, "superseded" as const],
+      },
+    ];
+    await listBankImports({ data: { filters: importFilters } });
+    expect(current.bankRepository.listImports).toHaveBeenCalledWith(
+      actor.id,
+      expect.objectContaining({ filters: importFilters }),
+    );
+
+    await expect(
+      Promise.resolve().then(() =>
+        listBankTransactions({
+          data: {
+            filters: [
+              {
+                field: "reviewState",
+                operator: "contains_any",
+                value: ["unresolved", "invalid"],
+              },
+            ] as never,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      Promise.resolve().then(() =>
+        listBankImports({
+          data: {
+            filters: [
+              {
+                field: "state",
+                operator: "contains_any",
+                value: [
+                  "pending",
+                  "awaiting_review",
+                  "available",
+                  "rejected",
+                  "abandoned",
+                  "superseded",
+                  "pending",
+                ],
+              },
+            ] as never,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(current.bankRepository.listImports).toHaveBeenCalledTimes(1);
   });
 
   it("parses pinned Stripe rows into server-derived identities", async () => {

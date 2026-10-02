@@ -1,3 +1,4 @@
+import { AutocompleteSelect } from "../components/autocomplete";
 import {
   createFileRoute,
   useNavigate,
@@ -15,8 +16,10 @@ import {
 import {
   createAndMatchBankTransaction,
   getBankReconciliation,
+  getNextBankReconciliation,
   reconcileBankTransaction,
 } from "../server/bank-operations";
+import { MoneyText } from "../components/money-text";
 import {
   confirmArtifactUpload,
   startArtifactUpload,
@@ -26,6 +29,10 @@ import {
   type ManualTransactionSubmission,
 } from "../components/manual-transaction-form";
 import { BankProposalSuggestions } from "../components/bank-proposal-suggestions";
+import {
+  loadManualTransactionRouteData,
+  ManualTransactionRoute,
+} from "./-transaction-workflow";
 import type { ManualTransactionServerIssue } from "../domain/manual-transaction";
 import type {
   BankClassification,
@@ -34,6 +41,7 @@ import type {
 import {
   expenseCategorySuggestions,
   isOwnerFundingKind,
+  isOwnerLoanRepaymentKind,
   transactionKindLabels,
   type TransactionInput,
 } from "../domain/types";
@@ -41,10 +49,12 @@ import { defaultTaxTreatmentForTransaction } from "../domain/tax";
 import { manualCashEffectAudMinor } from "../domain/cash-effect";
 import { formatAudDecimal, parseDecimal } from "../domain/money";
 import bankingCss from "../styles/banking.css?url";
+import "../styles/transactions.css";
 
 interface ReconcileSearch {
   bank?: string;
   artifact?: string;
+  unresolved?: boolean;
   window?: "14" | "31" | "all";
   page?: number;
 }
@@ -64,6 +74,13 @@ export const parseReconcileSearch = (
     artifact:
       typeof search.artifact === "string" && uuidPattern.test(search.artifact)
         ? search.artifact
+        : undefined,
+    unresolved:
+      search.unresolved === true ||
+      search.unresolved === 1 ||
+      search.unresolved === "true" ||
+      search.unresolved === "1"
+        ? true
         : undefined,
     window: ["14", "31", "all"].includes(String(search.window))
       ? (String(search.window) as ReconcileSearch["window"])
@@ -110,6 +127,7 @@ export const Route = createFileRoute("/banking/reconcile")({
       data: {
         bankTransactionId: deps.bank,
         artifactId: deps.artifact,
+        unresolvedOnly: deps.unresolved ?? false,
         windowDays:
           deps.window === "all" ? null : deps.window === "31" ? 31 : 14,
         offset: ((deps.page ?? 1) - 1) * 100,
@@ -160,6 +178,15 @@ const errorMessage = (error: unknown) =>
   error instanceof Error
     ? error.message
     : "The reconciliation action failed. Reload and retry.";
+
+const reconciliationNavigationContext = (search: ReconcileSearch) =>
+  JSON.stringify({
+    bankTransactionId: search.bank ?? null,
+    artifactId: search.artifact ?? null,
+    unresolvedOnly: search.unresolved ?? false,
+    window: search.window ?? "14",
+    page: search.page ?? 1,
+  });
 
 const sha256Base64 = async (file: File): Promise<string> => {
   const digest = await crypto.subtle.digest(
@@ -251,10 +278,14 @@ export const createBankTransactionPrefill = (
     ? bank.amountAud.slice(1)
     : bank.amountAud;
   const ownerFunding = isOwnerFundingKind(kind);
+  const bankMovement = parseDecimal(bank.amountAud);
+  const ownerFundingDirectionMatches = isOwnerLoanRepaymentKind(kind)
+    ? bankMovement < 0n
+    : bankMovement > 0n;
   const fundingAmount =
-    ownerFunding && parseDecimal(bank.amountAud) > 0n ? magnitude : null;
+    ownerFunding && ownerFundingDirectionMatches ? magnitude : null;
   return {
-    ownerId: data.actorId,
+    ownerId: isOwnerLoanRepaymentKind(kind) ? null : data.actorId,
     sourceArtifactId: null,
     kind,
     reference: null,
@@ -297,10 +328,22 @@ interface CreatedBankMatch {
   sourceRevision: string;
 }
 
+interface PendingReconciliationAdvance {
+  anchorBankTransactionId: string;
+  contextKey: string;
+  targetBankTransactionId?: string;
+  retryWhenResolved: boolean;
+}
+
 interface InvoiceUploadIntent {
   artifactId: string;
   uploadUrl: string;
   stage: "started" | "uploaded" | "confirmed";
+}
+
+interface InvoiceUploadGuard {
+  navigationContextKey: string;
+  file: File;
 }
 
 function BankReconcilePage() {
@@ -312,6 +355,20 @@ function BankReconcilePage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [createAndNext, setCreateAndNext] = useState(false);
+  const [pendingAdvance, setPendingAdvance] =
+    useState<PendingReconciliationAdvance | null>(null);
+  const [draftEditor, setDraftEditor] = useState<
+    | { status: "loading"; id: string }
+    | { status: "error"; id: string; message: string }
+    | {
+        status: "ready";
+        id: string;
+        data: Awaited<ReturnType<typeof loadManualTransactionRouteData>>;
+      }
+    | null
+  >(null);
+  const draftLoadVersion = useRef(0);
   const [createKind, setCreateKind] = useState<TransactionInput["kind"] | "">(
     "",
   );
@@ -326,6 +383,7 @@ function BankReconcilePage() {
     useState<CreatedBankMatch | null>(null);
   const [transactionId, setTransactionId] = useState(() => crypto.randomUUID());
   const uploadIntents = useRef(new Map<string, InvoiceUploadIntent>());
+  const evidenceFileRef = useRef<File | null>(null);
   const inFlight = useRef(false);
   const matchedResetTriggerRef = useRef<HTMLButtonElement>(null);
   const matchedResetCancelRef = useRef<HTMLButtonElement>(null);
@@ -334,6 +392,11 @@ function BankReconcilePage() {
   const queueScrollRef = useRef<HTMLDivElement>(null);
   const selectedQueueRowRef = useRef<HTMLLIElement>(null);
   const selected = data.detail?.bankTransaction;
+  const navigationContextKey = reconciliationNavigationContext(search);
+  const navigationContextKeyRef = useRef(navigationContextKey);
+  navigationContextKeyRef.current = navigationContextKey;
+  const searchRef = useRef(search);
+  searchRef.current = search;
   const matchedTransactionId =
     selected?.matchedTransactionId ??
     (selected &&
@@ -361,8 +424,11 @@ function BankReconcilePage() {
       : null;
 
   useEffect(() => {
+    draftLoadVersion.current += 1;
+    setDraftEditor(null);
     setCandidateId(null);
     setShowCreate(false);
+    setCreateAndNext(false);
     setCreateKind("");
     setShowMatchedResetConfirm(false);
     setServerIssues([]);
@@ -371,6 +437,37 @@ function BankReconcilePage() {
     setCreatedBankMatch(null);
     setTransactionId(crypto.randomUUID());
   }, [selected?.id]);
+
+  const openDraftEditor = async (id: string) => {
+    const requestVersion = ++draftLoadVersion.current;
+    setShowCreate(false);
+    setDraftEditor({ status: "loading", id });
+    try {
+      const draftData = await loadManualTransactionRouteData(id);
+      if (requestVersion !== draftLoadVersion.current) return;
+      if (
+        !draftData.transaction ||
+        draftData.transaction.status !== "draft" ||
+        draftData.transaction.sourceSystem !== "manual"
+      ) {
+        setDraftEditor({
+          status: "error",
+          id,
+          message: "This draft is no longer available for editing.",
+        });
+        return;
+      }
+      setDraftEditor({ status: "ready", id, data: draftData });
+    } catch {
+      if (requestVersion !== draftLoadVersion.current) return;
+      setDraftEditor({
+        status: "error",
+        id,
+        message:
+          "The draft could not be loaded. Retry or open its transaction page.",
+      });
+    }
+  };
 
   useEffect(() => {
     setCandidateId(null);
@@ -423,6 +520,270 @@ function BankReconcilePage() {
     await router.invalidate();
   };
 
+  const ensureInvoiceUpload = async (
+    file: File,
+    ownerId: string | null,
+    guard?: InvoiceUploadGuard,
+    onChecksum?: (checksumSha256: string) => void,
+  ) => {
+    if (file.size === 0)
+      throw new Error("Choose a non-empty PDF file as transaction evidence.");
+    if (file.size > 10 * 1024 * 1024)
+      throw new Error("Invoice PDFs must be 10 MiB or smaller.");
+    if (
+      file.type !== "application/pdf" &&
+      !file.name.toLowerCase().endsWith(".pdf")
+    )
+      throw new Error("Choose a PDF file as transaction evidence.");
+
+    const requestIsCurrent = () =>
+      !guard ||
+      (navigationContextKeyRef.current === guard.navigationContextKey &&
+        evidenceFileRef.current === guard.file);
+    const assertRequestIsCurrent = () => {
+      if (!requestIsCurrent())
+        throw new Error(
+          "The selected PDF or bank row changed. Retry extraction.",
+        );
+    };
+    const setRequestStatus = (status: string) => {
+      if (requestIsCurrent()) setSubmissionStatus(status);
+    };
+
+    assertRequestIsCurrent();
+    setRequestStatus("Validating the selected invoice PDF…");
+    const checksumSha256 = await sha256Base64(file);
+    onChecksum?.(checksumSha256);
+    assertRequestIsCurrent();
+    let intent = uploadIntents.current.get(checksumSha256);
+
+    if (intent?.stage === "uploaded") {
+      const recoveredArtifact = data.availableArtifacts.find(
+        (artifact) => artifact.checksumSha256 === checksumSha256,
+      );
+      if (recoveredArtifact) {
+        intent = {
+          ...intent,
+          artifactId: recoveredArtifact.id,
+          stage: "confirmed",
+        };
+        uploadIntents.current.set(checksumSha256, intent);
+      }
+    }
+
+    if (!intent) {
+      setRequestStatus("Starting authenticated invoice PDF upload…");
+      const started = await startArtifactUpload({
+        data: {
+          ownerId,
+          artifactProfile: "manual_invoice_pdf_v1",
+          filename: file.name,
+          mediaType: "application/pdf",
+          byteSize: file.size,
+          checksumSha256,
+        },
+      });
+      intent = {
+        artifactId: started.artifact.id,
+        uploadUrl: started.uploadUrl,
+        stage: "started",
+      };
+      uploadIntents.current.set(checksumSha256, intent);
+      assertRequestIsCurrent();
+    }
+
+    if (intent.stage === "started") {
+      setRequestStatus("Uploading invoice PDF…");
+      assertRequestIsCurrent();
+      const response = await fetch(intent.uploadUrl, {
+        method: "PUT",
+        body: file,
+        headers: {
+          "content-type": "application/pdf",
+          "x-amz-checksum-sha256": checksumSha256,
+          "x-amz-meta-folio-artifact-id": intent.artifactId,
+        },
+      });
+      if (!response.ok)
+        throw new Error(`Invoice PDF upload failed (${response.status}).`);
+      intent = { ...intent, stage: "uploaded" };
+      uploadIntents.current.set(checksumSha256, intent);
+      assertRequestIsCurrent();
+    }
+
+    if (intent.stage === "uploaded") {
+      setRequestStatus("Confirming invoice PDF…");
+      assertRequestIsCurrent();
+      const confirmed = await confirmArtifactUpload({
+        data: { id: intent.artifactId },
+      });
+      intent = {
+        ...intent,
+        artifactId: confirmed.id,
+        stage: "confirmed",
+      };
+      uploadIntents.current.set(checksumSha256, intent);
+      assertRequestIsCurrent();
+    }
+
+    setRequestStatus("Invoice PDF confirmed and ready for review.");
+    return { artifactId: intent.artifactId, checksumSha256 };
+  };
+
+  const prepareInvoiceForExtraction = async (
+    file: File,
+    ownerId: string | null,
+  ) => {
+    if (!selected || inFlight.current)
+      throw new Error("Another reconciliation action is already in progress.");
+
+    const guard = { navigationContextKey, file };
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      const prepared = await ensureInvoiceUpload(file, ownerId, guard);
+      if (
+        navigationContextKeyRef.current !== guard.navigationContextKey ||
+        evidenceFileRef.current !== file
+      )
+        throw new Error(
+          "The selected PDF or bank row changed. Retry extraction.",
+        );
+      setSubmissionStatus(
+        "Invoice PDF confirmed for extraction. No transaction was saved or matched.",
+      );
+      return prepared.artifactId;
+    } catch (error) {
+      if (
+        navigationContextKeyRef.current === guard.navigationContextKey &&
+        evidenceFileRef.current === file
+      ) {
+        setSubmissionStatus(
+          "No transaction was saved or matched. Correct the PDF or retry extraction.",
+        );
+      }
+      throw error;
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  const advanceToNext = async (
+    anchorBankTransactionId: string,
+    contextKey: string,
+    retryWhenResolved = true,
+  ) => {
+    if (navigationContextKeyRef.current !== contextKey) return;
+
+    let result: Awaited<ReturnType<typeof getNextBankReconciliation>>;
+    try {
+      result = await getNextBankReconciliation({
+        data: {
+          bankTransactionId: anchorBankTransactionId,
+          artifactId: searchRef.current.artifact,
+          unresolvedOnly: searchRef.current.unresolved ?? false,
+        },
+      });
+    } catch {
+      if (navigationContextKeyRef.current !== contextKey) return;
+      setPendingAdvance({
+        anchorBankTransactionId,
+        contextKey,
+        retryWhenResolved,
+      });
+      setMessage(
+        "The bank row was matched, but advancing failed. Retry advance to continue without repeating the match.",
+      );
+      return;
+    }
+
+    if (navigationContextKeyRef.current !== contextKey) return;
+    if (result.status === "none") {
+      setPendingAdvance(null);
+      setMessage(
+        "The bank row was matched. No unresolved rows remain in this queue.",
+      );
+      return;
+    }
+    if (result.status === "advance_incomplete") {
+      setPendingAdvance(null);
+      setMessage(
+        result.reason === "queue_limit"
+          ? "The bank row was matched, but the next unresolved row is beyond the 10,100-row queue limit. Narrow the import or filters before advancing."
+          : "The bank row was matched, but the queue changed before Folio could select the next row. Reload and continue manually.",
+      );
+      return;
+    }
+
+    const nextSearch = {
+      ...searchRef.current,
+      bank: result.bankId,
+      page: result.page,
+    };
+    const nextContextKey = reconciliationNavigationContext(nextSearch);
+    setPendingAdvance({
+      anchorBankTransactionId: result.bankId,
+      contextKey: nextContextKey,
+      targetBankTransactionId: result.bankId,
+      retryWhenResolved,
+    });
+    setMessage("Bank row matched. Opening the next unresolved row…");
+
+    try {
+      await navigate({ search: nextSearch });
+    } catch {
+      const currentContextKey = navigationContextKeyRef.current;
+      if (
+        currentContextKey !== contextKey &&
+        currentContextKey !== nextContextKey
+      )
+        return;
+      setPendingAdvance({
+        anchorBankTransactionId,
+        contextKey: currentContextKey,
+        retryWhenResolved,
+      });
+      setMessage(
+        "The bank row was matched, but Folio could not open the next row. Retry advance to continue without repeating the match.",
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (
+      !pendingAdvance?.targetBankTransactionId ||
+      pendingAdvance.contextKey !== navigationContextKey ||
+      selected?.id !== pendingAdvance.targetBankTransactionId
+    )
+      return;
+
+    if (selected.reviewState === "unresolved") {
+      setPendingAdvance(null);
+      return;
+    }
+
+    if (pendingAdvance.retryWhenResolved) {
+      setPendingAdvance(null);
+      void advanceToNext(selected.id, navigationContextKey, false);
+      return;
+    }
+
+    setPendingAdvance({
+      anchorBankTransactionId: selected.id,
+      contextKey: navigationContextKey,
+      retryWhenResolved: false,
+    });
+    setMessage(
+      "The next row was resolved while opening it. Retry advance to continue without repeating the match.",
+    );
+  }, [
+    pendingAdvance,
+    navigationContextKey,
+    selected?.id,
+    selected?.reviewState,
+  ]);
+
   const mutate = async (
     command: BankReconciliationCommand,
     expectedRevision = selected?.revision,
@@ -431,27 +792,16 @@ function BankReconcilePage() {
     setBusy(true);
     setMessage("");
     setCreatedBankMatch(null);
+
+    let result: Awaited<ReturnType<typeof reconcileBankTransaction>>;
     try {
-      const result = await reconcileBankTransaction({
+      result = await reconcileBankTransaction({
         data: {
           bankTransactionId: selected.id,
           expectedRevision,
           command,
         },
       });
-      setMessage(
-        result.status === "already_applied"
-          ? "This reconciliation state was already applied."
-          : "Reconciliation saved.",
-      );
-      if (command.type === "match")
-        setCreatedBankMatch({
-          bankTransactionId: selected.id,
-          transactionId: command.transactionId,
-          sourceRevision: selected.revision,
-        });
-      await reload();
-      return result;
     } catch (error) {
       const failureMessage = errorMessage(error);
       setMessage(failureMessage);
@@ -462,10 +812,49 @@ function BankReconcilePage() {
           `${failureMessage} The current row could not be refreshed; reload before retrying.`,
         );
       }
+      setBusy(false);
       return null;
+    }
+
+    setMessage(
+      result.status === "already_applied"
+        ? "This reconciliation state was already applied."
+        : "Reconciliation saved.",
+    );
+    if (command.type === "match")
+      setCreatedBankMatch({
+        bankTransactionId: selected.id,
+        transactionId: command.transactionId,
+        sourceRevision: selected.revision,
+      });
+    try {
+      await reload();
+    } catch {
+      setMessage(
+        "The reconciliation was saved, but Folio could not refresh the selected row. Reload before taking another action.",
+      );
     } finally {
       setBusy(false);
     }
+    return result;
+  };
+
+  const matchSelected = async (
+    transactionId: string,
+    advanceAfterMatch: boolean,
+  ) => {
+    if (!selected) return;
+    const anchorBankTransactionId = selected.id;
+    const contextKey = navigationContextKey;
+    setUndoAction(null);
+    const result = await mutate({ type: "match", transactionId });
+    if (
+      !advanceAfterMatch ||
+      !result ||
+      (result.status !== "applied" && result.status !== "already_applied")
+    )
+      return;
+    await advanceToNext(anchorBankTransactionId, contextKey);
   };
 
   const classifySelected = async (classification: BankClassification) => {
@@ -553,6 +942,9 @@ function BankReconcilePage() {
 
   const createAndMatch = async (submission: ManualTransactionSubmission) => {
     if (!selected || inFlight.current) return;
+    const anchorBankTransactionId = selected.id;
+    const operationContextKey = navigationContextKey;
+    const shouldAdvance = createAndNext;
     inFlight.current = true;
     setBusy(true);
     setMessage("");
@@ -565,77 +957,15 @@ function BankReconcilePage() {
     try {
       const artifactIds = [...submission.artifactIds];
       if (submission.file) {
-        const file = submission.file;
-        setSubmissionStatus("Validating the selected invoice PDF…");
-        const checksumSha256 = await sha256Base64(file);
-        invoiceChecksumSha256 = checksumSha256;
-        let intent = uploadIntents.current.get(checksumSha256);
-
-        if (intent?.stage === "uploaded") {
-          const recoveredArtifact = data.availableArtifacts.find(
-            (artifact) => artifact.checksumSha256 === checksumSha256,
-          );
-          if (recoveredArtifact) {
-            intent = {
-              ...intent,
-              artifactId: recoveredArtifact.id,
-              stage: "confirmed",
-            };
-            uploadIntents.current.set(checksumSha256, intent);
-          }
-        }
-
-        if (!intent) {
-          setSubmissionStatus("Starting authenticated invoice PDF upload…");
-          const started = await startArtifactUpload({
-            data: {
-              ownerId: submission.transaction.ownerId,
-              artifactProfile: "manual_invoice_pdf_v1",
-              filename: file.name,
-              mediaType: "application/pdf",
-              byteSize: file.size,
-              checksumSha256,
-            },
-          });
-          intent = {
-            artifactId: started.artifact.id,
-            uploadUrl: started.uploadUrl,
-            stage: "started",
-          };
-          uploadIntents.current.set(checksumSha256, intent);
-        }
-
-        if (intent.stage === "started") {
-          setSubmissionStatus("Uploading invoice PDF…");
-          const response = await fetch(intent.uploadUrl, {
-            method: "PUT",
-            body: file,
-            headers: {
-              "content-type": "application/pdf",
-              "x-amz-checksum-sha256": checksumSha256,
-              "x-amz-meta-folio-artifact-id": intent.artifactId,
-            },
-          });
-          if (!response.ok)
-            throw new Error(`Invoice PDF upload failed (${response.status}).`);
-          intent = { ...intent, stage: "uploaded" };
-          uploadIntents.current.set(checksumSha256, intent);
-        }
-
-        if (intent.stage === "uploaded") {
-          setSubmissionStatus("Confirming invoice PDF…");
-          const confirmed = await confirmArtifactUpload({
-            data: { id: intent.artifactId },
-          });
-          intent = {
-            ...intent,
-            artifactId: confirmed.id,
-            stage: "confirmed",
-          };
-          uploadIntents.current.set(checksumSha256, intent);
-        }
-
-        invoiceArtifactId = intent.artifactId;
+        const prepared = await ensureInvoiceUpload(
+          submission.file,
+          submission.transaction.ownerId,
+          undefined,
+          (checksumSha256) => {
+            invoiceChecksumSha256 = checksumSha256;
+          },
+        );
+        invoiceArtifactId = prepared.artifactId;
         if (!artifactIds.includes(invoiceArtifactId))
           artifactIds.push(invoiceArtifactId);
         setSubmissionStatus(
@@ -680,9 +1010,26 @@ function BankReconcilePage() {
         transactionId,
         sourceRevision: selected.revision,
       });
-      await reload();
+      let selectedRowRefreshed = true;
+      try {
+        await reload();
+      } catch {
+        selectedRowRefreshed = false;
+        setSubmissionStatus(
+          "The transaction and bank-row match were saved, but the selected row could not be refreshed.",
+        );
+      }
       uploadIntents.current.clear();
       setTransactionId(crypto.randomUUID());
+      setCreateAndNext(false);
+      if (
+        shouldAdvance &&
+        (result.status === "applied" || result.status === "already_applied") &&
+        navigationContextKeyRef.current === operationContextKey
+      ) {
+        if (selectedRowRefreshed) setSubmissionStatus("");
+        await advanceToNext(anchorBankTransactionId, operationContextKey);
+      }
     } catch (error) {
       const failureMessage = errorMessage(error);
       const retainedIntent = invoiceChecksumSha256
@@ -771,13 +1118,40 @@ function BankReconcilePage() {
             </div>
           </div>
 
+          <label className="banking-queue-filter">
+            <input
+              type="checkbox"
+              checked={search.unresolved ?? false}
+              onChange={(event) =>
+                void navigate({
+                  search: {
+                    ...search,
+                    unresolved: event.target.checked ? true : undefined,
+                    page: 1,
+                    bank: undefined,
+                  },
+                })
+              }
+            />
+            Unresolved only
+          </label>
+
           {data.rows.length === 0 ? (
             <div className="banking-empty-state">
-              <h3>No imported bank rows</h3>
-              <p>Import a CommBank CSV to begin reviewing bank activity.</p>
-              <a className="banking-button-link" href="/imports/commbank">
-                Import CSV
-              </a>
+              {search.unresolved ? (
+                <>
+                  <h3>No unresolved bank rows</h3>
+                  <p>All bank rows in this queue have been reviewed.</p>
+                </>
+              ) : (
+                <>
+                  <h3>No imported bank rows</h3>
+                  <p>Import a CommBank CSV to begin reviewing bank activity.</p>
+                  <a className="banking-button-link" href="/imports/commbank">
+                    Import CSV
+                  </a>
+                </>
+              )}
             </div>
           ) : (
             <div className="banking-queue-scroll" ref={queueScrollRef}>
@@ -792,7 +1166,7 @@ function BankReconcilePage() {
                       aria-current={
                         selected?.id === row.id ? "page" : undefined
                       }
-                      href={`/banking/reconcile?bank=${encodeURIComponent(row.id)}${search.artifact ? `&artifact=${encodeURIComponent(search.artifact)}` : ""}&window=${search.window ?? "14"}&page=${search.page ?? 1}`}
+                      href={`/banking/reconcile?bank=${encodeURIComponent(row.id)}${search.artifact ? `&artifact=${encodeURIComponent(search.artifact)}` : ""}${search.unresolved ? "&unresolved=true" : ""}&window=${search.window ?? "14"}&page=${search.page ?? 1}`}
                     >
                       <span className="banking-queue-meta">
                         <time dateTime={row.postedDate}>{row.postedDate}</time>
@@ -806,7 +1180,8 @@ function BankReconcilePage() {
                         <span className="banking-queue-description">
                           {row.description}
                         </span>
-                        <strong
+                        <MoneyText
+                          as="strong"
                           className={
                             row.amountAud.startsWith("-")
                               ? "amount-negative"
@@ -814,7 +1189,7 @@ function BankReconcilePage() {
                           }
                         >
                           {formatAudDecimal(row.amountAud)}
-                        </strong>
+                        </MoneyText>
                       </span>
                     </a>
                   </li>
@@ -847,7 +1222,9 @@ function BankReconcilePage() {
               disabled={
                 !canAdvanceBankReconciliationPage(
                   search.page ?? 1,
-                  data.counts.total,
+                  search.unresolved
+                    ? data.counts.unresolved
+                    : data.counts.total,
                 )
               }
               onClick={() =>
@@ -897,7 +1274,9 @@ function BankReconcilePage() {
               </div>
               <div>
                 <dt>Movement (AUD, as imported)</dt>
-                <dd>{sourceReview?.movementAud}</dd>
+                <dd>
+                  <MoneyText>{sourceReview?.movementAud}</MoneyText>
+                </dd>
               </div>
               <div className="banking-detail-wide">
                 <dt>Raw description</dt>
@@ -973,322 +1352,418 @@ function BankReconcilePage() {
             <BankProposalSuggestions
               bankTransactionId={selected.id}
               suggestions={data.suggestions}
+              onEditDraft={(id) => void openDraftEditor(id)}
             />
 
-            <fieldset
-              className="banking-candidate-fieldset"
-              disabled={busy || selected.reviewState !== "unresolved"}
-            >
-              <legend>Exact signed-AUD candidates</legend>
-              <label className="banking-window-field">
-                Date window
-                <select
-                  value={search.window ?? "14"}
-                  onChange={(event) =>
-                    void navigate({
-                      search: {
-                        ...search,
-                        window: event.target.value as "14" | "31" | "all",
-                      },
-                    })
-                  }
-                >
-                  <option value="14">±14 days</option>
-                  <option value="31">±31 days</option>
-                  <option value="all">Search all dates</option>
-                </select>
-              </label>
-              {data.detail.candidates.length === 0 ? (
-                <p className="banking-muted">
-                  No eligible candidates in this date window.
-                </p>
-              ) : (
-                <div className="banking-candidate-list">
-                  {data.detail.candidates.map((candidate) => (
-                    <label
-                      className="banking-candidate-option"
-                      key={candidate.id}
-                    >
-                      <input
-                        type="radio"
-                        name="candidate"
-                        checked={candidateId === candidate.id}
-                        onChange={() => setCandidateId(candidate.id)}
-                      />
-                      <span className="banking-candidate-content">
-                        <span className="banking-candidate-title">
-                          <strong>
-                            {candidate.counterparty ?? "No counterparty"}
-                          </strong>
-                          <span>{formatAudDecimal(candidate.amountAud)}</span>
-                        </span>
-                        <span>
-                          {candidate.settledAt.slice(0, 10)} · {candidate.kind}
-                        </span>
-                        <span>
-                          {candidate.reference ?? "No reference"} ·{" "}
-                          {candidate.description ?? "No description"}
-                        </span>
-                        <span className="banking-muted">
-                          {candidate.dateDistanceDays} day difference · text
-                          evidence {candidate.textScore}
-                        </span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              <button
-                type="button"
-                disabled={!candidateId || busy}
-                onClick={() => {
-                  if (!candidateId) return;
-                  setUndoAction(null);
-                  void mutate({ type: "match", transactionId: candidateId });
-                }}
+            {draftEditor && (
+              <section
+                className="banking-create-panel"
+                aria-label="Edit suggested draft"
               >
-                Match selected transaction
-              </button>
-            </fieldset>
+                {draftEditor.status === "loading" ? (
+                  <p role="status">Loading draft…</p>
+                ) : draftEditor.status === "error" ? (
+                  <p role="alert">{draftEditor.message}</p>
+                ) : (
+                  <ManualTransactionRoute
+                    key={draftEditor.id}
+                    data={draftEditor.data}
+                    mode="edit"
+                    returnTo={`/banking/reconcile?bank=${selected.id}`}
+                    reviewReturnTo={`/banking/reconcile?bank=${selected.id}`}
+                    embedded
+                    onCancel={() => setDraftEditor(null)}
+                    onDeleted={() => {
+                      setDraftEditor(null);
+                      setMessage(
+                        "Draft deleted. Uploaded files were retained.",
+                      );
+                    }}
+                    onSaved={(status) => {
+                      setDraftEditor(null);
+                      setMessage(
+                        status === "recorded"
+                          ? "Draft recorded. Match the bank row separately when ready."
+                          : "Draft changes saved. The bank row remains unresolved.",
+                      );
+                    }}
+                  />
+                )}
+              </section>
+            )}
 
-            <div className="actions banking-action-row">
-              <button
-                type="button"
-                className="secondary"
-                disabled={busy || selected.reviewState !== "unresolved"}
-                onClick={() => {
-                  setCreateKind("");
-                  setShowCreate((shown) => !shown);
-                }}
-              >
-                {showCreate
-                  ? "Cancel create transaction"
-                  : "Create transaction"}
-              </button>
-              {(["private", "transfer", "duplicate"] as const).map(
-                (classification) => (
+            {!draftEditor && (
+              <>
+                <fieldset
+                  className="banking-candidate-fieldset"
+                  disabled={busy || selected.reviewState !== "unresolved"}
+                >
+                  <legend>Exact signed-AUD candidates</legend>
+                  <label className="banking-window-field">
+                    Date window
+                    <AutocompleteSelect
+                      aria-label="Date window"
+                      value={search.window ?? "14"}
+                      onValueChange={(event) =>
+                        void navigate({
+                          search: {
+                            ...search,
+                            window: event as "14" | "31" | "all",
+                          },
+                        })
+                      }
+                    >
+                      <option value="14">±14 days</option>
+                      <option value="31">±31 days</option>
+                      <option value="all">Search all dates</option>
+                    </AutocompleteSelect>
+                  </label>
+                  {data.detail.candidates.length === 0 ? (
+                    <p className="banking-muted">
+                      No eligible candidates in this date window.
+                    </p>
+                  ) : (
+                    <div className="banking-candidate-list">
+                      {data.detail.candidates.map((candidate) => (
+                        <label
+                          className="banking-candidate-option"
+                          key={candidate.id}
+                        >
+                          <input
+                            type="radio"
+                            name="candidate"
+                            checked={candidateId === candidate.id}
+                            onChange={() => setCandidateId(candidate.id)}
+                          />
+                          <span className="banking-candidate-content">
+                            <span className="banking-candidate-title">
+                              <strong>
+                                {candidate.counterparty ?? "No counterparty"}
+                              </strong>
+                              <MoneyText>
+                                {formatAudDecimal(candidate.amountAud)}
+                              </MoneyText>
+                            </span>
+                            <span>
+                              {candidate.settledAt.slice(0, 10)} ·{" "}
+                              {candidate.kind}
+                            </span>
+                            <span>
+                              {candidate.reference ?? "No reference"} ·{" "}
+                              {candidate.description ?? "No description"}
+                            </span>
+                            <span className="banking-muted">
+                              {candidate.dateDistanceDays} day difference · text
+                              evidence {candidate.textScore}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
                   <button
-                    key={classification}
+                    type="button"
+                    disabled={!candidateId || busy}
+                    onClick={() => {
+                      if (!candidateId) return;
+                      void matchSelected(candidateId, false);
+                    }}
+                  >
+                    Match selected transaction
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={!candidateId || busy}
+                    onClick={() => {
+                      if (!candidateId) return;
+                      void matchSelected(candidateId, true);
+                    }}
+                  >
+                    Match and next
+                  </button>
+                </fieldset>
+
+                <div className="actions banking-action-row">
+                  <button
                     type="button"
                     className="secondary"
                     disabled={busy || selected.reviewState !== "unresolved"}
-                    onClick={() => void classifySelected(classification)}
+                    onClick={() => {
+                      setCreateKind("");
+                      setShowCreate((shown) => !shown);
+                    }}
                   >
-                    Mark {classification}
+                    {showCreate
+                      ? "Cancel create transaction"
+                      : "Create transaction"}
                   </button>
-                ),
-              )}
-              <button
-                type="button"
-                className="secondary"
-                disabled={busy || selected.reviewState === "unresolved"}
-                ref={matchedResetTriggerRef}
-                onClick={resetSelected}
-              >
-                Unmatch or reset to unresolved
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={busy}
-                onClick={() => {
-                  const index = data.rows.findIndex(
-                    (row) => row.id === selected.id,
-                  );
-                  const next = data.rows[index + 1] ?? data.rows[0];
-                  if (next)
-                    void navigate({
-                      search: { ...search, bank: next.id },
-                    });
-                }}
-              >
-                Leave unresolved and continue
-              </button>
-            </div>
+                  {(["private", "transfer", "duplicate"] as const).map(
+                    (classification) => (
+                      <button
+                        key={classification}
+                        type="button"
+                        className="secondary"
+                        disabled={busy || selected.reviewState !== "unresolved"}
+                        onClick={() => void classifySelected(classification)}
+                      >
+                        Mark {classification}
+                      </button>
+                    ),
+                  )}
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={busy || selected.reviewState === "unresolved"}
+                    ref={matchedResetTriggerRef}
+                    onClick={resetSelected}
+                  >
+                    Unmatch or reset to unresolved
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      const index = data.rows.findIndex(
+                        (row) => row.id === selected.id,
+                      );
+                      const next = data.rows[index + 1] ?? data.rows[0];
+                      if (next)
+                        void navigate({
+                          search: { ...search, bank: next.id },
+                        });
+                    }}
+                  >
+                    Leave unresolved and continue
+                  </button>
+                </div>
 
-            <p
-              className="banking-action-status"
-              role="status"
-              aria-live="polite"
-            >
-              {message}
-            </p>
-
-            {activeUndo && (
-              <div className="banking-undo-control">
-                <span>{activeUndo.label}.</span>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={busy}
-                  onClick={() => void undo()}
+                <p
+                  className="banking-action-status"
+                  role="status"
+                  aria-live="polite"
                 >
-                  {activeUndo.label}
-                </button>
-              </div>
-            )}
+                  {message}
+                </p>
 
-            {showMatchedResetConfirm && selected.reviewState === "matched" && (
-              <div className="banking-dialog-backdrop">
-                <section
-                  className="banking-confirm-dialog"
-                  role="alertdialog"
-                  aria-modal="true"
-                  aria-labelledby="matched-reset-title"
-                  aria-describedby="matched-reset-description"
-                  onKeyDown={handleMatchedResetDialogKeyDown}
-                >
-                  <h3 id="matched-reset-title">Unmatch this bank row?</h3>
-                  <p id="matched-reset-description">
-                    The Folio transaction will remain recorded; only this
-                    bank-row match will be removed.
-                  </p>
-                  <div className="banking-confirm-actions">
+                {pendingAdvance?.contextKey === navigationContextKey &&
+                  !pendingAdvance.targetBankTransactionId && (
                     <button
-                      ref={matchedResetCancelRef}
                       type="button"
                       className="secondary"
-                      onClick={() => setShowMatchedResetConfirm(false)}
+                      disabled={busy}
+                      onClick={() =>
+                        void advanceToNext(
+                          pendingAdvance.anchorBankTransactionId,
+                          pendingAdvance.contextKey,
+                          pendingAdvance.retryWhenResolved,
+                        )
+                      }
                     >
-                      Keep match
+                      Retry advance
                     </button>
+                  )}
+
+                {activeUndo && (
+                  <div className="banking-undo-control">
+                    <span>{activeUndo.label}.</span>
                     <button
-                      ref={matchedResetConfirmRef}
                       type="button"
-                      onClick={() => void resetMatched()}
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void undo()}
                     >
-                      Unmatch bank row
+                      {activeUndo.label}
                     </button>
                   </div>
-                </section>
-              </div>
-            )}
+                )}
 
-            {showCreate && (
-              <section
-                className="banking-create-panel"
-                aria-labelledby="create-from-bank"
-              >
-                <h3 id="create-from-bank">
-                  Review transaction before save and match
-                </h3>
-                {!prefill ? (
-                  <div className="banking-kind-choice">
-                    <p className="banking-csv-provenance">
-                      Bank details prefill the posted date, AUD settlement
-                      amount, and raw description after you select a transaction
-                      kind. They do not identify a supplier or establish an
-                      invoice date.
-                    </p>
-                    {availableCreateKinds.length > 0 && (
-                      <div
-                        className="actions banking-action-row"
-                        role="group"
-                        aria-label="Create transaction by kind"
+                {showMatchedResetConfirm &&
+                  selected.reviewState === "matched" && (
+                    <div className="banking-dialog-backdrop">
+                      <section
+                        className="banking-confirm-dialog"
+                        role="alertdialog"
+                        aria-modal="true"
+                        aria-labelledby="matched-reset-title"
+                        aria-describedby="matched-reset-description"
+                        onKeyDown={handleMatchedResetDialogKeyDown}
                       >
-                        {availableCreateKinds.map((kind) => (
+                        <h3 id="matched-reset-title">Unmatch this bank row?</h3>
+                        <p id="matched-reset-description">
+                          The Folio transaction will remain recorded; only this
+                          bank-row match will be removed.
+                        </p>
+                        <div className="banking-confirm-actions">
                           <button
-                            key={kind}
+                            ref={matchedResetCancelRef}
                             type="button"
                             className="secondary"
-                            disabled={busy}
-                            onClick={() => setCreateKind(kind)}
+                            onClick={() => setShowMatchedResetConfirm(false)}
                           >
-                            Create {transactionKindLabels[kind].toLowerCase()}
+                            Keep match
                           </button>
-                        ))}
-                      </div>
-                    )}
-                    <p className="banking-muted">
-                      Only transaction kinds with a cash effect matching this
-                      movement are available. For a private item, transfer
-                      between accounts, or duplicate, use the corresponding
-                      review action.
-                    </p>
-                    {availableCreateKinds.length === 0 && (
-                      <p className="banking-muted" role="status">
-                        This movement has no supported transaction kind to
-                        match. Use a review action if appropriate, or leave it
-                        unresolved.
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <>
-                    <p className="banking-csv-provenance" role="note">
-                      <strong>Bank CSV provenance</strong>
-                      <span>
-                        The CommBank CSV records payment movement only. It is
-                        not invoice evidence and does not establish an invoice
-                        total, GST, or deductibility.
-                      </span>
-                    </p>
-                    <ManualTransactionForm
-                      key={`${selected.id}:${createKind}`}
-                      transaction={prefill}
-                      autoDefaultTaxTreatment
-                      users={data.users}
-                      counterparties={data.entrySuggestions.counterparties}
-                      supplierCategories={
-                        data.entrySuggestions.supplierCategories
-                      }
-                      categories={[
-                        ...new Set([
-                          ...expenseCategorySuggestions,
-                          ...data.entrySuggestions.categories,
-                        ]),
-                      ]}
-                      gstRegistered={data.gstRegistered}
-                      attachedArtifactId={null}
-                      availableArtifacts={data.availableArtifacts.map(
-                        (artifact) => ({
-                          id: artifact.id,
-                          filename: artifact.filename,
-                        }),
-                      )}
-                      bankSettlementPrefilled
-                      bankPaymentHints={{
-                        foreignCurrency:
-                          typeof selected.metadata.foreignCurrency === "string"
-                            ? selected.metadata.foreignCurrency
-                            : null,
-                        foreignAmount:
-                          typeof selected.metadata.foreignAmount === "string"
-                            ? selected.metadata.foreignAmount
-                            : null,
-                      }}
-                      allowedKinds={availableCreateKinds}
-                      bankMovementIsPositive={
-                        parseDecimal(selected.amountAud) > 0n
-                      }
-                      evidenceStatus={
-                        <p className="banking-csv-evidence-status">
-                          Supplier invoice PDFs are uploaded and confirmed
-                          separately. No bank CSV file is attached as invoice
-                          evidence.
+                          <button
+                            ref={matchedResetConfirmRef}
+                            type="button"
+                            onClick={() => void resetMatched()}
+                          >
+                            Unmatch bank row
+                          </button>
+                        </div>
+                      </section>
+                    </div>
+                  )}
+
+                {showCreate && (
+                  <section
+                    className="banking-create-panel"
+                    aria-labelledby="create-from-bank"
+                  >
+                    <h3 id="create-from-bank">
+                      Review transaction before save and match
+                    </h3>
+                    {!prefill ? (
+                      <div className="banking-kind-choice">
+                        <p className="banking-csv-provenance">
+                          Bank details prefill the posted date, AUD settlement
+                          amount, and raw description after you select a
+                          transaction kind. They do not identify a supplier or
+                          establish an invoice date.
                         </p>
-                      }
-                      busy={busy}
-                      serverIssues={serverIssues}
-                      submissionStatus={submissionStatus || undefined}
-                      submissionError={submissionError || undefined}
-                      onEvidenceChange={(file) => {
-                        setSubmissionError("");
-                        setSubmissionStatus(
-                          file
-                            ? `Selected ${file.name}. It will be uploaded and confirmed as invoice evidence before the bank match is saved.`
-                            : "",
-                        );
-                      }}
-                      onSubmit={createAndMatch}
-                      onCancel={() => {
-                        setCreateKind("");
-                        setShowCreate(false);
-                      }}
-                    />
-                  </>
+                        {availableCreateKinds.length > 0 && (
+                          <div
+                            className="actions banking-action-row"
+                            role="group"
+                            aria-label="Create transaction by kind"
+                          >
+                            {availableCreateKinds.map((kind) => (
+                              <button
+                                key={kind}
+                                type="button"
+                                className="secondary"
+                                disabled={busy}
+                                onClick={() => setCreateKind(kind)}
+                              >
+                                Create{" "}
+                                {transactionKindLabels[kind].toLowerCase()}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <p className="banking-muted">
+                          Only transaction kinds with a cash effect matching
+                          this movement are available. For a private item,
+                          transfer between accounts, or duplicate, use the
+                          corresponding review action.
+                        </p>
+                        {availableCreateKinds.length === 0 && (
+                          <p className="banking-muted" role="status">
+                            This movement has no supported transaction kind to
+                            match. Use a review action if appropriate, or leave
+                            it unresolved.
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <>
+                        <p className="banking-csv-provenance" role="note">
+                          <strong>Bank CSV provenance</strong>
+                          <span>
+                            The CommBank CSV records payment movement only. It
+                            is not invoice evidence and does not establish an
+                            invoice total, GST, or deductibility.
+                          </span>
+                        </p>
+                        <label className="banking-create-and-next">
+                          <input
+                            type="checkbox"
+                            checked={createAndNext}
+                            disabled={busy}
+                            onChange={(event) =>
+                              setCreateAndNext(event.target.checked)
+                            }
+                          />
+                          Go to the next unresolved row after a successful match
+                        </label>
+                        <ManualTransactionForm
+                          key={`${selected.id}:${createKind}`}
+                          transaction={prefill}
+                          autoDefaultTaxTreatment
+                          users={data.users}
+                          counterparties={data.entrySuggestions.counterparties}
+                          supplierCategories={
+                            data.entrySuggestions.supplierCategories
+                          }
+                          categories={[
+                            ...new Set([
+                              ...expenseCategorySuggestions,
+                              ...data.entrySuggestions.categories,
+                            ]),
+                          ]}
+                          gstRegistered={data.gstRegistered}
+                          attachedArtifactId={null}
+                          availableArtifacts={data.availableArtifacts.map(
+                            (artifact) => ({
+                              id: artifact.id,
+                              filename: artifact.filename,
+                            }),
+                          )}
+                          bankSettlementPrefilled
+                          bankPaymentHints={{
+                            foreignCurrency:
+                              typeof selected.metadata.foreignCurrency ===
+                              "string"
+                                ? selected.metadata.foreignCurrency
+                                : null,
+                            foreignAmount:
+                              typeof selected.metadata.foreignAmount ===
+                              "string"
+                                ? selected.metadata.foreignAmount
+                                : null,
+                          }}
+                          allowedKinds={availableCreateKinds}
+                          recordButtonLabel={
+                            createAndNext ? "Save, match and next" : undefined
+                          }
+                          onPrepareInvoiceForExtraction={
+                            prepareInvoiceForExtraction
+                          }
+                          bankMovementIsPositive={
+                            parseDecimal(selected.amountAud) > 0n
+                          }
+                          evidenceStatus={
+                            <p className="banking-csv-evidence-status">
+                              Supplier invoice PDFs are uploaded and confirmed
+                              separately. No bank CSV file is attached as
+                              invoice evidence.
+                            </p>
+                          }
+                          busy={busy}
+                          serverIssues={serverIssues}
+                          submissionStatus={submissionStatus || undefined}
+                          submissionError={submissionError || undefined}
+                          onEvidenceChange={(file) => {
+                            evidenceFileRef.current = file;
+                            setSubmissionError("");
+                            setSubmissionStatus(
+                              file
+                                ? `Selected ${file.name}. It will be uploaded and confirmed as invoice evidence before the bank match is saved.`
+                                : "",
+                            );
+                          }}
+                          onSubmit={createAndMatch}
+                          onCancel={() => {
+                            setCreateKind("");
+                            setShowCreate(false);
+                          }}
+                        />
+                      </>
+                    )}
+                  </section>
                 )}
-              </section>
+              </>
             )}
           </section>
         )}

@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -31,6 +32,7 @@ const operations = vi.hoisted(() => ({
   saveManualTransaction: vi.fn(),
   startArtifactUpload: vi.fn(),
   voidTransaction: vi.fn(),
+  deleteDraftTransaction: vi.fn(),
 }));
 
 const sessionMock = vi.hoisted(() => vi.fn());
@@ -133,6 +135,7 @@ vi.mock("../server/operations", () => ({
   saveManualTransaction: operations.saveManualTransaction,
   startArtifactUpload: operations.startArtifactUpload,
   voidTransaction: operations.voidTransaction,
+  deleteDraftTransaction: operations.deleteDraftTransaction,
 }));
 
 vi.mock("../server/bank-operations", () => ({
@@ -144,7 +147,17 @@ import {
   ManualTransactionRoute,
   StripeImportRoute,
   voidTransactionConfirmation,
+  deleteDraftConfirmation,
+  safeTransactionWorkflowError,
 } from "./-transaction-workflow";
+
+it("retains actionable matched-edit guidance with its diagnostic reference", () => {
+  const message =
+    "Keep the recorded AUD amount/direction, or unmatch the bank row before changing it. Code BANK_MATCH_EDIT_CONFLICT. Reference 00000000-0000-4000-8000-000000000000.";
+  expect(safeTransactionWorkflowError(new Error(message), "Save failed")).toBe(
+    message,
+  );
+});
 
 beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
@@ -194,6 +207,7 @@ beforeEach(() => {
     "https://uploads.example.test/review.pdf",
   );
   operations.voidTransaction.mockResolvedValue(undefined);
+  operations.deleteDraftTransaction.mockResolvedValue(undefined);
   operations.importStripeCsv.mockResolvedValue(1);
   operations.previewStripeCsv.mockResolvedValue(stripePreviewResult());
   operations.getCsvDuplicateWarnings.mockResolvedValue({
@@ -287,6 +301,12 @@ describe("transaction workflow route safety", () => {
     );
   });
 
+  it("explains that draft deletion is permanent but leaves uploads intact", () => {
+    expect(deleteDraftConfirmation("INV-1", "transaction-1")).toBe(
+      "Permanently delete draft INV-1 and its suggestion? This cannot be undone. Uploaded files will remain in the file library.",
+    );
+  });
+
   it("renders save feedback outside the form action controls", async () => {
     operations.saveManualTransaction.mockRejectedValueOnce(
       new Error("Transaction changed after it was loaded."),
@@ -335,7 +355,9 @@ describe("transaction workflow route safety", () => {
         true,
       );
     });
-    expect(document.activeElement).toBe(screen.getByRole("alert"));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("alert")),
+    );
   });
 
   it("opens a focused void confirmation and closes it on Escape without voiding", async () => {
@@ -516,6 +538,47 @@ describe("transaction workflow route safety", () => {
     });
   });
 
+  it("deletes a draft only after confirmation and notifies its embedded editor", async () => {
+    const transaction = {
+      id: "11111111-1111-4111-8111-111111111111",
+      reference: "INV-1",
+      updatedAt: "2026-09-01T00:00:00.000Z",
+      status: "draft",
+      sourceSystem: "manual",
+      sourceArtifacts: [],
+      ownerId: null,
+      sourceArtifactId: null,
+      kind: "supplier_expense",
+      documentCurrency: "AUD",
+    } as unknown as TransactionRecord;
+    const onDeleted = vi.fn();
+    render(
+      createElement(ManualTransactionRoute, {
+        data: { ...routeData(), transaction },
+        mode: "edit",
+        returnTo: `/transactions/${transaction.id}/edit`,
+        embedded: true,
+        onDeleted,
+      }),
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Void transaction" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Delete draft" }));
+    expect(operations.deleteDraftTransaction).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("alertdialog", { name: "Delete draft?" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete draft" }),
+    );
+
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledOnce());
+    expect(operations.deleteDraftTransaction).toHaveBeenCalledWith({
+      data: { id: transaction.id, expectedUpdatedAt: transaction.updatedAt },
+    });
+    expect(operations.voidTransaction).not.toHaveBeenCalled();
+  });
+
   it("does not render the Stripe upload form when signed out", () => {
     render(
       createElement(StripeImportRoute, {
@@ -575,6 +638,30 @@ describe("transaction workflow route safety", () => {
     expect(screen.getByText(/1 rows: 1 new/)).toBeTruthy();
     expect(operations.previewStripeCsv).toHaveBeenCalledOnce();
     expect(operations.importStripeCsv).not.toHaveBeenCalled();
+
+    const grossHeader = screen.getByRole("columnheader", { name: "Gross" });
+    const table = grossHeader.closest("table")!;
+    expect(grossHeader.classList.contains("money-column")).toBe(true);
+    expect(
+      screen
+        .getByRole("columnheader", { name: "Fee" })
+        .classList.contains("money-column"),
+    ).toBe(true);
+    expect(
+      screen
+        .getByRole("columnheader", { name: "Net" })
+        .classList.contains("money-column"),
+    ).toBe(true);
+
+    const row = within(table).getAllByRole("row")[1]!;
+    const cells = within(row).getAllByRole("cell");
+    for (const [index, amount] of ["10.0000", "0.3000", "9.7000"].entries()) {
+      const cell = cells[index + 4]!;
+      expect(cell.classList.contains("money-column")).toBe(true);
+      expect(cell.querySelector("[data-money-value]")?.textContent).toBe(
+        amount,
+      );
+    }
 
     fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
     expect(screen.getByText(/No import was started/)).toBeTruthy();
@@ -1360,6 +1447,105 @@ describe("transaction workflow route safety", () => {
     );
   });
 
+  it("confirms a PDF for extraction without approval or saving and reuses it on submission", async () => {
+    const artifactId = "44444444-4444-4444-8444-444444444444";
+    const file = new File(["synthetic pdf"], "invoice.pdf", {
+      type: "application/pdf",
+    });
+    operations.confirmArtifactUpload.mockResolvedValue({ id: artifactId });
+    render(
+      createElement(ManualTransactionRoute, {
+        data: routeData(),
+        mode: "create",
+        returnTo: "/transactions/new",
+      }),
+    );
+    const props = () =>
+      manualFormProbe.props.mock.calls.at(-1)![0] as {
+        onEvidenceChange: (file: File | null) => void;
+        onPrepareInvoiceForExtraction: (
+          file: File,
+          ownerId: string,
+        ) => Promise<string>;
+        onSubmit: (submission: unknown) => Promise<void>;
+      };
+    act(() => props().onEvidenceChange(file));
+    await act(async () =>
+      expect(await props().onPrepareInvoiceForExtraction(file, "actor")).toBe(
+        artifactId,
+      ),
+    );
+    expect(operations.startArtifactUpload).toHaveBeenCalledOnce();
+    expect(operations.confirmArtifactUpload).toHaveBeenCalledOnce();
+    expect(operations.approveArtifact).not.toHaveBeenCalled();
+    expect(operations.saveManualTransaction).not.toHaveBeenCalled();
+    await act(async () =>
+      expect(await props().onPrepareInvoiceForExtraction(file, "actor")).toBe(
+        artifactId,
+      ),
+    );
+    await act(async () =>
+      props().onSubmit({
+        action: "save_recorded",
+        transaction: { ownerId: "actor" },
+        artifactIds: [],
+        file,
+      }),
+    );
+    expect(operations.startArtifactUpload).toHaveBeenCalledOnce();
+    expect(operations.confirmArtifactUpload).toHaveBeenCalledOnce();
+    expect(operations.saveManualTransaction).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(/Preview and approve this PDF before saving/),
+    ).toBeTruthy();
+  });
+
+  it("does not stage a cleared file when extraction upload confirmation arrives late", async () => {
+    const file = new File(["synthetic pdf"], "invoice.pdf", {
+      type: "application/pdf",
+    });
+    let complete!: (value: { id: string }) => void;
+    operations.confirmArtifactUpload.mockReturnValue(
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+    );
+    render(
+      createElement(ManualTransactionRoute, {
+        data: routeData(),
+        mode: "create",
+        returnTo: "/transactions/new",
+      }),
+    );
+    const props = () =>
+      manualFormProbe.props.mock.calls.at(-1)![0] as {
+        onEvidenceChange: (file: File | null) => void;
+        onPrepareInvoiceForExtraction: (
+          file: File,
+          ownerId: string,
+        ) => Promise<string>;
+      };
+    let pending!: Promise<string>;
+    act(() => {
+      props().onEvidenceChange(file);
+      pending = props().onPrepareInvoiceForExtraction(file, "actor");
+    });
+    await waitFor(() =>
+      expect(operations.confirmArtifactUpload).toHaveBeenCalledOnce(),
+    );
+    act(() => props().onEvidenceChange(null));
+    await act(async () => {
+      complete({ id: "44444444-4444-4444-8444-444444444444" });
+      await pending;
+    });
+    expect(
+      screen.queryByRole("button", { name: "Prepare PDF preview" }),
+    ).toBeNull();
+    expect(screen.queryByText(/Status: awaiting review/)).toBeNull();
+    expect(operations.approveArtifact).not.toHaveBeenCalled();
+    expect(operations.saveManualTransaction).not.toHaveBeenCalled();
+  });
+
   it("holds a suggested draft until its proposed PDF is approved or removed", async () => {
     const id = "11111111-1111-4111-8111-111111111111";
     const artifactId = "44444444-4444-4444-8444-444444444444";
@@ -1415,7 +1601,9 @@ describe("transaction workflow route safety", () => {
     fireEvent.click(preview);
     fireEvent.click(screen.getByRole("button", { name: "Approve PDF" }));
     expect(
-      await screen.findByText(/approved PDF will be attached/),
+      await screen.findByText(
+        /Saving as recorded will attach this approved PDF/,
+      ),
     ).toBeTruthy();
 
     fireEvent.click(

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { defaultParseSearch } from "@tanstack/react-router";
 
 import {
   bankMatchTransactionKinds,
@@ -14,12 +15,14 @@ describe("bank reconciliation URL state", () => {
       parseReconcileSearch({
         bank: "11111111-1111-4111-8111-111111111111",
         artifact: "22222222-2222-4222-8222-222222222222",
+        unresolved: "1",
         window: "31",
         page: "2",
       }),
     ).toEqual({
       bank: "11111111-1111-4111-8111-111111111111",
       artifact: "22222222-2222-4222-8222-222222222222",
+      unresolved: true,
       window: "31",
       page: 2,
     });
@@ -30,15 +33,29 @@ describe("bank reconciliation URL state", () => {
       parseReconcileSearch({
         bank: "not-an-id",
         artifact: "also-not-an-id",
+        unresolved: "not-true",
         window: "365",
         page: "999",
       }),
     ).toEqual({
       bank: undefined,
       artifact: undefined,
+      unresolved: undefined,
       window: "14",
       page: 1,
     });
+  });
+
+  it("accepts router-serialized unresolved toggle values", () => {
+    expect(parseReconcileSearch({ unresolved: true }).unresolved).toBe(true);
+    expect(parseReconcileSearch({ unresolved: "true" }).unresolved).toBe(true);
+    expect(parseReconcileSearch({ unresolved: 1 }).unresolved).toBe(true);
+    expect(
+      parseReconcileSearch(defaultParseSearch("?unresolved=1")).unresolved,
+    ).toBe(true);
+    expect(
+      parseReconcileSearch(defaultParseSearch("?unresolved=true")).unresolved,
+    ).toBe(true);
   });
 
   it("uses the total count to detect whether another row page exists", () => {
@@ -62,6 +79,7 @@ describe("bank transaction creation choices", () => {
       "supplier_expense",
       "processing_fee",
       "sale_refund",
+      "owner_loan_repayment",
     ]);
     expect(bankMatchTransactionKinds("0.0000")).toEqual([]);
   });
@@ -129,6 +147,23 @@ describe("bank transaction creation prefills", () => {
       occurredAt: null,
       settledAt: "2026-09-24T00:00:00.000Z",
       invoiceDate: null,
+      documentAmount: "35.1200",
+      documentCurrency: "AUD",
+      documentTaxAmount: null,
+      taxTreatment: "no_tax",
+      settlementAmount: "35.1200",
+      settlementCurrency: "AUD",
+      gstCreditStatus: "not_claimable",
+      claimableGstAud: "0.0000",
+    });
+  });
+
+  it("prefills an outgoing movement as positive repayment principal without assuming its owner", () => {
+    const prefill = createBankTransactionPrefill(data, "owner_loan_repayment");
+
+    expect(prefill).toMatchObject({
+      ownerId: null,
+      kind: "owner_loan_repayment",
       documentAmount: "35.1200",
       documentCurrency: "AUD",
       documentTaxAmount: null,

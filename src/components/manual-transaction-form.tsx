@@ -1,3 +1,6 @@
+import { AutocompleteSelect } from "./autocomplete";
+import { InvoiceSuggestionReview } from "./invoice-suggestion-review";
+import type { InvoiceEditableFields } from "../domain/pdf-invoice-fields";
 import { useForm } from "@tanstack/react-form";
 import {
   Button,
@@ -36,6 +39,7 @@ import {
 import {
   expenseCategorySuggestions,
   isOwnerFundingKind,
+  isOwnerLoanRepaymentKind,
   transactionKindLabels,
   transactionTaxTreatmentLabels,
   type TransactionInput,
@@ -64,8 +68,18 @@ const primaryAmountLabels: Record<TransactionInput["kind"], string> = {
   transfer: "Transfer amount",
   owner_contribution: "Contribution amount",
   owner_loan: "Loan amount",
+  owner_loan_repayment: "Principal amount repaid",
   adjustment: "Adjustment amount",
 };
+
+const ownerFundingMatchesBankMovement = (
+  kind: TransactionInput["kind"],
+  bankMovementIsPositive: boolean,
+): boolean =>
+  isOwnerFundingKind(kind) &&
+  (isOwnerLoanRepaymentKind(kind)
+    ? !bankMovementIsPositive
+    : bankMovementIsPositive);
 
 export interface ManualTransactionSubmission {
   action: ManualTransactionAction;
@@ -92,6 +106,7 @@ interface ManualTransactionFormProps {
   attachedArtifactId: string | null;
   attachedArtifactIds?: readonly string[];
   availableArtifacts?: readonly ManualArtifactOption[];
+  suggestedEvidence?: ManualArtifactOption;
   allowedKinds?: readonly TransactionInput["kind"][];
   autoDefaultTaxTreatment?: boolean;
   bankSettlementPrefilled?: boolean;
@@ -103,11 +118,16 @@ interface ManualTransactionFormProps {
   evidenceStatus: ReactNode;
   busy: boolean;
   onEvidenceChange: (file: File | null) => void;
+  onPrepareInvoiceForExtraction?: (
+    file: File,
+    ownerId: string | null,
+  ) => Promise<string>;
   onSubmit: (submission: ManualTransactionSubmission) => Promise<void> | void;
   serverIssues?: readonly ManualTransactionServerIssue[];
   submissionStatus?: string;
   submissionError?: string;
   onCancel?: () => void;
+  recordButtonLabel?: string;
 }
 
 const fieldIds: Record<keyof ManualTransactionValues, string> = {
@@ -278,6 +298,7 @@ const CreatableField = ({
         .filter(Boolean)
         .join(" ")}
       allowsCustomValue
+      menuTrigger="focus"
       inputValue={value}
       selectedKey={options.includes(value) ? value : null}
       onInputChange={onChange}
@@ -294,7 +315,7 @@ const CreatableField = ({
       <FieldError>{error}</FieldError>
       {help}
       {visibleOptions.length > 0 && (
-        <Popover>
+        <Popover className="autocomplete-popover" isNonModal>
           <ListBox
             items={visibleOptions.map((option) => ({ id: option, option }))}
           >
@@ -363,6 +384,7 @@ export const ManualTransactionForm = ({
   attachedArtifactId,
   attachedArtifactIds,
   availableArtifacts = [],
+  suggestedEvidence,
   allowedKinds,
   autoDefaultTaxTreatment = false,
   bankSettlementPrefilled = false,
@@ -371,14 +393,18 @@ export const ManualTransactionForm = ({
   evidenceStatus,
   busy,
   onEvidenceChange,
+  onPrepareInvoiceForExtraction,
   onSubmit,
   serverIssues = noServerIssues,
   submissionStatus,
   submissionError,
   onCancel,
+  recordButtonLabel,
 }: ManualTransactionFormProps) => {
   const [selectedKind, setSelectedKind] = useState(transaction.kind);
   const ownerFunding = isOwnerFundingKind(selectedKind);
+  const ownerLoanRepayment = isOwnerLoanRepaymentKind(selectedKind);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [filenameSuggestions, setFilenameSuggestions] =
     useState<PdfFilenameSuggestions | null>(null);
@@ -406,7 +432,7 @@ export const ManualTransactionForm = ({
   const occurredAtEdited = useRef(Boolean(transaction.occurredAt));
   const initialFundingAmountPrefill =
     bankSettlementPrefilled &&
-    isOwnerFundingKind(transaction.kind) &&
+    ownerFundingMatchesBankMovement(transaction.kind, bankMovementIsPositive) &&
     transaction.settlementCurrency === "AUD" &&
     transaction.documentAmount === transaction.settlementAmount
       ? transaction.documentAmount
@@ -729,10 +755,17 @@ export const ManualTransactionForm = ({
   }, [serverIssues]);
 
   const bankFundingDirectionInvalid =
-    bankSettlementPrefilled && ownerFunding && !bankMovementIsPositive;
+    bankSettlementPrefilled &&
+    ownerFunding &&
+    !ownerFundingMatchesBankMovement(selectedKind, bankMovementIsPositive);
   const labelForField = (name: keyof typeof fieldLabels) => {
     if (ownerFunding) {
       if (name === "documentAmount") return primaryAmountLabels[selectedKind];
+      if (ownerLoanRepayment) {
+        if (name === "documentCurrency") return "Repayment currency";
+        if (name === "reference") return "Repayment reference";
+        if (name === "invoiceDate") return "Repayment date";
+      }
       if (name === "documentCurrency") return "Funding currency";
       if (name === "reference") return "Funding reference";
       if (name === "invoiceDate") return "Funding date";
@@ -822,19 +855,25 @@ export const ManualTransactionForm = ({
           return (
             <div className="choice-field field-kind">
               <label htmlFor={fieldIds.kind}>Kind</label>
-              <select
+              <AutocompleteSelect
+                aria-label="Kind"
                 id={fieldIds.kind}
                 value={field.state.value}
                 aria-invalid={Boolean(error)}
                 aria-describedby={error ? `${fieldIds.kind}-error` : undefined}
                 onBlur={field.handleBlur}
-                onChange={(event) => {
-                  const kind = event.currentTarget
-                    .value as TransactionInput["kind"];
+                onValueChange={(event) => {
+                  const kind = event as TransactionInput["kind"];
                   const previousKind = field.state.value;
                   const values = form.state.values;
                   field.handleChange(kind);
                   setSelectedKind(kind);
+                  if (
+                    bankSettlementPrefilled &&
+                    isOwnerLoanRepaymentKind(kind) &&
+                    !isOwnerLoanRepaymentKind(previousKind)
+                  )
+                    form.setFieldValue("ownerId", "");
                   if (isOwnerFundingKind(kind)) {
                     if (!isOwnerFundingKind(previousKind))
                       ownerFundingTaxSnapshot.current = {
@@ -855,7 +894,10 @@ export const ManualTransactionForm = ({
                       nonNegativeDecimalSchema.safeParse(settlementAmount);
                     if (
                       bankSettlementPrefilled &&
-                      bankMovementIsPositive &&
+                      ownerFundingMatchesBankMovement(
+                        kind,
+                        bankMovementIsPositive,
+                      ) &&
                       !values.documentAmount.trim() &&
                       values.settlementCurrency.trim().toUpperCase() ===
                         "AUD" &&
@@ -941,7 +983,7 @@ export const ManualTransactionForm = ({
                     {label}
                   </option>
                 ))}
-              </select>
+              </AutocompleteSelect>
               {error && (
                 <span
                   id={`${fieldIds.kind}-error`}
@@ -964,7 +1006,13 @@ export const ManualTransactionForm = ({
         {(field) => (
           <CreatableField
             id={fieldIds.counterparty}
-            label={ownerFunding ? "Funding source" : "Supplier / counterparty"}
+            label={
+              ownerLoanRepayment
+                ? "Recipient description (optional)"
+                : ownerFunding
+                  ? "Funding source"
+                  : "Supplier / counterparty"
+            }
             value={field.state.value}
             options={counterparties}
             className="field-counterparty"
@@ -1035,7 +1083,16 @@ export const ManualTransactionForm = ({
             value={field.state.value}
             error={firstError(field.state.meta.errors)}
             help={
-              ownerFunding ? (
+              ownerLoanRepayment ? (
+                <p className="field-help">
+                  Enter principal repaid as a positive amount. Record any
+                  interest separately; it is not part of this repayment. This is
+                  not an invoice total.
+                  {bankSettlementPrefilled &&
+                    !bankMovementIsPositive &&
+                    " The exact outgoing AUD bank movement is prefilled."}
+                </p>
+              ) : ownerFunding ? (
                 <p className="field-help">
                   Owner contributions and loans require a positive funding
                   amount. This is not an invoice total.
@@ -1069,7 +1126,13 @@ export const ManualTransactionForm = ({
         {(field) => (
           <CreatableField
             id={fieldIds.documentCurrency}
-            label={ownerFunding ? "Funding currency" : "Document currency"}
+            label={
+              ownerLoanRepayment
+                ? "Repayment currency"
+                : ownerFunding
+                  ? "Funding currency"
+                  : "Document currency"
+            }
             value={field.state.value}
             options={currencySuggestions}
             className="field-document-currency"
@@ -1178,9 +1241,15 @@ export const ManualTransactionForm = ({
 
       {bankFundingDirectionInvalid ? (
         <p className="wide kind-notice" role="status">
-          This bank row is not a positive cash inflow. Owner contribution and
-          loan kinds require an incoming movement, so create and match is
-          disabled. Choose a kind consistent with the signed bank movement.
+          {ownerLoanRepayment
+            ? "This bank row is not a negative cash outflow. Owner loan repayments require an outgoing movement, so create and match is disabled. Choose a kind consistent with the signed bank movement."
+            : "This bank row is not a positive cash inflow. Owner contribution and loan kinds require an incoming movement, so create and match is disabled. Choose a kind consistent with the signed bank movement."}
+        </p>
+      ) : ownerLoanRepayment ? (
+        <p className="wide kind-notice" role="status">
+          Owner loan repayment is a cash outflow to an owner. Enter principal
+          repaid as a positive amount; it is omitted from income, expense, and
+          GST summaries.
         </p>
       ) : ownerFunding ? (
         <p className="wide kind-notice" role="status">
@@ -1230,8 +1299,11 @@ export const ManualTransactionForm = ({
               <div className="pdf-filename-suggestion">
                 <p role="status" aria-live="polite">
                   Filename suggests {filenameSuggestions.supplier}, invoice date{" "}
-                  {filenameSuggestions.invoiceDate}, and reference{" "}
-                  {filenameSuggestions.reference}.
+                  {filenameSuggestions.invoiceDate}
+                  {filenameSuggestions.reference
+                    ? `, and reference ${filenameSuggestions.reference}`
+                    : ""}
+                  .
                 </p>
                 <Button type="button" onPress={applyFilenameSuggestions}>
                   Apply filename suggestions
@@ -1276,6 +1348,13 @@ export const ManualTransactionForm = ({
                     Select one or more PDFs. The same PDF may be linked to
                     multiple transactions.
                   </p>
+                  {suggestedEvidence && (
+                    <p className="existing-evidence-help">
+                      The proposed PDF is selected for recording. To exclude it,
+                      use Remove proposed PDF above. Saving the draft does not
+                      attach it.
+                    </p>
+                  )}
                   {visibleArtifacts.length === 0 ? (
                     <p className="existing-evidence-empty" role="status">
                       No available PDFs match that search.
@@ -1289,9 +1368,11 @@ export const ManualTransactionForm = ({
                             <input
                               id={checkboxId}
                               type="checkbox"
-                              checked={selectedArtifactIds.includes(
-                                artifact.id,
-                              )}
+                              checked={
+                                selectedArtifactIds.includes(artifact.id) ||
+                                suggestedEvidence?.id === artifact.id
+                              }
+                              disabled={suggestedEvidence?.id === artifact.id}
                               onChange={(event) => {
                                 setSelectedArtifactIds((current) =>
                                   event.currentTarget.checked
@@ -1318,10 +1399,19 @@ export const ManualTransactionForm = ({
                       })}
                     </div>
                   )}
-                  {selectedArtifactIds.map((artifactId) => {
-                    const artifact = availableArtifacts.find(
-                      (available) => available.id === artifactId,
-                    );
+                  {[
+                    ...new Set([
+                      ...selectedArtifactIds,
+                      ...(suggestedEvidence ? [suggestedEvidence.id] : []),
+                    ]),
+                  ].map((artifactId) => {
+                    const artifact =
+                      availableArtifacts.find(
+                        (available) => available.id === artifactId,
+                      ) ??
+                      (suggestedEvidence?.id === artifactId
+                        ? suggestedEvidence
+                        : null);
                     const suggestions = artifact?.filename
                       ? parsePdfFilename(artifact.filename)
                       : null;
@@ -1330,7 +1420,11 @@ export const ManualTransactionForm = ({
                       availableArtifacts.findIndex(
                         (available) => available.id === artifact.id,
                       ) + 1;
-                    const source = `PDF ${sourceIndex}: ${artifact.filename}`;
+                    const source =
+                      suggestedEvidence?.id === artifactId &&
+                      !selectedArtifactIds.includes(artifactId)
+                        ? `Proposed PDF: ${artifact.filename}`
+                        : `PDF ${sourceIndex}: ${artifact.filename}`;
                     const supplier = existingPdfSupplierName(
                       suggestions.supplier,
                       counterparties,
@@ -1371,19 +1465,21 @@ export const ManualTransactionForm = ({
                           >
                             Apply date {suggestions.invoiceDate}
                           </Button>
-                          <Button
-                            type="button"
-                            onPress={() =>
-                              applyExistingFilenameSuggestion(
-                                artifact.id,
-                                "reference",
-                                suggestions.reference,
-                                "reference",
-                              )
-                            }
-                          >
-                            Apply reference {suggestions.reference}
-                          </Button>
+                          {suggestions.reference && (
+                            <Button
+                              type="button"
+                              onPress={() =>
+                                applyExistingFilenameSuggestion(
+                                  artifact.id,
+                                  "reference",
+                                  suggestions.reference!,
+                                  "reference",
+                                )
+                              }
+                            >
+                              Apply reference {suggestions.reference}
+                            </Button>
+                          )}
                         </div>
                         {existingFilenameSuggestionFeedback[artifact.id] && (
                           <p role="status" aria-live="polite">
@@ -1404,6 +1500,62 @@ export const ManualTransactionForm = ({
                 {firstError(field.state.meta.errors)}
               </span>
             )}
+            <form.Subscribe
+              selector={(state) => [
+                state.values.counterparty,
+                state.values.invoiceDate,
+                state.values.reference,
+                state.values.documentAmount,
+                state.values.documentCurrency,
+              ]}
+            >
+              {() => (
+                <InvoiceSuggestionReview
+                  file={file}
+                  artifacts={[
+                    ...new Set([
+                      ...selectedArtifactIds,
+                      ...(suggestedEvidence ? [suggestedEvidence.id] : []),
+                    ]),
+                  ].map((id) => ({
+                    id,
+                    filename:
+                      availableArtifacts.find((artifact) => artifact.id === id)
+                        ?.filename ??
+                      (suggestedEvidence?.id === id
+                        ? suggestedEvidence.filename
+                        : undefined),
+                  }))}
+                  busy={busy}
+                  prepareFile={
+                    onPrepareInvoiceForExtraction
+                      ? (selectedFile) =>
+                          onPrepareInvoiceForExtraction(
+                            selectedFile,
+                            form.state.values.ownerId || null,
+                          )
+                      : undefined
+                  }
+                  getValues={() => ({
+                    counterparty: form.state.values.counterparty,
+                    invoiceDate: form.state.values.invoiceDate,
+                    reference: form.state.values.reference,
+                    documentAmount: form.state.values.documentAmount,
+                    documentCurrency: form.state.values.documentCurrency,
+                  })}
+                  onApply={(changes) => {
+                    for (const name of Object.keys(changes) as Array<
+                      keyof InvoiceEditableFields
+                    >) {
+                      const value = changes[name];
+                      if (value !== undefined) form.setFieldValue(name, value);
+                    }
+                    if (changes.documentCurrency !== undefined)
+                      setDocumentCurrency(changes.documentCurrency);
+                  }}
+                />
+              )}
+            </form.Subscribe>
             {evidenceStatus}
           </div>
         )}
@@ -1515,7 +1667,8 @@ export const ManualTransactionForm = ({
                   <label htmlFor={fieldIds.taxTreatment}>
                     Document tax treatment
                   </label>
-                  <select
+                  <AutocompleteSelect
+                    aria-label="Document tax treatment"
                     id={fieldIds.taxTreatment}
                     value={ownerFunding ? "no_tax" : field.state.value}
                     disabled={ownerFunding}
@@ -1524,10 +1677,9 @@ export const ManualTransactionForm = ({
                       error ? `${fieldIds.taxTreatment}-error` : undefined
                     }
                     onBlur={field.handleBlur}
-                    onChange={(event) =>
+                    onValueChange={(event) =>
                       setManualTaxTreatment(
-                        event.currentTarget
-                          .value as TransactionInput["taxTreatment"],
+                        event as TransactionInput["taxTreatment"],
                         field.handleChange,
                       )
                     }
@@ -1539,7 +1691,7 @@ export const ManualTransactionForm = ({
                         </option>
                       ),
                     )}
-                  </select>
+                  </AutocompleteSelect>
                   {error && (
                     <span
                       id={`${fieldIds.taxTreatment}-error`}
@@ -1672,7 +1824,8 @@ export const ManualTransactionForm = ({
                       <label htmlFor={fieldIds.gstCreditStatus}>
                         GST credit status
                       </label>
-                      <select
+                      <AutocompleteSelect
+                        aria-label="GST credit status"
                         id={fieldIds.gstCreditStatus}
                         value={field.state.value}
                         aria-invalid={Boolean(error)}
@@ -1682,10 +1835,9 @@ export const ManualTransactionForm = ({
                             : undefined
                         }
                         onBlur={field.handleBlur}
-                        onChange={(event) =>
+                        onValueChange={(event) =>
                           field.handleChange(
-                            event.currentTarget
-                              .value as TransactionInput["gstCreditStatus"],
+                            event as TransactionInput["gstCreditStatus"],
                           )
                         }
                       >
@@ -1693,7 +1845,7 @@ export const ManualTransactionForm = ({
                         <option value="unknown">Unknown</option>
                         <option value="not_claimable">Not claimable</option>
                         <option value="claimable">Claimable</option>
-                      </select>
+                      </AutocompleteSelect>
                       {error && (
                         <span
                           id={`${fieldIds.gstCreditStatus}-error`}
@@ -1730,7 +1882,11 @@ export const ManualTransactionForm = ({
         </div>
       </details>
 
-      <details className="wide form-details">
+      <details
+        className="wide form-details"
+        open={ownerLoanRepayment || advancedOpen}
+        onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+      >
         <summary>Advanced</summary>
         <div className="details-grid">
           <form.Field
@@ -1743,8 +1899,18 @@ export const ManualTransactionForm = ({
               const error = firstError(field.state.meta.errors);
               return (
                 <div className="choice-field field-owner">
-                  <label htmlFor={fieldIds.ownerId}>Owner</label>
-                  <select
+                  <label htmlFor={fieldIds.ownerId}>
+                    {ownerLoanRepayment ? "Owner receiving repayment" : "Owner"}
+                  </label>
+                  {ownerLoanRepayment && (
+                    <p className="field-help">
+                      Select the Folio user whose loan is being repaid.
+                    </p>
+                  )}
+                  <AutocompleteSelect
+                    aria-label={
+                      ownerLoanRepayment ? "Owner receiving repayment" : "Owner"
+                    }
                     id={fieldIds.ownerId}
                     value={field.state.value}
                     aria-invalid={Boolean(error)}
@@ -1752,9 +1918,7 @@ export const ManualTransactionForm = ({
                       error ? `${fieldIds.ownerId}-error` : undefined
                     }
                     onBlur={field.handleBlur}
-                    onChange={(event) =>
-                      field.handleChange(event.currentTarget.value)
-                    }
+                    onValueChange={(event) => field.handleChange(event)}
                   >
                     {!field.state.value && (
                       <option value="" disabled>
@@ -1768,7 +1932,7 @@ export const ManualTransactionForm = ({
                           {user.displayName?.trim() || user.email}
                         </option>
                       ))}
-                  </select>
+                  </AutocompleteSelect>
                   {error && (
                     <span
                       id={`${fieldIds.ownerId}-error`}
@@ -1860,7 +2024,7 @@ export const ManualTransactionForm = ({
             value="save_recorded"
             disabled={saveDisabled}
           >
-            Save changes (recorded)
+            {recordButtonLabel ?? "Save changes (recorded)"}
           </button>
         ) : (
           <>
@@ -1878,7 +2042,7 @@ export const ManualTransactionForm = ({
               value="save_recorded"
               disabled={saveDisabled}
             >
-              Save as recorded
+              {recordButtonLabel ?? "Save as recorded"}
             </button>
           </>
         )}

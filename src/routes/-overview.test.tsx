@@ -22,6 +22,9 @@ vi.mock("../server/operations", () => ({
   getOverviewSummary: vi.fn(),
   getReport: vi.fn(),
 }));
+vi.mock("../server/recurring-bill-operations", () => ({
+  getRecurringBillAttention: vi.fn(),
+}));
 
 import { Route } from "./index";
 
@@ -53,7 +56,7 @@ const pageData = (overrides: Record<string, unknown> = {}) => ({
     attention: {
       unresolvedBankRows: 7,
       importsWithUnresolvedRows: 2,
-      transactionLinkedEvidenceGaps: 4,
+      missingInvoiceOrCreditNoteCount: 4,
       pendingImportUploads: 5,
       abandonedImportUploads: 3,
     },
@@ -78,6 +81,7 @@ const pageData = (overrides: Record<string, unknown> = {}) => ({
       ],
     },
   },
+  recurringAttention: { count: 3, pendingCount: 2, dueCount: 1 },
   ...overrides,
 });
 
@@ -106,11 +110,23 @@ describe("Overview page", () => {
     ).toBe("/banking/imports");
     expect(
       screen
+        .getByRole("link", { name: "4 Missing invoices or credit notes" })
+        .getAttribute("href"),
+    ).toBe(
+      `/transactions?filters=${encodeURIComponent(
+        JSON.stringify([
+          { field: "status", operator: "is", value: "recorded" },
+          { field: "invoice", operator: "is", value: "missing" },
+        ]),
+      )}`,
+    );
+    expect(
+      screen
         .getByRole("link", {
-          name: "4 Transactions without linked evidence",
+          name: "2 Pending · 1 Due Recurring bills needing attention",
         })
         .getAttribute("href"),
-    ).toBe("/transactions#transactions-heading");
+    ).toBe("/transactions/recurring");
     expect(
       screen
         .getByRole("link", { name: "5 Pending CSV import uploads" })
@@ -166,17 +182,23 @@ describe("Overview page", () => {
         attention: {
           unresolvedBankRows: 0,
           importsWithUnresolvedRows: 0,
-          transactionLinkedEvidenceGaps: 0,
+          missingInvoiceOrCreditNoteCount: 0,
           pendingImportUploads: 0,
           abandonedImportUploads: 0,
         },
         recent: { transactions: [], bankRows: [] },
       },
+      recurringAttention: { count: 0, pendingCount: 0, dueCount: 0 },
     });
     renderOverview();
 
     expect(
       screen.getByRole("link", { name: "0 Unresolved imported bank rows" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("link", {
+        name: "0 Pending · 0 Due Recurring bills needing attention",
+      }),
     ).toBeTruthy();
     expect(screen.getByText("No recent Folio transactions.")).toBeTruthy();
     expect(screen.getByText("No imported bank rows yet.")).toBeTruthy();
@@ -200,7 +222,7 @@ describe("Overview page", () => {
   });
 
   it("keeps the chart labeled as cash movement rather than an account balance", () => {
-    renderOverview();
+    const { container } = renderOverview();
 
     expect(screen.getByText("Monthly cash movement")).toBeTruthy();
     expect(
@@ -210,5 +232,11 @@ describe("Overview page", () => {
     expect(screen.getByRole("cell", { name: "$250.00" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "$25.40" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "$224.60" })).toBeTruthy();
+    expect(container.querySelectorAll("[data-money-value]")).toHaveLength(7);
+    expect(container.querySelectorAll("strong[data-money-value]")).toHaveLength(
+      4,
+    );
+    expect(container.querySelectorAll("th.money-column")).toHaveLength(3);
+    expect(container.querySelectorAll("td.money-column")).toHaveLength(3);
   });
 });

@@ -8,6 +8,8 @@ import { AuthRepository } from "../database/auth-repository";
 import { BankRepository } from "../database/bank-repository";
 import { ProposalRepository } from "../database/proposal-repository";
 import { FolioRepository } from "../database/repository";
+import { TaxReviewRepository } from "../database/tax-review-repository";
+import { RecurringBillRepository } from "../database/recurring-bill-repository";
 import { DocumentService } from "../documents/service";
 import { S3ObjectStorage } from "../documents/storage";
 
@@ -55,6 +57,14 @@ function createRuntime() {
     config.databaseSchema,
     config.gstRegistered,
   );
+  const taxReviewRepository = new TaxReviewRepository(
+    pool,
+    config.databaseSchema,
+  );
+  const recurringBillRepository = new RecurringBillRepository(
+    pool,
+    config.databaseSchema,
+  );
   const auth = new AuthService(
     authRepository,
     authConfig,
@@ -66,6 +76,8 @@ function createRuntime() {
     repository,
     bankRepository,
     proposalRepository,
+    taxReviewRepository,
+    recurringBillRepository,
     documents,
     auth,
   };

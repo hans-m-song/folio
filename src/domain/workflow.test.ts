@@ -76,6 +76,88 @@ describe("transaction rules", () => {
     ).toBe(true);
   });
 
+  it("requires an attributed owner and positive tax-free principal for repayments", () => {
+    const repayment = {
+      ownerId: "00000000-0000-4000-8000-000000000001",
+      kind: "owner_loan_repayment" as const,
+      documentCurrency: "AUD",
+      documentAmount: "125.0000",
+      taxTreatment: "no_tax" as const,
+      gstCreditStatus: "not_claimable" as const,
+      claimableGstAud: "0.0000",
+    };
+
+    expect(transactionInputSchema.safeParse(repayment).success).toBe(true);
+    expect(
+      transactionInputSchema.safeParse({
+        ...repayment,
+        settlementCurrency: "AUD",
+        settlementAmount: "0.0000",
+      }).success,
+    ).toBe(false);
+    expect(
+      transactionInputSchema.safeParse({
+        ...repayment,
+        settlementCurrency: "AUD",
+        settlementAmount: "125.0000",
+      }).success,
+    ).toBe(true);
+    expect(
+      transactionInputSchema.safeParse({ ...repayment, ownerId: null }).success,
+    ).toBe(false);
+    expect(
+      transactionInputSchema.safeParse({
+        ...repayment,
+        documentAmount: "0.0000",
+      }).success,
+    ).toBe(false);
+    expect(
+      transactionInputSchema.safeParse({
+        ...repayment,
+        taxTreatment: "gst_included",
+      }).success,
+    ).toBe(false);
+    expect(
+      transactionInputSchema.safeParse({
+        ...repayment,
+        documentTaxAmount: "1.0000",
+      }).success,
+    ).toBe(false);
+    expect(
+      transactionInputSchema.safeParse({
+        ...repayment,
+        gstCreditStatus: "claimable",
+        sourceArtifactId: "0f935296-35b3-43bd-bc3d-0caa0b0a2510",
+      }).success,
+    ).toBe(false);
+
+    const validRepayment = transactionInputSchema.parse(repayment);
+    expect(() =>
+      assertTransactionRules(
+        {
+          ...validRepayment,
+          settlementCurrency: "AUD",
+          settlementAmount: "0.0000",
+        },
+        false,
+        null,
+      ),
+    ).toThrow("positive settlement amount when supplied");
+  });
+
+  it("preserves zero settlement semantics for existing owner loans", () => {
+    expect(
+      transactionInputSchema.safeParse({
+        kind: "owner_loan",
+        documentCurrency: "AUD",
+        documentAmount: "125.0000",
+        settlementCurrency: "AUD",
+        settlementAmount: "0.0000",
+        taxTreatment: "no_tax",
+      }).success,
+    ).toBe(true);
+  });
+
   it("does not permit owner funding to claim GST", () => {
     const owner = transactionInputSchema.parse({
       kind: "owner_loan",

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { transactionKindLabels, transactionSourceLabels } from "./types";
+import {
+  isOwnerFundingKind,
+  isOwnerLoanRepaymentKind,
+  transactionKindLabels,
+  transactionSourceLabels,
+} from "./types";
 
 describe("transaction display vocabulary", () => {
   it("provides human labels for every persisted kind and source", () => {
@@ -8,7 +13,12 @@ describe("transaction display vocabulary", () => {
     expect(transactionKindLabels.processing_fee).toBe("Processing fee");
     expect(transactionKindLabels.owner_contribution).toBe("Owner contribution");
     expect(transactionKindLabels.owner_loan).toBe("Owner loan to business");
-    expect(Object.keys(transactionKindLabels)).toHaveLength(10);
+    expect(transactionKindLabels.owner_loan_repayment).toBe(
+      "Owner loan repayment",
+    );
+    expect(Object.keys(transactionKindLabels)).toHaveLength(11);
+    expect(isOwnerFundingKind("owner_loan_repayment")).toBe(true);
+    expect(isOwnerLoanRepaymentKind("owner_loan_repayment")).toBe(true);
     expect(transactionSourceLabels).toEqual({
       manual: "Manual entry",
       stripe: "Stripe import",

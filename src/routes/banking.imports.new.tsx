@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { SourceTabs } from "../components/import-profile-tabs";
 import { CsvDuplicateWarnings } from "../components/csv-duplicate-warnings";
+import { MoneyText } from "../components/money-text";
 import type { BankCsvPreview } from "../domain/bank-transactions";
 import type { CsvDuplicateWarningReport } from "../database/repository";
 import {
@@ -231,8 +232,12 @@ const BankPreviewDetails = ({ item }: { item: BankImportQueueItem }) => {
               <th scope="col">Row</th>
               <th scope="col">Posted</th>
               <th scope="col">Description</th>
-              <th scope="col">Movement</th>
-              <th scope="col">Source running balance</th>
+              <th scope="col" className="money-column">
+                Movement
+              </th>
+              <th scope="col" className="money-column">
+                Source running balance
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -245,16 +250,15 @@ const BankPreviewDetails = ({ item }: { item: BankImportQueueItem }) => {
                 <td data-label="Description">{row.description}</td>
                 <td
                   data-label="Movement"
-                  className={
-                    row.amountAud.startsWith("-")
-                      ? "amount-negative"
-                      : "amount-positive"
-                  }
+                  className={`money-column ${row.amountAud.startsWith("-") ? "amount-negative" : "amount-positive"}`}
                 >
-                  {row.amountAud}
+                  <MoneyText>{row.amountAud}</MoneyText>
                 </td>
-                <td data-label="Source running balance">
-                  {row.metadata.runningBalance}
+                <td
+                  data-label="Source running balance"
+                  className="money-column"
+                >
+                  <MoneyText>{row.metadata.runningBalance}</MoneyText>
                 </td>
               </tr>
             ))}

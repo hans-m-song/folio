@@ -14,6 +14,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { transactionInputSchema } from "../domain/types";
+import { selectAutocompleteOption } from "./autocomplete-test-helpers";
 import {
   ManualTransactionForm,
   type ManualArtifactOption,
@@ -43,17 +44,20 @@ const formElement = (
     attachedArtifactId?: string | null;
     attachedArtifactIds?: readonly string[];
     availableArtifacts?: readonly ManualArtifactOption[];
+    suggestedEvidence?: ManualArtifactOption;
     supplierCategories?: ComponentProps<
       typeof ManualTransactionForm
     >["supplierCategories"];
     allowedKinds?: ComponentProps<typeof ManualTransactionForm>["allowedKinds"];
     autoDefaultTaxTreatment?: boolean;
     bankSettlementPrefilled?: boolean;
+    bankMovementIsPositive?: boolean;
     bankPaymentHints?: ComponentProps<
       typeof ManualTransactionForm
     >["bankPaymentHints"];
     submissionStatus?: string;
     submissionError?: string;
+    recordButtonLabel?: string;
   } = {},
 ) => (
   <ManualTransactionForm
@@ -73,13 +77,16 @@ const formElement = (
     attachedArtifactId={options.attachedArtifactId ?? null}
     attachedArtifactIds={options.attachedArtifactIds}
     availableArtifacts={options.availableArtifacts}
+    suggestedEvidence={options.suggestedEvidence}
     supplierCategories={options.supplierCategories}
     allowedKinds={options.allowedKinds}
     autoDefaultTaxTreatment={options.autoDefaultTaxTreatment}
     bankSettlementPrefilled={options.bankSettlementPrefilled}
     bankPaymentHints={options.bankPaymentHints}
+    bankMovementIsPositive={options.bankMovementIsPositive}
     submissionStatus={options.submissionStatus}
     submissionError={options.submissionError}
+    recordButtonLabel={options.recordButtonLabel}
     evidenceStatus={<p>No PDF selected.</p>}
     busy={false}
     onEvidenceChange={vi.fn()}
@@ -106,6 +113,39 @@ const submitWith = (button: HTMLButtonElement) => {
 afterEach(cleanup);
 
 describe("managed manual transaction form", () => {
+  it("uses the existing explicit recorded-submit label without changing ordinary save labels", () => {
+    const recorded = { ...transaction, status: "recorded" as const };
+    const view = renderForm(vi.fn(), recorded, [], {
+      recordButtonLabel: "Create, match and next",
+    });
+    expect(
+      screen.getByRole("button", { name: "Create, match and next" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Save changes (recorded)" }),
+    ).toBeNull();
+    view.unmount();
+    renderForm(vi.fn(), recorded);
+    expect(
+      screen.getByRole("button", { name: "Save changes (recorded)" }),
+    ).toBeTruthy();
+  });
+
+  it("opens counterparty suggestions on focus and retains custom entry", async () => {
+    const user = userEvent.setup();
+    renderForm(vi.fn(), transaction, [], { counterparties: ["CommBank"] });
+    const input = screen.getByRole("combobox", {
+      name: "Supplier / counterparty",
+    });
+    await user.click(input);
+    expect(
+      await screen.findByRole("option", { name: "CommBank" }),
+    ).toBeTruthy();
+    await user.type(input, "New counterparty");
+    await user.keyboard("{Escape}");
+    expect(input).toMatchObject({ value: "New counterparty" });
+  });
+
   it("keeps owner selection under Advanced without an unassigned option", () => {
     renderForm();
 
@@ -113,9 +153,7 @@ describe("managed manual transaction form", () => {
     expect(owner.closest("details")).toBe(
       screen.getByText("Advanced").closest("details"),
     );
-    expect((owner as HTMLSelectElement).value).toBe(
-      "00000000-0000-4000-8000-000000000001",
-    );
+    expect((owner as HTMLInputElement).value).toBe("Owner");
     expect(screen.queryByRole("option", { name: "Unassigned" })).toBeNull();
   });
 
@@ -126,6 +164,8 @@ describe("managed manual transaction form", () => {
 
     await user.click(screen.getByRole("button", { name: "Save draft" }));
 
+    await screen.findByRole("alert", { hidden: true });
+    await user.keyboard("{Escape}");
     expect((await screen.findByRole("alert")).textContent).toContain(
       "Owner: Choose an owner",
     );
@@ -228,6 +268,28 @@ describe("managed manual transaction form", () => {
         "Applied filename suggestions to supplier, invoice date, reference.",
       ),
     ).toBeTruthy();
+  });
+
+  it("offers supplier and date suggestions when a PDF reference is absent", async () => {
+    const user = userEvent.setup();
+    renderForm();
+
+    await user.upload(
+      screen.getByLabelText("PDF evidence"),
+      new File(["invoice"], "Acme-2026-02-28.pdf", {
+        type: "application/pdf",
+      }),
+    );
+
+    expect(
+      screen.getByText("Filename suggests Acme, invoice date 2026-02-28."),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Apply filename suggestions" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /^Apply reference / }),
+    ).toBeNull();
   });
 
   it("fills blank edit fields while retaining saved supplier and reference values", async () => {
@@ -433,7 +495,7 @@ describe("managed manual transaction form", () => {
     await user.click(screen.getByText("Tax and classification"));
     expect(
       screen.getByRole("combobox", { name: "Document tax treatment" }),
-    ).toMatchObject({ value: "foreign_tax_included" });
+    ).toMatchObject({ value: "Foreign tax included" });
 
     await user.clear(amount);
     await user.type(amount, "36");
@@ -633,6 +695,48 @@ describe("managed manual transaction form", () => {
     expect(reference).toMatchObject({ value: "INV-104" });
   });
 
+  it("shows proposed evidence selected for recording with filename suggestions", () => {
+    const artifact = {
+      id: "00000000-0000-4000-8000-000000000004",
+      filename: "GoogleWorkspace-2026-05-31-5581706785.pdf",
+    };
+    renderForm(vi.fn(), transaction, [], {
+      availableArtifacts: [artifact],
+      suggestedEvidence: artifact,
+    });
+
+    expect(
+      screen.getByRole("group", {
+        name: `Suggestions from Proposed PDF: ${artifact.filename}`,
+      }),
+    ).toBeTruthy();
+    const checkbox = screen.getByRole("checkbox", {
+      name: artifact.filename,
+    }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+
+    expect(
+      screen.getByRole("button", { name: "Apply supplier Google Workspace" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Apply date 2026-05-31" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Apply reference 5581706785" }),
+    ).toBeTruthy();
+  });
+
+  it("labels draft promotion with its approved PDF attachment", () => {
+    renderForm(vi.fn(), transaction, [], {
+      recordButtonLabel: "Save as recorded and attach PDF",
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Save as recorded and attach PDF" }),
+    ).toBeTruthy();
+  });
+
   it("humanizes the filename supplier when historical matches are ambiguous", async () => {
     const user = userEvent.setup();
     renderForm(vi.fn(), transaction, [], {
@@ -794,7 +898,6 @@ describe("managed manual transaction form", () => {
   });
 
   it("prefills a positive bank settlement into a chosen funding amount, then clears it for an invoice kind", async () => {
-    const user = userEvent.setup();
     renderForm(
       vi.fn(),
       {
@@ -808,7 +911,7 @@ describe("managed manual transaction form", () => {
     );
 
     const kind = screen.getByRole("combobox", { name: "Kind" });
-    await user.selectOptions(kind, "owner_contribution");
+    await selectAutocompleteOption(kind, "Owner contribution");
 
     expect(
       screen.queryByRole("button", { name: "Use payment values" }),
@@ -820,9 +923,48 @@ describe("managed manual transaction form", () => {
       screen.getByRole("combobox", { name: "Funding currency" }),
     ).toMatchObject({ value: "AUD" });
 
-    await user.selectOptions(kind, "supplier_expense");
+    await selectAutocompleteOption(kind, "Supplier expense");
     expect(
       screen.getByRole("textbox", { name: "Invoice total (tax-inclusive)" }),
+    ).toMatchObject({ value: "" });
+  });
+
+  it("requires selecting the repayment owner when switching a negative bank row to principal repayment", async () => {
+    renderForm(
+      vi.fn(),
+      {
+        ...transaction,
+        kind: "supplier_expense",
+        documentAmount: null,
+        documentCurrency: null,
+        settlementAmount: "35.1200",
+        settlementCurrency: "AUD",
+      },
+      [],
+      {
+        bankSettlementPrefilled: true,
+        bankMovementIsPositive: false,
+        allowedKinds: ["supplier_expense", "owner_loan_repayment"],
+      },
+    );
+
+    await selectAutocompleteOption(
+      screen.getByRole("combobox", { name: "Kind" }),
+      "Owner loan repayment",
+    );
+
+    expect(
+      screen.getByRole("textbox", { name: "Principal amount repaid" }),
+    ).toMatchObject({ value: "35.1200" });
+    expect(
+      screen.getByRole("combobox", {
+        name: "Recipient description (optional)",
+      }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Record any interest separately/)).toBeTruthy();
+    expect(screen.getByText(/cash outflow to an owner/)).toBeTruthy();
+    expect(
+      screen.getByRole("combobox", { name: "Owner receiving repayment" }),
     ).toMatchObject({ value: "" });
   });
 
@@ -838,32 +980,35 @@ describe("managed manual transaction form", () => {
     renderForm(vi.fn(), initial, [], { gstRegistered: true });
 
     const kind = screen.getByRole("combobox", { name: "Kind" });
-    await user.selectOptions(kind, "owner_contribution");
-    await user.selectOptions(kind, "supplier_expense");
+    await selectAutocompleteOption(kind, "Owner contribution");
+    await selectAutocompleteOption(kind, "Supplier expense");
     await user.click(screen.getByText("Tax and classification"));
 
     expect(
       screen.getByRole("combobox", { name: "Document tax treatment" }),
-    ).toMatchObject({ value: "unknown_mixed" });
+    ).toMatchObject({ value: "Unknown / mixed" });
     expect(
       screen.getByRole("textbox", { name: "Exact document tax amount" }),
     ).toMatchObject({ value: "4.0000" });
     expect(
       screen.getByRole("combobox", { name: "GST credit status" }),
-    ).toMatchObject({ value: "unknown" });
+    ).toMatchObject({ value: "Unknown" });
     expect(
       screen.getByRole("textbox", { name: "Claimable GST (AUD)" }),
     ).toMatchObject({ value: "2.0000" });
   });
 
-  it("restricts the Kind control when used for a bank-row match", () => {
+  it("restricts the Kind control when used for a bank-row match", async () => {
     renderForm(vi.fn(), transaction, [], {
       allowedKinds: ["supplier_expense", "processing_fee"],
     });
 
     expect(screen.getByRole("combobox", { name: "Kind" })).toMatchObject({
-      value: "supplier_expense",
+      value: "Supplier expense",
     });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show Kind options" }),
+    );
     expect(screen.getByRole("option", { name: "Processing fee" })).toBeTruthy();
     expect(screen.queryByRole("option", { name: "Sale" })).toBeNull();
     expect(screen.queryByRole("option", { name: "Transfer" })).toBeNull();
@@ -911,22 +1056,31 @@ describe("managed manual transaction form", () => {
     const treatment = screen.getByRole("combobox", {
       name: "Document tax treatment",
     });
-    expect(treatment).toMatchObject({ value: "gst_included" });
+    expect(treatment).toMatchObject({
+      value: "Australian GST included (suggest total ÷ 11)",
+    });
 
     await user.clear(currency);
     await user.type(currency, "USD");
-    expect(treatment).toMatchObject({ value: "foreign_tax_included" });
+    expect(treatment).toMatchObject({ value: "Foreign tax included" });
 
     await user.clear(currency);
     await user.type(currency, "AUD");
-    expect(treatment).toMatchObject({ value: "gst_included" });
+    expect(treatment).toMatchObject({
+      value: "Australian GST included (suggest total ÷ 11)",
+    });
 
-    await user.selectOptions(treatment, "gst_separately_shown");
+    await selectAutocompleteOption(
+      treatment,
+      "Australian GST shown separately",
+    );
     await user.clear(currency);
     await user.type(currency, "USD");
     await user.clear(currency);
     await user.type(currency, "AUD");
-    expect(treatment).toMatchObject({ value: "gst_separately_shown" });
+    expect(treatment).toMatchObject({
+      value: "Australian GST shown separately",
+    });
   });
 
   it("preserves auto-suggested GST only while it matches the currency and treatment", async () => {
@@ -983,7 +1137,7 @@ describe("managed manual transaction form", () => {
     await user.click(screen.getByText("Tax and classification"));
     expect(
       screen.getByRole("combobox", { name: "Document tax treatment" }),
-    ).toMatchObject({ value: "gst_included" });
+    ).toMatchObject({ value: "Australian GST included (suggest total ÷ 11)" });
   });
 
   it("suppresses ambiguous supplier categories and requires an exact supplier match", async () => {
@@ -1032,7 +1186,9 @@ describe("managed manual transaction form", () => {
     const treatment = screen.getByRole("combobox", {
       name: "Document tax treatment",
     });
-    expect(treatment).toMatchObject({ value: "gst_separately_shown" });
+    expect(treatment).toMatchObject({
+      value: "Australian GST shown separately",
+    });
 
     await user.click(
       screen.getByRole("button", {
@@ -1041,13 +1197,13 @@ describe("managed manual transaction form", () => {
     );
     expect(
       screen.getByRole("combobox", { name: "Document tax treatment" }),
-    ).toMatchObject({ value: "foreign_tax_included" });
+    ).toMatchObject({ value: "Foreign tax included" });
 
     await user.clear(currency);
     await user.type(currency, "AUD");
     expect(
       screen.getByRole("combobox", { name: "Document tax treatment" }),
-    ).toMatchObject({ value: "foreign_tax_included" });
+    ).toMatchObject({ value: "Foreign tax included" });
   });
 
   it("renders submission feedback beside save actions and focuses a new error", async () => {
@@ -1256,6 +1412,8 @@ describe("managed manual transaction form", () => {
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Save draft" }));
 
+    await screen.findByRole("alert", { hidden: true });
+    await user.keyboard("{Escape}");
     expect((await screen.findByRole("alert")).textContent).toContain(
       "Document currency: Choose a document currency",
     );
@@ -1322,7 +1480,7 @@ describe("managed manual transaction form", () => {
     expect(document.activeElement).toBe(notes);
   });
 
-  it("maps server errors to native selects with inline accessible guidance", async () => {
+  it("maps server errors to autocomplete fields with inline accessible guidance", async () => {
     const user = userEvent.setup();
     renderForm(vi.fn(), transaction, [
       {
@@ -1343,6 +1501,7 @@ describe("managed manual transaction form", () => {
     expect(select.getAttribute("aria-invalid")).toBe("true");
     expect(select.getAttribute("aria-describedby")).toBe(error.id);
 
+    await user.keyboard("{Escape}");
     details!.open = false;
     const summaryButton = screen.getByRole("button", {
       name: "Document tax treatment: Choose a valid tax treatment.",

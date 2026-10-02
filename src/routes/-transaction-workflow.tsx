@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { getCurrentSession } from "../auth/session-server";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
 import { CsvDuplicateWarnings } from "../components/csv-duplicate-warnings";
+import { MoneyText } from "../components/money-text";
 import { SourceTabs } from "../components/import-profile-tabs";
 import {
   ManualTransactionForm,
@@ -35,6 +36,7 @@ import {
   previewArtifactForReview,
   rejectArtifact,
   startArtifactUpload,
+  deleteDraftTransaction,
   voidTransaction,
 } from "../server/operations";
 import { getCsvDuplicateWarnings } from "../server/bank-operations";
@@ -93,6 +95,12 @@ export const voidTransactionConfirmation = (
   id: string,
 ): string =>
   `Voiding transaction ${reference ?? id} may not be reversible. Verify the record before continuing.`;
+
+export const deleteDraftConfirmation = (
+  reference: string | null,
+  id: string,
+): string =>
+  `Permanently delete draft ${reference ?? id} and its suggestion? This cannot be undone. Uploaded files will remain in the file library.`;
 
 const sha256Base64 = async (file: File): Promise<string> => {
   const digest = await crypto.subtle.digest(
@@ -237,11 +245,19 @@ export const ManualTransactionRoute = ({
   mode,
   returnTo,
   reviewReturnTo,
+  embedded = false,
+  onCancel,
+  onSaved,
+  onDeleted,
 }: {
   data: ManualRouteData;
   mode: "create" | "edit";
   returnTo: string;
   reviewReturnTo?: string;
+  embedded?: boolean;
+  onCancel?: () => void;
+  onSaved?: (status: TransactionRecord["status"]) => void;
+  onDeleted?: () => void;
 }) => {
   const router = useRouter();
   const transaction = data.transaction;
@@ -250,6 +266,10 @@ export const ManualTransactionRoute = ({
   const [voidDialogOpen, setVoidDialogOpen] = useState(false);
   const [voidPending, setVoidPending] = useState(false);
   const [voidError, setVoidError] = useState("");
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleted, setDeleted] = useState(false);
   const [completedTransactionId, setCompletedTransactionId] = useState<
     string | null
   >(null);
@@ -281,6 +301,7 @@ export const ManualTransactionRoute = ({
     id: string;
     approved: boolean;
   } | null>(null);
+  const selectedEvidenceFile = useRef<File | null>(null);
   const [reviewPreviewUrl, setReviewPreviewUrl] = useState<string | null>(null);
   const [stagedPreviewOpened, setStagedPreviewOpened] = useState(false);
   const [proposedEvidence, setProposedEvidence] = useState(
@@ -329,6 +350,7 @@ export const ManualTransactionRoute = ({
   const returnHref = reviewReturnTo ?? "/transactions";
   const returnLabel = reviewReturnTo ? "Reconcile" : "Transactions";
   const uploadEvidence = async (file: File, ownerId: string | null) => {
+    if (!selectedEvidenceFile.current) selectedEvidenceFile.current = file;
     setWorkflow({
       stage: "validating",
       detail: "Validating PDF evidence…",
@@ -368,11 +390,47 @@ export const ManualTransactionRoute = ({
     const confirmed = await confirmArtifactUpload({
       data: { id: started.artifact.id },
     });
+    if (selectedEvidenceFile.current !== file) return confirmed.id;
     setStagedPdf({ file, id: confirmed.id, approved: false });
     setReviewPreviewUrl(null);
     setStagedPreviewOpened(false);
     setEvidence({ filename: file.name, status: "awaiting_review" });
     return confirmed.id;
+  };
+
+  const prepareInvoiceForExtraction = async (
+    file: File,
+    ownerId: string | null,
+  ) => {
+    if (busy || inFlight.current) throw new Error("Invoice review is busy");
+    if (
+      file.size <= 0 ||
+      file.size > 10 * 1024 * 1024 ||
+      (file.type !== "application/pdf" &&
+        !file.name.toLowerCase().endsWith(".pdf"))
+    )
+      throw new Error("Choose a non-empty invoice PDF of at most 10 MiB");
+    if (stagedPdf?.file === file) return stagedPdf.id;
+    selectedEvidenceFile.current = file;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      const id = await uploadEvidence(file, ownerId);
+      if (selectedEvidenceFile.current !== file) {
+        setWorkflow(idleWorkflow);
+        return id;
+      }
+      setWorkflow({
+        stage: "preview",
+        detail:
+          "Invoice uploaded for field review. Preview and approve the PDF before saving; no transaction has been saved.",
+        artifactId: id,
+      });
+      return id;
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
   };
 
   const preparePdfPreview = async () => {
@@ -631,6 +689,7 @@ export const ManualTransactionRoute = ({
             params: { transactionId: result.transaction.id },
             replace: true,
           });
+        else onSaved?.(result.transaction.status);
       } catch {
         setWorkflow({
           stage: "complete",
@@ -712,6 +771,45 @@ export const ManualTransactionRoute = ({
     setVoidDialogOpen(true);
   };
 
+  const deleteCurrentDraft = async () => {
+    if (!transaction || transaction.status !== "draft" || inFlight.current)
+      return;
+    inFlight.current = true;
+    setBusy(true);
+    setDeletePending(true);
+    setDeleteError("");
+    try {
+      await deleteDraftTransaction({
+        data: { id: transaction.id, expectedUpdatedAt: transaction.updatedAt },
+      });
+      setDeleteDialogOpen(false);
+      try {
+        await router.invalidate();
+      } catch {
+        // The database deletion succeeded; a failed refresh must not invite a retry.
+      }
+      if (onDeleted) onDeleted();
+      else setDeleted(true);
+    } catch (error) {
+      setDeleteError(
+        safeTransactionWorkflowError(
+          error,
+          "Draft could not be deleted. Reload before retrying.",
+        ),
+      );
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+      setDeletePending(false);
+    }
+  };
+
+  const requestDelete = () => {
+    if (busy || inFlight.current) return;
+    setDeleteError("");
+    setDeleteDialogOpen(true);
+  };
+
   const counterparties = [
     ...new Set(data.formOptions.entrySuggestions.counterparties),
   ];
@@ -721,6 +819,19 @@ export const ManualTransactionRoute = ({
       ...data.formOptions.entrySuggestions.categories,
     ]),
   ];
+  if (deleted)
+    return (
+      <main className="transaction-workflow-page">
+        <header>
+          <p className="eyebrow">Transaction</p>
+          <h1>Draft deleted</h1>
+          <p>The uploaded files remain in the file library.</p>
+        </header>
+        <a className="transaction-button-link" href={returnHref}>
+          Return to {returnLabel}
+        </a>
+      </main>
+    );
   if (completedTransactionId && mode === "create")
     return (
       <main className="transaction-workflow-page">
@@ -737,21 +848,28 @@ export const ManualTransactionRoute = ({
         </div>
       </main>
     );
+  const Page = embedded ? "div" : "main";
   return (
-    <main className="transaction-workflow-page">
-      <a
-        className="transaction-button-link transaction-button-link--secondary"
-        href={returnHref}
-      >
-        ← {returnLabel}
-      </a>
+    <Page className="transaction-workflow-page">
+      {!embedded && (
+        <a
+          className="transaction-button-link transaction-button-link--secondary"
+          href={returnHref}
+        >
+          ← {returnLabel}
+        </a>
+      )}
       <header>
         <p className="eyebrow">Transactions</p>
-        <h1>
-          {mode === "create"
-            ? "New manual transaction"
-            : "Edit manual transaction"}
-        </h1>
+        {embedded ? (
+          <h3>Edit suggested draft</h3>
+        ) : (
+          <h1>
+            {mode === "create"
+              ? "New manual transaction"
+              : "Edit manual transaction"}
+          </h1>
+        )}
         <p>
           {mode === "create"
             ? "Record one manual business transaction and its evidence."
@@ -771,7 +889,7 @@ export const ManualTransactionRoute = ({
           {proposedEvidence.note && <p>{proposedEvidence.note}</p>}
           <p>
             {proposedEvidence.state === "available"
-              ? "This approved PDF will be attached when the draft is recorded."
+              ? "Review the transaction fields below. Saving as recorded will attach this approved PDF."
               : "Approve this PDF or remove the proposal before recording the draft."}
           </p>
           <div className="actions">
@@ -834,6 +952,12 @@ export const ManualTransactionRoute = ({
             ),
         }}
         autoDefaultTaxTreatment={mode === "create"}
+        recordButtonLabel={
+          proposedEvidence?.state === "available" &&
+          !proposedEvidence.discardedAt
+            ? "Save as recorded and attach PDF"
+            : undefined
+        }
         users={data.formOptions.users}
         counterparties={counterparties}
         supplierCategories={
@@ -847,12 +971,24 @@ export const ManualTransactionRoute = ({
           (transaction?.sourceArtifactId ? [transaction.sourceArtifactId] : [])
         }
         availableArtifacts={data.availableArtifacts}
+        suggestedEvidence={
+          proposedEvidence?.state === "available" &&
+          !proposedEvidence.discardedAt
+            ? {
+                id: proposedEvidence.artifactId,
+                filename: proposedEvidence.filename,
+              }
+            : undefined
+        }
         evidenceStatus={
           <div>
             <p id="pdf-evidence-status" role="status" aria-live="polite">
               {evidence
                 ? `PDF filename: ${evidence.filename}. Status: ${evidence.status === "attached" ? "already attached" : evidence.status.replaceAll("_", " ")}.`
-                : "No PDF selected or attached."}
+                : proposedEvidence?.state === "available" &&
+                    !proposedEvidence.discardedAt
+                  ? "Proposed PDF selected for recording; not yet attached."
+                  : "No PDF selected or attached."}
             </p>
             {stagedPdf && !stagedPdf.approved && (
               <div className="actions">
@@ -888,6 +1024,7 @@ export const ManualTransactionRoute = ({
         busy={busy}
         serverIssues={issues}
         onEvidenceChange={(file) => {
+          selectedEvidenceFile.current = file;
           setEvidence(
             file ? { filename: file.name, status: "selected" } : null,
           );
@@ -897,9 +1034,12 @@ export const ManualTransactionRoute = ({
             setStagedPreviewOpened(false);
           }
         }}
+        onPrepareInvoiceForExtraction={prepareInvoiceForExtraction}
         onSubmit={save}
         onCancel={
-          mode === "edit" ? () => window.location.assign(returnHref) : undefined
+          mode === "edit"
+            ? (onCancel ?? (() => window.location.assign(returnHref)))
+            : undefined
         }
       />
       <WorkflowStatus
@@ -909,7 +1049,7 @@ export const ManualTransactionRoute = ({
         alertErrors
         focusErrors
       />
-      {transaction && transaction.status !== "void" && (
+      {!embedded && transaction?.status === "recorded" && (
         <div className="actions transaction-workflow-page__void-actions">
           <button
             type="button"
@@ -918,6 +1058,18 @@ export const ManualTransactionRoute = ({
             onClick={requestVoid}
           >
             Void transaction
+          </button>
+        </div>
+      )}
+      {transaction?.status === "draft" && (
+        <div className="actions transaction-workflow-page__void-actions">
+          <button
+            type="button"
+            className="danger"
+            disabled={busy}
+            onClick={requestDelete}
+          >
+            Delete draft
           </button>
         </div>
       )}
@@ -935,7 +1087,21 @@ export const ManualTransactionRoute = ({
           onConfirm={() => void voidCurrent()}
         />
       ) : null}
-      {workflow.stage === "complete" && (
+      {deleteDialogOpen && transaction?.status === "draft" ? (
+        <ConfirmationDialog
+          title="Delete draft?"
+          description={deleteDraftConfirmation(
+            transaction.reference,
+            transaction.id,
+          )}
+          confirmLabel="Delete draft"
+          pending={deletePending}
+          error={deleteError}
+          onCancel={() => setDeleteDialogOpen(false)}
+          onConfirm={() => void deleteCurrentDraft()}
+        />
+      ) : null}
+      {workflow.stage === "complete" && !embedded && (
         <p className="transaction-workflow-page__return">
           <a
             className="transaction-button-link transaction-button-link--secondary"
@@ -945,7 +1111,7 @@ export const ManualTransactionRoute = ({
           </a>
         </p>
       )}
-    </main>
+    </Page>
   );
 };
 
@@ -2074,9 +2240,9 @@ export const StripeImportRoute = ({
                   <th>Date</th>
                   <th>Available</th>
                   <th>Kind</th>
-                  <th>Gross</th>
-                  <th>Fee</th>
-                  <th>Net</th>
+                  <th className="money-column">Gross</th>
+                  <th className="money-column">Fee</th>
+                  <th className="money-column">Net</th>
                   <th>Currency</th>
                   <th>Mapping</th>
                   <th>Import status</th>
@@ -2099,9 +2265,15 @@ export const StripeImportRoute = ({
                       )}
                     </td>
                     <td>{row.kind.replaceAll("_", " ")}</td>
-                    <td>{row.sourceGross}</td>
-                    <td>{row.sourceFee}</td>
-                    <td>{row.sourceNet}</td>
+                    <td className="money-column">
+                      <MoneyText>{row.sourceGross}</MoneyText>
+                    </td>
+                    <td className="money-column">
+                      <MoneyText>{row.sourceFee}</MoneyText>
+                    </td>
+                    <td className="money-column">
+                      <MoneyText>{row.sourceNet}</MoneyText>
+                    </td>
                     <td>{row.sourceCurrency}</td>
                     <td>
                       {row.mappingWarning ??

@@ -36,7 +36,22 @@ describe("MCP proposal migration", () => {
     expect(migrator).toContain('"mcp_credentials"');
     expect(migrator).toContain('"mcp_submissions"');
     expect(migrator).toContain(
-      'GRANT SELECT, INSERT, UPDATE ON TABLE "${config.databaseSchema}"."mcp_submissions"',
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "${config.databaseSchema}"."mcp_submissions"',
     );
+  });
+
+  it("migrates proposal submission authority into explicit current scopes", async () => {
+    const path = fileURLToPath(
+      new URL(
+        "../../migrations/0013_folio_mcp_transaction_scopes.sql",
+        import.meta.url,
+      ),
+    );
+    const migration = await readFile(path, "utf8");
+    expect(migration).toContain("array_remove(\"scopes\", 'proposals:submit')");
+    expect(migration).toContain("'transactions:draft'");
+    expect(migration).toContain("'transactions:categorize'");
+    expect(migration).toContain("'bank_matches:suggest'");
+    expect(migration).not.toContain("transactions:*");
   });
 });

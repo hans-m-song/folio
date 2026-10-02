@@ -1,17 +1,193 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { getRequest, setResponseStatus } from "@tanstack/react-start/server";
 import { z } from "zod";
 
 import {
   classifyError,
   FolioDiagnosticError,
+  requestLogFieldsFor,
   runOperation,
   writeClientRenderFailure,
 } from "./diagnostics";
 import { StripeCsvValidationError } from "../domain/stripe-csv";
 import { ArtifactPresignRecoveryError } from "../documents/service";
 
+vi.mock("@tanstack/react-start/server", () => ({
+  getRequest: vi.fn(),
+  setResponseStatus: vi.fn(),
+}));
+
+afterEach(() => {
+  vi.mocked(getRequest).mockReset();
+  vi.mocked(setResponseStatus).mockReset();
+});
+
 describe("server diagnostics", () => {
+  it.each([
+    ["BULK_TRANSACTION_CONFLICT", 409, "A selected transaction changed."],
+    [
+      "BULK_TRANSACTION_INELIGIBLE",
+      422,
+      "A selected transaction is missing or void.",
+    ],
+    [
+      "BULK_OWNER_INACTIVE",
+      422,
+      "The selected owner is unavailable or inactive.",
+    ],
+  ])(
+    "returns actionable atomic bulk rejection for %s",
+    async (code, status, guidance) => {
+      await expect(
+        runOperation(
+          "Apply transaction bulk edit",
+          async () => {
+            throw new FolioDiagnosticError({
+              category: "validation",
+              code,
+              retryable: false,
+            });
+          },
+          { error: vi.fn() },
+          { mutation: true },
+        ),
+      ).rejects.toThrow(guidance);
+      expect(vi.mocked(setResponseStatus)).toHaveBeenCalledWith(status);
+    },
+  );
+
+  it("explains an incompatible matched edit as a non-retryable conflict", async () => {
+    const error = vi.fn();
+    await expect(
+      runOperation(
+        "Save manual transaction",
+        async () => {
+          throw new FolioDiagnosticError({
+            category: "validation",
+            code: "BANK_MATCH_EDIT_CONFLICT",
+            retryable: false,
+            httpStatus: 409,
+          });
+        },
+        { error },
+      ),
+    ).rejects.toThrow("unmatch the bank row before changing it");
+    expect(setResponseStatus).toHaveBeenCalledWith(409);
+    expect(JSON.parse(error.mock.calls[0][0])).toMatchObject({
+      code: "BANK_MATCH_EDIT_CONFLICT",
+      retryable: false,
+    });
+  });
+
+  it("logs the incoming method and pathname without query parameters", async () => {
+    const request = new Request(
+      "http://127.0.0.1:43230/transactions?search=private",
+      { method: "POST" },
+    );
+    vi.mocked(getRequest).mockReturnValue(request);
+    const info = vi.fn();
+
+    await runOperation("List transactions", async () => "ok", { info });
+
+    const record = JSON.parse(info.mock.calls[0][0]);
+    expect(requestLogFieldsFor(request)).toEqual({
+      requestMethod: "POST",
+      requestPath: "/transactions",
+    });
+    expect(record).toMatchObject({
+      operation: "list_transactions",
+      requestMethod: "POST",
+      requestPath: "/transactions",
+      phase: "success",
+    });
+    expect(record).not.toHaveProperty("correlationId");
+    expect(info.mock.calls[0][0]).not.toContain("search=private");
+  });
+
+  it.each(["/_serverFn", "/_serverFn/example"])(
+    "omits HTTP request fields for %s",
+    async (pathname) => {
+      const request = new Request(
+        `http://127.0.0.1:43230${pathname}?search=private`,
+        { method: "POST" },
+      );
+      vi.mocked(getRequest).mockReturnValue(request);
+      const info = vi.fn();
+
+      await runOperation("List transactions", async () => "ok", { info });
+
+      expect(requestLogFieldsFor(request)).toEqual({});
+      const record = JSON.parse(info.mock.calls[0][0]);
+      expect(record).not.toHaveProperty("requestMethod");
+      expect(record).not.toHaveProperty("requestPath");
+      expect(info.mock.calls[0][0]).not.toContain("search=private");
+    },
+  );
+
+  it("logs routine access only on failure and retains its failure reference", async () => {
+    vi.mocked(getRequest).mockReturnValue(
+      new Request("http://127.0.0.1:43230/transactions?page=2"),
+    );
+    const info = vi.fn();
+    const error = vi.fn();
+    const options = { log: "failures" as const };
+
+    await expect(
+      runOperation("Folio access", async () => true, { info, error }, options),
+    ).resolves.toBe(true);
+    expect(info).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+
+    await expect(
+      runOperation(
+        "Folio access",
+        async () => {
+          throw new Error("runtime unavailable");
+        },
+        { info, error },
+        options,
+      ),
+    ).rejects.toThrow(/Reference [0-9a-f-]{36}/);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(error.mock.calls[0][0])).toMatchObject({
+      operation: "folio_access",
+      phase: "failure",
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      requestMethod: "GET",
+      requestPath: "/transactions",
+    });
+    expect(error.mock.calls[0][0]).not.toContain("page=2");
+  });
+
+  it("suppresses health-check events and does not issue an unlogged reference", async () => {
+    const info = vi.fn();
+    const error = vi.fn();
+    const writers = { info, error };
+    const options = { log: "none" as const };
+
+    await expect(
+      runOperation("Folio health check", async () => "ok", writers, options),
+    ).resolves.toBe("ok");
+    await expect(
+      runOperation(
+        "Folio health check",
+        async () => {
+          throw new Error("database unavailable");
+        },
+        writers,
+        options,
+      ),
+    ).rejects.toThrow(/^Folio health check failed\. Code UNEXPECTED_ERROR\.$/);
+    expect(info).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it("writes a correlated client render failure using only safe fields", () => {
+    vi.mocked(getRequest).mockReturnValue(
+      new Request("http://127.0.0.1:43230/_serverFn/render?detail=private", {
+        method: "POST",
+      }),
+    );
     const writer = vi.fn();
     const correlationId = writeClientRenderFailure(
       {
@@ -33,6 +209,13 @@ describe("server diagnostics", () => {
     });
     expect(writer.mock.calls[0]?.[0]).not.toMatch(
       /sourceError|stack|pathname|counterparty|description/,
+    );
+    expect(writer.mock.calls[0]?.[0]).not.toContain("detail=private");
+    expect(JSON.parse(writer.mock.calls[0]?.[0])).not.toHaveProperty(
+      "requestMethod",
+    );
+    expect(JSON.parse(writer.mock.calls[0]?.[0])).not.toHaveProperty(
+      "requestPath",
     );
   });
 
@@ -433,6 +616,51 @@ describe("server diagnostics", () => {
         }),
       ),
     ).toMatchObject({ code: "ACTOR_NOT_FOUND" });
+  });
+
+  it.each([
+    ["UNAUTHENTICATED", 401],
+    ["PERMISSION_DENIED", 403],
+  ] as const)("maps actor diagnostic %s to HTTP %i", async (code, status) => {
+    const failure = vi.fn();
+    await expect(
+      runOperation(
+        "protected operation",
+        async () => {
+          throw new FolioDiagnosticError({
+            category: "actor",
+            code,
+            retryable: false,
+          });
+        },
+        { error: failure },
+      ),
+    ).rejects.toThrow(`Code ${code}`);
+
+    expect(setResponseStatus).toHaveBeenCalledWith(status);
+    expect(JSON.parse(failure.mock.calls[0][0])).toMatchObject({
+      category: "actor",
+      code,
+    });
+  });
+
+  it("does not turn unexpected failures into authentication responses", async () => {
+    const failure = vi.fn();
+    await expect(
+      runOperation(
+        "protected operation",
+        async () => {
+          throw new Error("session store unavailable");
+        },
+        { error: failure },
+      ),
+    ).rejects.toThrow(/Code UNEXPECTED_ERROR/);
+
+    expect(setResponseStatus).not.toHaveBeenCalled();
+    expect(JSON.parse(failure.mock.calls[0][0])).toMatchObject({
+      category: "unknown",
+      code: "UNEXPECTED_ERROR",
+    });
   });
 
   it("provides fixed guidance for Stripe import conflicts", async () => {

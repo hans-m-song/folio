@@ -10,13 +10,58 @@
   margin-top: 0.2rem;
   color: #66748a;
 }
+.admin-token-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(12rem, 1fr));
+  gap: 0.75rem;
+  align-items: end;
+  margin: 1rem 0;
+}
+.admin-token-scopes {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.5rem;
+}
+.admin-token-scopes legend {
+  font-weight: 700;
+  margin-bottom: 0.4rem;
+}
+.admin-token-scopes label {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.admin-token-reveal {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid #d4a75a;
+  border-radius: 0.6rem;
+  background: #fffaf0;
+}
+.admin-token-reveal code {
+  overflow-wrap: anywhere;
+}
+.admin-token-reveal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
 @media (max-width: 850px) {
   .admin-add-user {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .admin-token-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 @media (max-width: 600px) {
   .admin-add-user {
+    grid-template-columns: 1fr;
+  }
+  .admin-token-form {
     grid-template-columns: 1fr;
   }
 }

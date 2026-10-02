@@ -11,6 +11,14 @@ import {
   assertExpectedRevision,
   revisionConflictError,
 } from "../domain/revisions";
+import {
+  bulkTransactionRequestSchema,
+  type BulkTransactionChange,
+  type BulkTransactionPreview,
+  type BulkTransactionPreviewRow,
+  type BulkTransactionRequest,
+  type BulkTransactionResult,
+} from "../domain/bulk-transactions";
 import type {
   EntrySuggestions,
   TransactionArtifactRecord,
@@ -36,6 +44,9 @@ import {
   type ArtifactRepository,
 } from "../documents/service";
 import { FolioDiagnosticError } from "../domain/diagnostics";
+import { manualCashEffectAudMinor } from "../domain/cash-effect";
+import { parseDecimal } from "../domain/money";
+import { invoiceExpectedKinds } from "../domain/invoice-status";
 import type {
   CsvDuplicateIdentitySet,
   CsvDuplicateProfile,
@@ -44,6 +55,125 @@ import type {
 import { requiredMigrationIds } from "./migrations";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
+
+const bankMatchEditConflict = () =>
+  new FolioDiagnosticError({
+    category: "validation",
+    code: "BANK_MATCH_EDIT_CONFLICT",
+    httpStatus: 409,
+    retryable: false,
+  });
+
+const bulkTransactionConflict = () =>
+  new FolioDiagnosticError({
+    category: "validation",
+    code: "BULK_TRANSACTION_CONFLICT",
+    httpStatus: 409,
+    retryable: false,
+  });
+
+const bulkTransactionIneligible = () =>
+  new FolioDiagnosticError({
+    category: "validation",
+    code: "BULK_TRANSACTION_INELIGIBLE",
+    httpStatus: 422,
+    retryable: false,
+  });
+
+const bulkOwnerInactive = () =>
+  new FolioDiagnosticError({
+    category: "validation",
+    code: "BULK_OWNER_INACTIVE",
+    httpStatus: 422,
+    retryable: false,
+  });
+
+type BulkTransactionRow = QueryResultRow & {
+  id: string;
+  owner_id: string | null;
+  counterparty: string | null;
+  category: string | null;
+  reference: string | null;
+  description: string | null;
+  kind: TransactionRecord["kind"];
+  status: TransactionRecord["status"];
+  source_system: TransactionRecord["sourceSystem"];
+  updated_at_token: string;
+};
+
+const bulkTransactionValue = (
+  row: BulkTransactionRow,
+  field: BulkTransactionChange["field"],
+): string | null => {
+  if (field === "ownerId") return row.owner_id;
+  return row[field];
+};
+
+const bulkTransactionPreviewRow = (
+  row: BulkTransactionRow,
+  change: BulkTransactionChange,
+): BulkTransactionPreviewRow => {
+  const beforeValue = bulkTransactionValue(row, change.field);
+  const changed =
+    change.field === "ownerId"
+      ? beforeValue?.toLowerCase() !== change.value.toLowerCase()
+      : beforeValue !== change.value;
+
+  return {
+    id: row.id,
+    updatedAt: row.updated_at_token,
+    counterparty: row.counterparty,
+    category: row.category,
+    ownerId: row.owner_id,
+    reference: row.reference,
+    description: row.description,
+    kind: row.kind,
+    status: row.status,
+    sourceSystem: row.source_system,
+    beforeValue,
+    afterValue: change.value,
+    changed,
+  };
+};
+
+const assertBulkTransactionSelection = (
+  rows: BulkTransactionRow[],
+  request: BulkTransactionRequest,
+): Map<string, BulkTransactionRow> => {
+  const rowsById = new Map(
+    rows.map((row) => [String(row.id).toLowerCase(), row]),
+  );
+  if (
+    rowsById.size !== request.transactions.length ||
+    request.transactions.some(({ id }) => !rowsById.has(id.toLowerCase()))
+  )
+    throw bulkTransactionIneligible();
+
+  if (
+    rows.some(
+      (row) =>
+        (row.status !== "draft" && row.status !== "recorded") ||
+        (row.source_system !== "manual" && row.source_system !== "stripe"),
+    )
+  )
+    throw bulkTransactionIneligible();
+
+  for (const selected of request.transactions) {
+    const row = rowsById.get(selected.id.toLowerCase())!;
+    try {
+      assertExpectedRevision(row.updated_at_token, selected.updatedAt);
+    } catch (error) {
+      if (
+        error instanceof FolioDiagnosticError &&
+        error.code === "REVISION_CONFLICT"
+      )
+        throw bulkTransactionConflict();
+      throw error;
+    }
+  }
+
+  return rowsById;
+};
 
 export type TransactionQueryFilter =
   | {
@@ -63,9 +193,15 @@ export type TransactionQueryFilter =
       value: string;
     }
   | {
-      field: "kind" | "status" | "source" | "settlement" | "evidence";
-      operator: "is" | "is_not";
-      value: string;
+      field:
+        | "kind"
+        | "status"
+        | "source"
+        | "settlement"
+        | "evidence"
+        | "invoice";
+      operator: "is" | "is_not" | "contains_any" | "contains_none";
+      value: string | string[];
     };
 
 export interface TransactionPageQuery {
@@ -75,6 +211,10 @@ export interface TransactionPageQuery {
     key: "date" | "counterparty" | "amount" | "state";
     direction: "asc" | "desc";
   };
+  sortClauses?: readonly {
+    key: "date" | "counterparty" | "amount" | "state";
+    direction: "asc" | "desc";
+  }[];
   page: number;
   reportingTimezone: string;
 }
@@ -111,7 +251,7 @@ export interface TransactionPage {
 }
 
 export interface TransactionOverviewSummary {
-  transactionLinkedEvidenceGaps: number;
+  missingInvoiceOrCreditNoteCount: number;
   pendingImportUploads: number;
   abandonedImportUploads: number;
   recentTransactions: {
@@ -150,6 +290,12 @@ const linkedArtifactJoin = (
   artifactsTable: string,
 ): string =>
   `LEFT JOIN LATERAL (SELECT (array_agg(linked_artifact.id ORDER BY linked_artifact.id))[1] AS source_artifact_id, (array_agg(linked_artifact.filename ORDER BY linked_artifact.id))[1] AS filename, coalesce(jsonb_agg(jsonb_build_object('id', linked_artifact.id, 'artifact_profile', linked_artifact.artifact_profile, 'filename', linked_artifact.filename, 'state', linked_artifact.state, 'metadata', links.metadata) ORDER BY linked_artifact.id), '[]'::jsonb) AS source_artifacts FROM ${transactionArtifactsTable} links JOIN ${artifactsTable} linked_artifact ON linked_artifact.id = links.source_artifact_id WHERE links.transaction_id = transactions.id) artifacts ON true`;
+
+const invoiceStatusSql = (
+  transactionArtifactsTable: string,
+  artifactsTable: string,
+): string =>
+  `CASE WHEN transactions.kind NOT IN (${invoiceExpectedKinds.map((kind) => `'${kind}'`).join(", ")}) THEN 'not_expected' WHEN EXISTS (SELECT 1 FROM ${transactionArtifactsTable} invoice_link JOIN ${artifactsTable} invoice_artifact ON invoice_artifact.id=invoice_link.source_artifact_id WHERE invoice_link.transaction_id=transactions.id AND invoice_artifact.artifact_profile='manual_invoice_pdf_v1' AND invoice_artifact.state='available') THEN 'attached' ELSE 'missing' END`;
 
 const sameStripeImport = (
   existing: QueryResultRow,
@@ -259,6 +405,7 @@ export class FolioRepository implements ArtifactRepository {
   private readonly bankTransactionsTable: string;
   private readonly migrationsTable: string;
   private readonly mcpCredentialsTable: string;
+  private readonly mcpSubmissionsTable: string;
   private readonly mcpUploadIntentsTable: string;
   private readonly schema: string;
 
@@ -278,6 +425,7 @@ export class FolioRepository implements ArtifactRepository {
     this.bankTransactionsTable = `"${schema}"."bank_transactions"`;
     this.migrationsTable = `"${schema}"."_migrations"`;
     this.mcpCredentialsTable = `"${schema}"."mcp_credentials"`;
+    this.mcpSubmissionsTable = `"${schema}"."mcp_submissions"`;
     this.mcpUploadIntentsTable = `"${schema}"."mcp_upload_intents"`;
   }
 
@@ -327,13 +475,55 @@ export class FolioRepository implements ArtifactRepository {
     };
   }
 
+  private async requireBulkActor(
+    queryable: Queryable,
+    id: string,
+  ): Promise<string> {
+    const result = await queryable.query(
+      `SELECT id FROM ${this.usersTable} WHERE id = $1 AND active = true`,
+      [id],
+    );
+    const actorId = result.rows[0]?.id;
+    if (!actorId)
+      throw new FolioDiagnosticError({
+        category: "actor",
+        code: "ACTOR_NOT_FOUND",
+        retryable: false,
+      });
+    return String(actorId);
+  }
+
+  private async requireBulkOwner(
+    queryable: Queryable,
+    id: string,
+    lock: boolean,
+  ): Promise<void> {
+    const result = await queryable.query(
+      `SELECT id FROM ${this.usersTable} WHERE id = $1 AND active = true${lock ? " FOR SHARE" : ""}`,
+      [id],
+    );
+    if (!result.rows[0]) throw bulkOwnerInactive();
+  }
+
+  private async bulkTransactionRows(
+    queryable: Queryable,
+    request: BulkTransactionRequest,
+    lock: boolean,
+  ): Promise<BulkTransactionRow[]> {
+    const result = await queryable.query(
+      `SELECT id, owner_id, counterparty, category, reference, description, kind, status, source_system, ${updatedAtTokenProjection("updated_at")} FROM ${this.transactionsTable} WHERE id = ANY($1::uuid[]) ORDER BY id${lock ? " FOR UPDATE" : ""}`,
+      [request.transactions.map(({ id }) => id)],
+    );
+    return result.rows as BulkTransactionRow[];
+  }
+
   async requireActiveActorId(id: string): Promise<void> {
     await this.actorById(this.pool, id);
   }
 
   async health(): Promise<void> {
     const tables = await this.pool.query(
-      "SELECT to_regclass($1) AS users, to_regclass($2) AS transactions, to_regclass($3) AS source_artifacts, to_regclass($4) AS transaction_artifacts, to_regclass($5) AS migrations, to_regclass($6) AS auth_attempts, to_regclass($7) AS auth_sessions, to_regclass($8) AS bank_transactions, to_regclass($9) AS bank_transaction_artifacts",
+      "SELECT to_regclass($1) AS users, to_regclass($2) AS transactions, to_regclass($3) AS source_artifacts, to_regclass($4) AS transaction_artifacts, to_regclass($5) AS migrations, to_regclass($6) AS auth_attempts, to_regclass($7) AS auth_sessions, to_regclass($8) AS bank_transactions, to_regclass($9) AS bank_transaction_artifacts, to_regclass($10) AS recurring_bill_schedules, to_regclass($11) AS recurring_bill_links",
       [
         `${this.schema}.users`,
         `${this.schema}.transactions`,
@@ -344,6 +534,8 @@ export class FolioRepository implements ArtifactRepository {
         `${this.schema}.auth_sessions`,
         `${this.schema}.bank_transactions`,
         `${this.schema}.bank_transaction_artifacts`,
+        `${this.schema}.recurring_bill_schedules`,
+        `${this.schema}.recurring_bill_links`,
       ],
     );
     const row = tables.rows[0];
@@ -371,14 +563,67 @@ export class FolioRepository implements ArtifactRepository {
     }));
   }
 
+  async listTaxPartnerOptions(
+    actorId: string,
+  ): Promise<Array<{ id: string; label: string }>> {
+    await this.actorById(this.pool, actorId);
+    const result = await this.pool.query(
+      `SELECT id, display_name FROM ${this.usersTable} WHERE active=true ORDER BY lower(display_name) NULLS LAST, id`,
+    );
+    const options = result.rows.map((row) => ({
+      id: String(row.id),
+      label: String(row.display_name ?? "").trim(),
+    }));
+    const labelCounts = new Map<string, number>();
+    for (const option of options) {
+      const key = option.label.toLocaleLowerCase("en-AU");
+      labelCounts.set(key, (labelCounts.get(key) ?? 0) + 1);
+    }
+    return options.map(({ id, label }) => ({
+      id,
+      label:
+        !label || (labelCounts.get(label.toLocaleLowerCase("en-AU")) ?? 0) > 1
+          ? `${label || "User"} (${id})`
+          : label,
+    }));
+  }
+
+  async invoiceDuplicateHints(
+    actorId: string,
+    artifactId: string,
+    reference: string | null,
+    checksumSha256: string,
+  ): Promise<{
+    linkedTransactions: number;
+    matchingReferenceTransactions: number;
+    matchingChecksumArtifacts: number;
+  }> {
+    await this.actorById(this.pool, actorId);
+    const result = await this.pool.query(
+      `SELECT
+        (SELECT count(*)::integer FROM ${this.transactionArtifactsTable} link JOIN ${this.transactionsTable} transaction ON transaction.id=link.transaction_id WHERE link.source_artifact_id=$1 AND transaction.status<>'void') AS linked_transactions,
+        (SELECT count(*)::integer FROM ${this.transactionsTable} transaction WHERE $2::text IS NOT NULL AND btrim(transaction.reference)=btrim($2) AND transaction.status<>'void') AS matching_reference_transactions,
+        (SELECT count(*)::integer FROM ${this.artifactsTable} artifact WHERE artifact.id<>$1 AND artifact.artifact_profile='manual_invoice_pdf_v1' AND artifact.state IN ('awaiting_review','available') AND artifact.checksum_sha256=$3) AS matching_checksum_artifacts`,
+      [artifactId, reference, checksumSha256],
+    );
+    const row = result.rows[0];
+    return {
+      linkedTransactions: Number(row?.linked_transactions ?? 0),
+      matchingReferenceTransactions: Number(
+        row?.matching_reference_transactions ?? 0,
+      ),
+      matchingChecksumArtifacts: Number(row?.matching_checksum_artifacts ?? 0),
+    };
+  }
+
   async listEntrySuggestions(actorId: string): Promise<EntrySuggestions> {
     await this.actorById(this.pool, actorId);
     const [counterparties, categories, supplierCategories] = await Promise.all([
       this.pool.query(
-        `SELECT value FROM (SELECT DISTINCT btrim(counterparty) AS value FROM ${this.transactionsTable} WHERE source_system='manual' AND status <> 'void' AND kind IN ('supplier_expense', 'supplier_credit') AND counterparty IS NOT NULL AND btrim(counterparty) <> '') values ORDER BY lower(value), value LIMIT 200`,
+        `SELECT value FROM (SELECT DISTINCT btrim(counterparty) AS value FROM ${this.transactionsTable} WHERE status <> 'void' AND counterparty IS NOT NULL AND btrim(counterparty) <> '') values ORDER BY lower(value), value LIMIT 200`,
       ),
       this.pool.query(
-        `SELECT value FROM (SELECT DISTINCT btrim(category) AS value FROM ${this.transactionsTable} WHERE source_system='manual' AND status <> 'void' AND kind IN ('supplier_expense', 'supplier_credit', 'processing_fee', 'dispute') AND category IS NOT NULL AND btrim(category) <> '') values ORDER BY lower(value), value LIMIT 200`,
+        `SELECT value FROM (SELECT DISTINCT btrim(category) AS value FROM ${this.transactionsTable} WHERE status <> 'void' AND category IS NOT NULL AND btrim(category) <> '') values ORDER BY lower(value), value LIMIT 200`,
       ),
       this.pool.query(
         `SELECT counterparty, category FROM (SELECT DISTINCT ON (btrim(counterparty), btrim(category)) btrim(counterparty) AS counterparty, btrim(category) AS category, updated_at, id FROM ${this.transactionsTable} WHERE source_system='manual' AND status <> 'void' AND kind IN ('supplier_expense', 'supplier_credit') AND counterparty IS NOT NULL AND btrim(counterparty) <> '' AND category IS NOT NULL AND btrim(category) <> '' ORDER BY btrim(counterparty), btrim(category), updated_at DESC, id DESC) pairs ORDER BY updated_at DESC, id DESC LIMIT 200`,
@@ -439,6 +684,85 @@ export class FolioRepository implements ArtifactRepository {
     return result.rows.map(mapTransaction);
   }
 
+  async previewBulkTransactionEdit(
+    actorId: string,
+    request: BulkTransactionRequest,
+  ): Promise<BulkTransactionPreview> {
+    const parsedRequest = bulkTransactionRequestSchema.parse(request);
+    await this.requireBulkActor(this.pool, actorId);
+    const rows = await this.bulkTransactionRows(
+      this.pool,
+      parsedRequest,
+      false,
+    );
+    const rowsById = assertBulkTransactionSelection(rows, parsedRequest);
+
+    if (parsedRequest.change.field === "ownerId")
+      await this.requireBulkOwner(this.pool, parsedRequest.change.value, false);
+
+    const previewRows = parsedRequest.transactions.map(({ id }) =>
+      bulkTransactionPreviewRow(
+        rowsById.get(id.toLowerCase())!,
+        parsedRequest.change,
+      ),
+    );
+    return {
+      change: parsedRequest.change,
+      rows: previewRows,
+      changedCount: previewRows.filter(({ changed }) => changed).length,
+    };
+  }
+
+  async applyBulkTransactionEdit(
+    actorId: string,
+    request: BulkTransactionRequest,
+  ): Promise<BulkTransactionResult> {
+    const parsedRequest = bulkTransactionRequestSchema.parse(request);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const activeActorId = await this.requireBulkActor(client, actorId);
+      const rows = await this.bulkTransactionRows(client, parsedRequest, true);
+      const rowsById = assertBulkTransactionSelection(rows, parsedRequest);
+
+      if (parsedRequest.change.field === "ownerId")
+        await this.requireBulkOwner(client, parsedRequest.change.value, true);
+
+      const changedIds = parsedRequest.transactions
+        .map(({ id }) => rowsById.get(id.toLowerCase())!)
+        .filter(
+          (row) => bulkTransactionPreviewRow(row, parsedRequest.change).changed,
+        )
+        .map(({ id }) => id);
+
+      if (changedIds.length > 0) {
+        const column =
+          parsedRequest.change.field === "ownerId"
+            ? "owner_id"
+            : parsedRequest.change.field;
+        const valueType =
+          parsedRequest.change.field === "ownerId" ? "uuid" : "text";
+        const update = await client.query(
+          `UPDATE ${this.transactionsTable} SET ${column}=$2::${valueType}, updated_by_id=$3::uuid, updated_at=GREATEST(clock_timestamp(), updated_at + interval '1 microsecond') WHERE id = ANY($1::uuid[])`,
+          [changedIds, parsedRequest.change.value, activeActorId],
+        );
+        if (update.rowCount !== changedIds.length)
+          throw bulkTransactionConflict();
+      }
+
+      await client.query("COMMIT");
+      return {
+        selectedCount: parsedRequest.transactions.length,
+        updatedCount: changedIds.length,
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async listTransactionPage(
     actorId: string,
     input: TransactionPageQuery,
@@ -465,11 +789,11 @@ export class FolioRepository implements ArtifactRepository {
         coalesce(
           CASE
             WHEN transactions.settlement_currency='AUD' THEN CASE
-              WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'dispute') THEN -transactions.settlement_amount
+              WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'dispute', 'owner_loan_repayment') THEN -transactions.settlement_amount
               ELSE transactions.settlement_amount
             END
             WHEN transactions.document_currency='AUD' THEN CASE
-              WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'dispute') THEN -transactions.document_amount
+              WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'dispute', 'owner_loan_repayment') THEN -transactions.document_amount
               ELSE transactions.document_amount
             END
           END,
@@ -479,16 +803,16 @@ export class FolioRepository implements ArtifactRepository {
         CASE
           WHEN transactions.status='recorded' AND transactions.settled_at IS NOT NULL AND transactions.settlement_currency='AUD' THEN CASE
             WHEN transactions.kind IN ('sale', 'supplier_credit', 'owner_contribution', 'owner_loan') THEN transactions.settlement_amount
-            WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund') THEN -transactions.settlement_amount
+            WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'owner_loan_repayment') THEN -transactions.settlement_amount
           END
         END,
         CASE
           WHEN transactions.document_currency='AUD' THEN CASE
-            WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'dispute') THEN -transactions.document_amount
+            WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'dispute', 'owner_loan_repayment') THEN -transactions.document_amount
             ELSE transactions.document_amount
           END
           WHEN transactions.settlement_currency='AUD' THEN CASE
-            WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'dispute') THEN -transactions.settlement_amount
+            WHEN transactions.kind IN ('supplier_expense', 'processing_fee', 'sale_refund', 'dispute', 'owner_loan_repayment') THEN -transactions.settlement_amount
             ELSE transactions.settlement_amount
           END
         END
@@ -505,6 +829,7 @@ export class FolioRepository implements ArtifactRepository {
       WHEN 'transfer' THEN 'Transfer'
       WHEN 'owner_contribution' THEN 'Owner contribution'
       WHEN 'owner_loan' THEN 'Owner loan to business'
+      WHEN 'owner_loan_repayment' THEN 'Owner loan repayment'
       ELSE 'Adjustment' END`;
     const description = `coalesce(nullif(btrim(transactions.description), ''), ${kindLabel})`;
     const settlement = `CASE
@@ -512,6 +837,10 @@ export class FolioRepository implements ArtifactRepository {
       WHEN transactions.source_system='manual' AND transactions.status='recorded' THEN 'pending'
       ELSE 'not_applicable' END`;
     const evidence = `CASE WHEN EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} evidence_link WHERE evidence_link.transaction_id=transactions.id) THEN 'attached' ELSE 'missing' END`;
+    const invoice = invoiceStatusSql(
+      this.transactionArtifactsTable,
+      this.artifactsTable,
+    );
     const state = `initcap(transactions.status) || CASE ${settlement} WHEN 'settled' THEN ' · Settled' WHEN 'pending' THEN ' · Pending settlement' ELSE '' END`;
     const conditions = [
       `($1::text = '' OR transactions.reference ILIKE '%' || $1 || '%' OR transactions.counterparty ILIKE '%' || $1 || '%' OR transactions.description ILIKE '%' || $1 || '%')`,
@@ -519,8 +848,8 @@ export class FolioRepository implements ArtifactRepository {
     ];
 
     for (const filter of input.filters) {
-      const placeholder = parameter(filter.value);
       if (filter.field === "counterparty" || filter.field === "description") {
+        const placeholder = parameter(filter.value);
         const expression =
           filter.field === "counterparty" ? counterparty : description;
         const operators = {
@@ -533,6 +862,7 @@ export class FolioRepository implements ArtifactRepository {
         continue;
       }
       if (filter.field === "date" || filter.field === "amount") {
+        const placeholder = parameter(filter.value);
         const expression =
           filter.field === "date" ? effectiveDate : signedAmount;
         const cast = filter.field === "date" ? "date" : "numeric";
@@ -555,7 +885,23 @@ export class FolioRepository implements ArtifactRepository {
         source: "transactions.source_system",
         settlement,
         evidence,
+        invoice,
       } as const;
+      if (
+        filter.operator === "contains_any" ||
+        filter.operator === "contains_none"
+      ) {
+        if (!Array.isArray(filter.value) || filter.value.length === 0) continue;
+        const placeholder = parameter(filter.value);
+        conditions.push(
+          filter.operator === "contains_any"
+            ? `${expressions[filter.field]} = ANY(${placeholder}::text[])`
+            : `${expressions[filter.field]} <> ALL(${placeholder}::text[])`,
+        );
+        continue;
+      }
+      if (Array.isArray(filter.value)) continue;
+      const placeholder = parameter(filter.value);
       conditions.push(
         `${expressions[filter.field]} ${filter.operator === "is" ? "=" : "<>"} ${placeholder}`,
       );
@@ -567,7 +913,21 @@ export class FolioRepository implements ArtifactRepository {
       amount: signedAmount,
       state: `lower(${state})`,
     } as const;
-    const direction = input.sort.direction === "asc" ? "ASC" : "DESC";
+    const usedSortKeys = new Set<TransactionPageQuery["sort"]["key"]>();
+    const sortClauses = (
+      input.sortClauses?.length ? input.sortClauses : [input.sort]
+    ).filter((clause) => {
+      if (usedSortKeys.has(clause.key)) return false;
+      usedSortKeys.add(clause.key);
+      return true;
+    });
+    const sortOrder = sortClauses
+      .map(
+        (clause) =>
+          `${sortExpressions[clause.key]} ${clause.direction === "asc" ? "ASC" : "DESC"} NULLS LAST`,
+      )
+      .join(", ");
+    const tieDirection = sortClauses[0]?.direction === "asc" ? "ASC" : "DESC";
     const where = `WHERE ${conditions.join(" AND ")}`;
     const count = await this.pool.query(
       `SELECT count(*)::integer AS total FROM ${this.transactionsTable} transactions ${where}`,
@@ -578,7 +938,7 @@ export class FolioRepository implements ArtifactRepository {
     const page = Math.min(input.page, pageCount);
     const pageParameters = [...parameters, (page - 1) * 50];
     const result = await this.pool.query(
-      `SELECT transactions.*, ${invoiceDateTextProjection("transactions.invoice_date")}, artifacts.source_artifact_id, artifacts.filename AS source_artifact_filename, artifacts.source_artifacts, ${updatedAtTokenProjection("transactions.updated_at")} FROM ${this.transactionsTable} transactions ${linkedArtifactJoin(this.transactionArtifactsTable, this.artifactsTable)} ${where} ORDER BY ${sortExpressions[input.sort.key]} ${direction} NULLS LAST, transactions.id ${direction} LIMIT 50 OFFSET $${pageParameters.length}`,
+      `SELECT transactions.*, ${invoiceDateTextProjection("transactions.invoice_date")}, artifacts.source_artifact_id, artifacts.filename AS source_artifact_filename, artifacts.source_artifacts, ${updatedAtTokenProjection("transactions.updated_at")} FROM ${this.transactionsTable} transactions ${linkedArtifactJoin(this.transactionArtifactsTable, this.artifactsTable)} ${where} ORDER BY ${sortOrder}, transactions.id ${tieDirection} LIMIT 50 OFFSET $${pageParameters.length}`,
       pageParameters,
     );
     return {
@@ -596,7 +956,7 @@ export class FolioRepository implements ArtifactRepository {
     const [count, recent] = await Promise.all([
       this.pool.query(
         `SELECT
-          count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} link WHERE link.transaction_id=transactions.id))::integer AS linked_evidence_gaps,
+          count(*) FILTER (WHERE transactions.status='recorded' AND (${invoiceStatusSql(this.transactionArtifactsTable, this.artifactsTable)})='missing')::integer AS missing_invoice_or_credit_note_count,
           (SELECT count(*)::integer FROM ${this.artifactsTable} artifact WHERE artifact.artifact_profile IN ('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1') AND artifact.state IN ('pending', 'awaiting_review')) AS pending_import_uploads,
           (SELECT count(*)::integer FROM ${this.artifactsTable} artifact WHERE artifact.artifact_profile IN ('stripe_balance_itemised_csv_v1', 'commbank_transaction_history_csv_v1') AND artifact.state='abandoned') AS abandoned_import_uploads
          FROM ${this.transactionsTable} transactions`,
@@ -606,8 +966,8 @@ export class FolioRepository implements ArtifactRepository {
       ),
     ]);
     return {
-      transactionLinkedEvidenceGaps: Number(
-        count.rows[0]?.linked_evidence_gaps ?? 0,
+      missingInvoiceOrCreditNoteCount: Number(
+        count.rows[0]?.missing_invoice_or_credit_note_count ?? 0,
       ),
       pendingImportUploads: Number(count.rows[0]?.pending_import_uploads ?? 0),
       abandonedImportUploads: Number(
@@ -647,16 +1007,55 @@ export class FolioRepository implements ArtifactRepository {
 
   async listArtifacts(
     actorId: string,
-    input: {
-      search: string;
-      profile: string | null;
-      state: string | null;
-      from: string | null;
-      to: string | null;
-      linkage: "all" | "linked" | "unlinked";
-      limit: number;
-      offset: number;
-    },
+    input:
+      | {
+          filters: readonly (
+            | {
+                field: "filename";
+                operator: "equals" | "not_equals" | "contains" | "not_contains";
+                value: string;
+              }
+            | {
+                field: "uploaded" | "transactions" | "bank_activity";
+                operator:
+                  | "equals"
+                  | "not_equals"
+                  | "greater_than"
+                  | "greater_than_or_equal"
+                  | "less_than"
+                  | "less_than_or_equal";
+                value: string;
+              }
+            | {
+                field: "profile" | "type" | "state" | "linkage";
+                operator: "is" | "is_not" | "contains_any" | "contains_none";
+                value: string | string[];
+              }
+          )[];
+          sort: readonly {
+            field:
+              | "filename"
+              | "profile"
+              | "type"
+              | "uploaded"
+              | "state"
+              | "transactions"
+              | "bank_activity";
+            direction: "asc" | "desc";
+          }[];
+          limit: number;
+          offset: number;
+        }
+      | {
+          search: string;
+          profile: string | null;
+          state: string | null;
+          from: string | null;
+          to: string | null;
+          linkage: "all" | "linked" | "unlinked";
+          limit: number;
+          offset: number;
+        },
   ): Promise<{
     total: number;
     rows: {
@@ -673,32 +1072,153 @@ export class FolioRepository implements ArtifactRepository {
     }[];
   }> {
     await this.actorById(this.pool, actorId);
-    const conditions = `WHERE ($1::text = '' OR artifact.filename ILIKE '%' || $1 || '%')
-      AND ($2::text IS NULL OR artifact.artifact_profile=$2)
-      AND ($3::text IS NULL OR artifact.state=$3)
-      AND ($4::text = 'all' OR ($4='linked' AND (EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} t WHERE t.source_artifact_id=artifact.id) OR EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} b WHERE b.source_artifact_id=artifact.id))) OR ($4='unlinked' AND NOT EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} t WHERE t.source_artifact_id=artifact.id) AND NOT EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} b WHERE b.source_artifact_id=artifact.id)))
-      AND ($5::date IS NULL OR (artifact.created_at AT TIME ZONE 'UTC')::date >= $5::date)
-      AND ($6::date IS NULL OR (artifact.created_at AT TIME ZONE 'UTC')::date <= $6::date)`;
-    const parameters = [
-      input.search.trim(),
-      input.profile,
-      input.state,
-      input.linkage,
-      input.from,
-      input.to,
-    ];
+    const filters = "filters" in input ? [...input.filters] : [];
+    const sort =
+      "sort" in input
+        ? input.sort
+        : [{ field: "uploaded" as const, direction: "desc" as const }];
+
+    if (!("filters" in input)) {
+      const search = input.search.trim();
+      if (search)
+        filters.push({
+          field: "filename",
+          operator: "contains",
+          value: search,
+        });
+      if (input.profile)
+        filters.push({
+          field: "profile",
+          operator: "is",
+          value: input.profile,
+        });
+      if (input.state)
+        filters.push({ field: "state", operator: "is", value: input.state });
+      if (input.from)
+        filters.push({
+          field: "uploaded",
+          operator: "greater_than_or_equal",
+          value: input.from,
+        });
+      if (input.to)
+        filters.push({
+          field: "uploaded",
+          operator: "less_than_or_equal",
+          value: input.to,
+        });
+      if (input.linkage !== "all")
+        filters.push({
+          field: "linkage",
+          operator: "is",
+          value: input.linkage,
+        });
+    }
+
+    const parameters: (string | string[])[] = [];
+    const bind = (value: string | string[]): string => {
+      parameters.push(value);
+      return `$${parameters.length}`;
+    };
+    const comparisonOperators = {
+      equals: "=",
+      not_equals: "<>",
+      greater_than: ">",
+      greater_than_or_equal: ">=",
+      less_than: "<",
+      less_than_or_equal: "<=",
+    } as const;
+    const transactionCount = `(SELECT count(*)::integer FROM ${this.transactionArtifactsTable} t WHERE t.source_artifact_id=artifact.id)`;
+    const bankRowCount = `(SELECT count(*)::integer FROM ${this.bankTransactionArtifactsTable} b WHERE b.source_artifact_id=artifact.id)`;
+    const linkedArtifact = `(EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} t WHERE t.source_artifact_id=artifact.id) OR EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} b WHERE b.source_artifact_id=artifact.id))`;
+    const conditions = filters.map((filter) => {
+      if (filter.field === "filename") {
+        const value = bind(filter.value);
+        if (filter.operator === "contains")
+          return `position(lower(${value}) in lower(artifact.filename)) > 0`;
+        if (filter.operator === "not_contains")
+          return `position(lower(${value}) in lower(artifact.filename)) = 0`;
+        return `lower(artifact.filename) ${comparisonOperators[filter.operator]} lower(${value})`;
+      }
+
+      if (filter.field === "uploaded") {
+        const value = bind(filter.value);
+        return `(artifact.created_at AT TIME ZONE 'UTC')::date ${comparisonOperators[filter.operator]} ${value}::date`;
+      }
+
+      if (filter.field === "transactions" || filter.field === "bank_activity") {
+        const count =
+          filter.field === "transactions" ? transactionCount : bankRowCount;
+        const value = bind(filter.value);
+        return `${count} ${comparisonOperators[filter.operator]} ${value}::integer`;
+      }
+
+      if (filter.field === "linkage") {
+        if (
+          filter.operator === "contains_any" ||
+          filter.operator === "contains_none"
+        ) {
+          const values = Array.isArray(filter.value)
+            ? filter.value
+            : [filter.value];
+          if (!values.length) return "true";
+          const expression = `(CASE WHEN ${linkedArtifact} THEN 'linked' ELSE 'unlinked' END)`;
+          return `${expression} ${filter.operator === "contains_any" ? "= ANY" : "<> ALL"}(${bind(values)}::text[])`;
+        }
+        const shouldBeLinked =
+          (filter.value === "linked") === (filter.operator === "is");
+        return shouldBeLinked ? linkedArtifact : `NOT ${linkedArtifact}`;
+      }
+
+      const columns = {
+        profile: "artifact.artifact_profile",
+        type: "artifact.media_type",
+        state: "artifact.state",
+      };
+      if (
+        filter.operator === "contains_any" ||
+        filter.operator === "contains_none"
+      ) {
+        const values = Array.isArray(filter.value)
+          ? filter.value
+          : [filter.value];
+        if (!values.length) return "true";
+        return `${columns[filter.field]} ${filter.operator === "contains_any" ? "= ANY" : "<> ALL"}(${bind(values)}::text[])`;
+      }
+      const value = bind(filter.value);
+      return `${columns[filter.field]} ${filter.operator === "is" ? "=" : "<>"} ${value}`;
+    });
+    const conditionsSql = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "WHERE true";
+    const sortColumns = {
+      filename: "artifact.filename",
+      profile: "artifact.artifact_profile",
+      type: "artifact.media_type",
+      uploaded: "artifact.created_at",
+      state: "artifact.state",
+      transactions: transactionCount,
+      bank_activity: bankRowCount,
+    };
+    const orderBy = sort.map(
+      ({ field, direction }) =>
+        `${sortColumns[field]} ${direction.toUpperCase()}`,
+    );
+    orderBy.push("artifact.id DESC");
+    const pageParameters = [...parameters, input.limit, input.offset];
+    const limitPlaceholder = `$${parameters.length + 1}`;
+    const offsetPlaceholder = `$${parameters.length + 2}`;
     const [count, result] = await Promise.all([
       this.pool.query(
-        `SELECT count(*)::integer AS total FROM ${this.artifactsTable} artifact ${conditions}`,
+        `SELECT count(*)::integer AS total FROM ${this.artifactsTable} artifact ${conditionsSql}`,
         parameters,
       ),
       this.pool.query(
         `SELECT artifact.id, artifact.filename, artifact.artifact_profile, artifact.media_type, artifact.state, artifact.byte_size, artifact.checksum_sha256, artifact.created_at,
-          (SELECT count(*)::integer FROM ${this.transactionArtifactsTable} t WHERE t.source_artifact_id=artifact.id) AS transaction_count,
-          (SELECT count(*)::integer FROM ${this.bankTransactionArtifactsTable} b WHERE b.source_artifact_id=artifact.id) AS bank_row_count
-         FROM ${this.artifactsTable} artifact ${conditions}
-         ORDER BY artifact.created_at DESC, artifact.id DESC LIMIT $7 OFFSET $8`,
-        [...parameters, input.limit, input.offset],
+          ${transactionCount} AS transaction_count,
+          ${bankRowCount} AS bank_row_count
+         FROM ${this.artifactsTable} artifact ${conditionsSql}
+         ORDER BY ${orderBy.join(", ")} LIMIT ${limitPlaceholder} OFFSET ${offsetPlaceholder}`,
+        pageParameters,
       ),
     ]);
     return {
@@ -1095,8 +1615,8 @@ export class FolioRepository implements ArtifactRepository {
     try {
       await client.query("BEGIN");
       const actor = await this.actorById(client, actorId);
-      await client.query(
-        `SELECT id FROM ${this.bankTransactionsTable} WHERE matched_transaction_id=$1 ORDER BY id FOR UPDATE`,
+      const matches = await client.query(
+        `SELECT id, amount_aud FROM ${this.bankTransactionsTable} WHERE matched_transaction_id=$1 ORDER BY id FOR UPDATE`,
         [id],
       );
       const existing = await client.query(
@@ -1110,6 +1630,19 @@ export class FolioRepository implements ArtifactRepository {
         expectedUpdatedAt,
       );
       assertStatusTransition(existing.rows[0].status, input.status, action);
+      if (matches.rows.length) {
+        const cashEffect = manualCashEffectAudMinor({
+          ...input,
+          sourceSystem: "manual",
+        });
+        if (
+          cashEffect === null ||
+          matches.rows.some(
+            (match) => parseDecimal(match.amount_aud) !== cashEffect,
+          )
+        )
+          throw bankMatchEditConflict();
+      }
       const artifactIds = this.artifactIdsForInput(input, sourceArtifactIds);
       await this.assertManualArtifacts(client, artifactIds);
       const primaryArtifactId = artifactIds[0] ?? null;
@@ -1186,15 +1719,48 @@ export class FolioRepository implements ArtifactRepository {
     try {
       await client.query("BEGIN");
       const actor = await this.actorById(client, actorId);
-      await client.query(
+      const matches = await client.query(
         `SELECT id FROM ${this.bankTransactionsTable} WHERE matched_transaction_id=$1 ORDER BY id FOR UPDATE`,
         [id],
       );
+      if (matches.rows.length) throw bankMatchEditConflict();
       const result = await client.query(
         `UPDATE ${this.transactionsTable} SET status='void', updated_by_id=$2, updated_at=now() WHERE id=$1 AND status <> 'void' AND updated_at = $3::timestamptz`,
         [id, actor.id, expectedUpdatedAt],
       );
       if (result.rowCount !== 1) throw revisionConflictError();
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async deleteDraftTransaction(
+    actorId: string,
+    id: string,
+    expectedUpdatedAt: string,
+  ): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await this.actorById(client, actorId);
+      const draft = await client.query(
+        `SELECT id FROM ${this.transactionsTable} WHERE id=$1 AND source_system='manual' AND status='draft' AND updated_at=$2::timestamptz FOR UPDATE`,
+        [id, expectedUpdatedAt],
+      );
+      if (!draft.rows[0]) throw revisionConflictError();
+      await client.query(
+        `DELETE FROM ${this.mcpSubmissionsTable} WHERE draft_transaction_id=$1`,
+        [id],
+      );
+      const deleted = await client.query(
+        `DELETE FROM ${this.transactionsTable} WHERE id=$1 AND source_system='manual' AND status='draft' AND updated_at=$2::timestamptz`,
+        [id, expectedUpdatedAt],
+      );
+      if (deleted.rowCount !== 1) throw revisionConflictError();
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");

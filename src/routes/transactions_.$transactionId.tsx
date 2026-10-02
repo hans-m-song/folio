@@ -1,6 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
+import { MoneyText } from "../components/money-text";
+import { transactionInvoiceLabel } from "../domain/invoice-status";
 import {
   transactionKindLabels,
   transactionSourceLabels,
@@ -66,13 +68,28 @@ function TransactionDetailPage() {
             ? transaction.counterparty
             : transactionKindLabels[transaction.kind]}
         </h1>
-        {transaction.sourceSystem === "manual" && (
-          <a
-            className="transaction-detail-edit"
-            href={`/transactions/${transaction.id}/edit`}
-          >
-            Edit transaction
-          </a>
+        {(transaction.sourceSystem === "manual" ||
+          (transaction.kind === "supplier_expense" &&
+            transaction.status === "recorded")) && (
+          <div className="transaction-detail-actions">
+            {transaction.sourceSystem === "manual" && (
+              <a
+                className="transaction-detail-edit"
+                href={`/transactions/${transaction.id}/edit`}
+              >
+                Edit transaction
+              </a>
+            )}
+            {transaction.kind === "supplier_expense" &&
+              transaction.status === "recorded" && (
+                <a
+                  className="transaction-detail-edit"
+                  href={`/transactions/recurring?sourceTransactionId=${encodeURIComponent(transaction.id)}`}
+                >
+                  Track recurring bill
+                </a>
+              )}
+          </div>
         )}
       </header>
       <section aria-labelledby="transaction-detail-heading">
@@ -90,6 +107,10 @@ function TransactionDetailPage() {
             <dd>{transactionSourceLabels[transaction.sourceSystem]}</dd>
           </div>
           <div>
+            <dt>Invoice / credit note status</dt>
+            <dd>{transactionInvoiceLabel(transaction)}</dd>
+          </div>
+          <div>
             <dt>Reference</dt>
             <dd>{show(transaction.reference)}</dd>
           </div>
@@ -100,26 +121,32 @@ function TransactionDetailPage() {
           <div>
             <dt>Document amount</dt>
             <dd>
-              {transaction.documentAmount
-                ? `${transaction.documentCurrency ?? ""} ${transaction.documentAmount}`
-                : "—"}
+              <MoneyText>
+                {transaction.documentAmount
+                  ? `${transaction.documentCurrency ?? ""} ${transaction.documentAmount}`
+                  : "—"}
+              </MoneyText>
             </dd>
           </div>
           <div>
             <dt>Settlement amount</dt>
             <dd>
-              {transaction.settlementAmount
-                ? `${transaction.settlementCurrency ?? ""} ${transaction.settlementAmount}`
-                : "—"}
+              <MoneyText>
+                {transaction.settlementAmount
+                  ? `${transaction.settlementCurrency ?? ""} ${transaction.settlementAmount}`
+                  : "—"}
+              </MoneyText>
             </dd>
           </div>
           {transaction.sourceSystem === "stripe" && (
             <div>
               <dt>Stripe net</dt>
               <dd>
-                {transaction.sourceNet
-                  ? `${transaction.sourceCurrency ?? ""} ${transaction.sourceNet}`
-                  : "—"}
+                <MoneyText>
+                  {transaction.sourceNet
+                    ? `${transaction.sourceCurrency ?? ""} ${transaction.sourceNet}`
+                    : "—"}
+                </MoneyText>
               </dd>
             </div>
           )}

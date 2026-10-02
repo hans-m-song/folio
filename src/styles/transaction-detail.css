@@ -13,6 +13,11 @@
 .transaction-detail-page > header > * {
   margin: 0;
 }
+.transaction-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
 .transaction-detail-back {
   width: fit-content;
   color: var(--accent-strong);

@@ -1,0 +1,270 @@
+.bulk-selection-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0.85rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface-muted);
+}
+
+.bulk-selection-toolbar p {
+  margin: 0;
+  font-weight: 650;
+}
+
+.bulk-selection-toolbar .actions {
+  gap: 0.5rem;
+}
+
+.transaction-table.transaction-table--bulk-selection {
+  min-width: 77rem;
+}
+
+.transaction-table.transaction-table--bulk-selection th:nth-child(1),
+.transaction-table.transaction-table--bulk-selection td:nth-child(1) {
+  width: 3.25rem;
+  text-align: center;
+}
+
+.transaction-table.transaction-table--bulk-selection th:nth-child(2) {
+  width: 7rem;
+}
+
+.transaction-table.transaction-table--bulk-selection th:nth-child(3) {
+  width: 13rem;
+}
+
+.transaction-table.transaction-table--bulk-selection th:nth-child(4) {
+  width: auto;
+}
+
+.transaction-table.transaction-table--bulk-selection th:nth-child(5) {
+  width: 8rem;
+}
+
+.transaction-table.transaction-table--bulk-selection th:nth-child(6),
+.transaction-table.transaction-table--bulk-selection th:nth-child(7) {
+  width: 10rem;
+}
+
+.transaction-table.transaction-table--bulk-selection th:nth-child(8) {
+  width: 8.5rem;
+}
+
+.transaction-table .bulk-selection-cell input {
+  width: 1.15rem;
+  min-height: 1.15rem;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.bulk-transaction-editor {
+  display: grid;
+  gap: 0.9rem;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: var(--surface-muted);
+}
+
+.bulk-transaction-editor__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.bulk-transaction-editor__heading h3,
+.bulk-transaction-editor__heading p {
+  margin: 0;
+}
+
+.bulk-transaction-editor__heading p,
+.bulk-transaction-editor__help {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.bulk-transaction-editor__form {
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.8fr) minmax(15rem, 1.2fr);
+  align-items: start;
+  gap: 0.85rem;
+}
+
+.bulk-transaction-editor__form > label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  font-weight: 650;
+}
+
+.bulk-transaction-editor__field-picker,
+.bulk-transaction-editor__creatable-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  font-weight: 650;
+}
+
+.bulk-transaction-editor__form .folio-autocomplete {
+  width: 100%;
+  min-width: 0;
+}
+
+.bulk-transaction-editor__form input,
+.bulk-transaction-editor__form select {
+  width: 100%;
+  min-width: 0;
+}
+
+.bulk-transaction-editor__help {
+  font-weight: 400;
+}
+
+.bulk-transaction-editor__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  grid-column: 1 / -1;
+}
+
+.bulk-transaction-editor__error {
+  color: var(--danger);
+}
+
+.bulk-transaction-editor__error p {
+  margin: 0;
+}
+
+.bulk-transaction-editor__preview {
+  display: grid;
+  gap: 0.65rem;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.bulk-transaction-editor__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-weight: 700;
+}
+
+.bulk-transaction-editor__counts span {
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+}
+
+.bulk-transaction-editor__note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.bulk-transaction-editor__table-viewport {
+  width: 100%;
+  max-width: 100%;
+  max-height: 24rem;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface);
+}
+
+.bulk-transaction-editor__preview-table {
+  width: 100%;
+  min-width: 55rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+.bulk-transaction-editor__preview-table th,
+.bulk-transaction-editor__preview-table td {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.bulk-transaction-editor__preview-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-muted);
+  font-size: 0.82rem;
+}
+
+.bulk-transaction-editor__preview-table th:nth-child(1) {
+  width: 17rem;
+}
+
+.bulk-transaction-editor__preview-table th:nth-child(2) {
+  width: 11rem;
+}
+
+.bulk-transaction-editor__preview-table th:nth-child(3),
+.bulk-transaction-editor__preview-table th:nth-child(4) {
+  width: 10rem;
+}
+
+.bulk-transaction-editor__preview-table th:nth-child(5) {
+  width: 7rem;
+}
+
+.bulk-transaction-editor__preview-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.bulk-transaction-editor__transaction-context,
+.bulk-transaction-editor__type-context {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.bulk-transaction-editor__transaction-context span,
+.bulk-transaction-editor__type-context span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.bulk-transaction-editor__context-primary,
+.bulk-transaction-editor__context-secondary {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .transaction-table.transaction-table--bulk-selection {
+    min-width: 0;
+  }
+
+  .bulk-selection-toolbar,
+  .bulk-transaction-editor__heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bulk-transaction-editor__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .bulk-transaction-editor__actions {
+    grid-column: auto;
+  }
+}

@@ -10,6 +10,7 @@ import {
   ProposalDraftNotEditableError,
   ProposalIdempotencyConflictError,
   ProposalRepository,
+  ProposalTransactionConflictError,
 } from "./proposal-repository";
 
 const credentialId = "11111111-1111-4111-8111-111111111111";
@@ -26,7 +27,7 @@ const credentialRow = {
   label: "Synthetic proposal credential",
   actor_user_id: actorId,
   default_owner_id: ownerId,
-  scopes: ["proposals:submit", "submissions:read"],
+  scopes: ["transactions:draft", "bank_matches:suggest", "submissions:read"],
   created_by_id: administratorId,
   revoked_at: null,
   created_at: new Date("2026-09-26T00:00:00.000Z"),
@@ -85,9 +86,10 @@ describe("proposal repository", () => {
     settlement_amount: null,
     gst_credit_status: "not_registered",
     claimable_gst_aud: "0.0000",
+    updated_at_token: "2026-09-26T00:00:00.123456Z",
   };
 
-  it("updates only its credential-owned draft fields without a revision token", async () => {
+  it("updates only its credential-owned draft fields with an exact revision token", async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce({})
@@ -95,19 +97,24 @@ describe("proposal repository", () => {
       .mockResolvedValueOnce({ rows: [editableDraftRow] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
-        rows: [{ updated_at: new Date("2026-09-27T00:00:00.000Z") }],
+        rows: [{ updated_at_token: "2026-09-27T00:00:00.123456Z" }],
       })
       .mockResolvedValueOnce({});
     const { repository } = repositoryWithClients(query);
 
     await expect(
-      repository.updateDraft(credentialId, draftId, {
-        reference: "INV-42",
-        documentAmount: "37.0800",
-      }),
+      repository.updateDraft(
+        credentialId,
+        draftId,
+        "2026-09-26T00:00:00.123456Z",
+        {
+          reference: "INV-42",
+          documentAmount: "37.0800",
+        },
+      ),
     ).resolves.toEqual({
       transactionId: draftId,
-      updatedAt: "2026-09-27T00:00:00.000Z",
+      updatedAt: "2026-09-27T00:00:00.123456Z",
     });
     expect(query.mock.calls[2]?.[0]).toContain("submission.credential_id=$2");
     expect(query.mock.calls[4]?.[0]).toContain("status='draft'");
@@ -136,7 +143,12 @@ describe("proposal repository", () => {
       const { repository } = repositoryWithClients(query);
 
       await expect(
-        repository.updateDraft(credentialId, draftId, { reference: "INV-42" }),
+        repository.updateDraft(
+          credentialId,
+          draftId,
+          "2026-09-26T00:00:00.123456Z",
+          { reference: "INV-42" },
+        ),
       ).rejects.toBeInstanceOf(error);
       expect(
         query.mock.calls.some(([statement]) =>
@@ -169,13 +181,116 @@ describe("proposal repository", () => {
         tokenHash,
         actorUserId: actorId,
         defaultOwnerId: ownerId,
-        scopes: ["proposals:submit", "submissions:read"],
+        scopes: ["transactions:draft", "submissions:read"],
       }),
     ).resolves.toMatchObject({ actorUserId: actorId, defaultOwnerId: ownerId });
     expect(query.mock.calls[2]?.[0]).toContain("token_hash");
     expect(query.mock.calls[2]?.[0]).not.toMatch(/token(?!_hash)/);
     expect(query.mock.calls[2]?.[1]).toContain(tokenHash);
     expect(query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it("lists credential metadata only for an active administrator", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ authorized: true }] })
+      .mockResolvedValueOnce({ rows: [credentialRow] });
+    const repository = new ProposalRepository(
+      { query } as never,
+      "folio",
+      false,
+    );
+
+    await expect(repository.listCredentials(administratorId)).resolves.toEqual([
+      {
+        id: credentialId,
+        label: credentialRow.label,
+        actorUserId: actorId,
+        defaultOwnerId: ownerId,
+        scopes: credentialRow.scopes,
+        createdById: administratorId,
+        revokedAt: null,
+        createdAt: "2026-09-26T00:00:00.000Z",
+      },
+    ]);
+    expect(query.mock.calls[1]?.[0]).not.toContain("token_hash");
+  });
+
+  it("categorizes any transaction without changing other transaction fields", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            source_system: "stripe",
+            status: "void",
+            updated_at_token: "2026-09-26T00:00:00.123456Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ updated_at_token: "2026-09-27T00:00:00.654321Z" }],
+      })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.categorizeTransaction(
+        credentialId,
+        transactionId,
+        "2026-09-26T00:00:00.123456Z",
+        "Software",
+      ),
+    ).resolves.toEqual({
+      transactionId,
+      updatedAt: "2026-09-27T00:00:00.654321Z",
+    });
+    const update = String(query.mock.calls[3]?.[0]);
+    expect(update).toMatch(
+      /SET category=\$2, updated_by_id=\$3, updated_at=greatest\(clock_timestamp\(\), updated_at \+ interval '1 microsecond'\)/,
+    );
+    expect(update).not.toMatch(/status=|source_system|transaction_artifacts/);
+    expect(query.mock.calls[3]?.[1]).toEqual([
+      transactionId,
+      "Software",
+      actorId,
+      "2026-09-26T00:00:00.123456Z",
+    ]);
+  });
+
+  it("rejects a stale category revision before updating a recorded Stripe row", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            source_system: "stripe",
+            status: "void",
+            updated_at_token: "2026-09-26T00:00:00.123457Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.categorizeTransaction(
+        credentialId,
+        transactionId,
+        "2026-09-26T00:00:00.123456Z",
+        "Software",
+      ),
+    ).rejects.toBeInstanceOf(ProposalTransactionConflictError);
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).startsWith("UPDATE"),
+      ),
+    ).toBe(false);
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 
   it("requires a dedicated actor distinct from the provisioning administrator", async () => {
@@ -197,7 +312,7 @@ describe("proposal repository", () => {
         tokenHash: "c".repeat(64),
         actorUserId: administratorId,
         defaultOwnerId: ownerId,
-        scopes: ["proposals:submit"],
+        scopes: ["transactions:draft"],
       }),
     ).rejects.toBeInstanceOf(ProposalAuthorizationError);
     expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
@@ -260,7 +375,7 @@ describe("proposal repository", () => {
           tokenHash: "d".repeat(64),
           actorUserId: actorId,
           defaultOwnerId: ownerId,
-          scopes: ["proposals:submit"],
+          scopes: ["transactions:draft"],
         }),
       ).rejects.toMatchObject({
         name: "ProposalCredentialEligibilityError",
@@ -293,7 +408,10 @@ describe("proposal repository", () => {
     );
     expect(query.mock.calls[0]?.[1]).toEqual([tokenHash, null]);
     await expect(
-      repository.credentialForTokenHash("plaintext-token", "proposals:submit"),
+      repository.credentialForTokenHash(
+        "plaintext-token",
+        "transactions:draft",
+      ),
     ).resolves.toBeNull();
     expect(query).toHaveBeenCalledOnce();
   });
@@ -671,44 +789,6 @@ describe("proposal repository", () => {
       expect(suggestions[0]?.actionability).toBe(expected);
     },
   );
-
-  it("returns status only through the credential-scoped lookup", async () => {
-    const query = vi
-      .fn()
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ rows: [credentialRow] })
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            id: "88888888-8888-4888-8888-888888888888",
-            kind: "draft_transaction",
-            draft_transaction_id: draftId,
-            proposed_transaction_id: null,
-            transaction_status: "recorded",
-            bank_transaction_id: null,
-            resolved_bank_transaction_id: bankId,
-            matched_transaction_id: null,
-            classification: null,
-            created_at: new Date("2026-09-26T00:00:00.000Z"),
-          },
-        ],
-      })
-      .mockResolvedValueOnce({});
-    const { repository } = repositoryWithClients(query);
-
-    await expect(
-      repository.getSubmissionStatus(
-        credentialId,
-        "88888888-8888-4888-8888-888888888888",
-      ),
-    ).resolves.toMatchObject({
-      linkedId: draftId,
-      outcome: "recorded",
-      intendedBankTransactionId: null,
-      resolvedBankTransactionId: bankId,
-    });
-    expect(query.mock.calls[2]?.[0]).toContain("submission.credential_id=$2");
-  });
 
   it("reads and persistently discards proposed evidence for an authenticated human", async () => {
     const evidenceArtifactId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

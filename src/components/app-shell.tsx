@@ -1,13 +1,31 @@
 import { useRouterState } from "@tanstack/react-router";
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import type { User } from "../domain/types";
 import { hasPermission, permissions } from "../server/authorization";
+import { listenForMoneyCopy } from "./money-copy";
+
+const reportLinks = [
+  { href: "/reports", label: "Financial summary" },
+  { href: "/reports/tax", label: "Tax preparation" },
+] as const;
 
 const bankingLinks = [
   { href: "/banking/activity", label: "Activity" },
   { href: "/banking/reconcile", label: "Reconcile" },
   { href: "/banking/imports", label: "Import history" },
+] as const;
+
+const sourceLinks = [
+  { href: "/imports/stripe", label: "Stripe CSV" },
+  { href: "/imports/commbank", label: "CommBank CSV" },
+  { href: "/imports/pdf", label: "PDF evidence" },
+  { href: "/imports/library", label: "File library" },
+] as const;
+
+const adminLinks = [
+  { href: "/admin/users", label: "Users" },
+  { href: "/admin/tokens", label: "Access tokens" },
 ] as const;
 
 const routeIsActive = (pathname: string, href: string): boolean =>
@@ -52,7 +70,33 @@ const PrimaryNavigation = ({
             Overview
           </a>
         </li>
-        <li>
+        <li className="app-nav-group">
+          <a
+            className="app-nav-link"
+            href="/reports"
+            aria-current={
+              routeIsActive(pathname, "/reports") ? "location" : undefined
+            }
+            data-active={routeIsActive(pathname, "/reports") || undefined}
+          >
+            Reports
+          </a>
+          <ul className="app-nav-children">
+            {reportLinks.map(({ href, label }) => (
+              <li key={href}>
+                <a
+                  className="app-nav-link app-nav-link--child"
+                  href={href}
+                  aria-current={pathname === href ? "page" : undefined}
+                  data-active={pathname === href || undefined}
+                >
+                  {label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </li>
+        <li className="app-nav-group">
           <a
             className="app-nav-link"
             href="/transactions"
@@ -61,6 +105,22 @@ const PrimaryNavigation = ({
           >
             Transactions
           </a>
+          <ul className="app-nav-children">
+            <li>
+              <a
+                className="app-nav-link app-nav-link--child"
+                href="/transactions/recurring"
+                aria-current={
+                  pathname === "/transactions/recurring" ? "page" : undefined
+                }
+                data-active={
+                  pathname === "/transactions/recurring" || undefined
+                }
+              >
+                Recurring bills
+              </a>
+            </li>
+          </ul>
         </li>
         <li className="app-nav-group">
           <a
@@ -86,7 +146,7 @@ const PrimaryNavigation = ({
             ))}
           </ul>
         </li>
-        <li>
+        <li className="app-nav-group">
           <a
             className="app-nav-link"
             href="/imports"
@@ -95,27 +155,47 @@ const PrimaryNavigation = ({
           >
             Sources
           </a>
-        </li>
-        <li>
-          <a
-            className="app-nav-link"
-            href="/reports"
-            aria-current={routeCurrentState(pathname, "/reports")}
-            data-active={routeIsActive(pathname, "/reports") || undefined}
-          >
-            Reports
-          </a>
+          <ul className="app-nav-children">
+            {sourceLinks.map(({ href, label }) => (
+              <li key={href}>
+                <a
+                  className="app-nav-link app-nav-link--child"
+                  href={href}
+                  aria-current={routeCurrentState(pathname, href)}
+                  data-active={routeIsActive(pathname, href) || undefined}
+                >
+                  {label}
+                </a>
+              </li>
+            ))}
+          </ul>
         </li>
         {canAdministerUsers && (
-          <li>
+          <li className="app-nav-group">
             <a
               className="app-nav-link"
               href="/admin/users"
-              aria-current={routeCurrentState(pathname, "/admin/users")}
-              data-active={routeIsActive(pathname, "/admin/users") || undefined}
+              aria-current={
+                pathname.startsWith("/admin") ? "location" : undefined
+              }
+              data-active={pathname.startsWith("/admin") || undefined}
             >
               Administration
             </a>
+            <ul className="app-nav-children">
+              {adminLinks.map(({ href, label }) => (
+                <li key={href}>
+                  <a
+                    className="app-nav-link app-nav-link--child"
+                    href={href}
+                    aria-current={routeCurrentState(pathname, href)}
+                    data-active={routeIsActive(pathname, href) || undefined}
+                  >
+                    {label}
+                  </a>
+                </li>
+              ))}
+            </ul>
           </li>
         )}
       </ul>
@@ -130,6 +210,8 @@ export const AppShell = ({
   children: ReactNode;
   userRole: User["role"];
 }) => {
+  useEffect(() => listenForMoneyCopy(), []);
+
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });

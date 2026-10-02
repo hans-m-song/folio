@@ -1,6 +1,10 @@
 import { parseDecimal } from "./money";
 import type { ManualTransactionAction } from "./manual-transaction";
-import { isOwnerFundingKind, type TransactionInput } from "./types";
+import {
+  isOwnerFundingKind,
+  isOwnerLoanRepaymentKind,
+  type TransactionInput,
+} from "./types";
 import {
   isInvoiceEvidenceProfile,
   legacyArtifactProfile,
@@ -75,20 +79,41 @@ export function assertTransactionRules(
   gstRegistered: boolean,
   evidence: EvidenceState | null,
 ): void {
+  if (isOwnerLoanRepaymentKind(input.kind) && !input.ownerId)
+    throw new Error("Choose an owner");
+  if (
+    isOwnerLoanRepaymentKind(input.kind) &&
+    input.settlementAmount !== null &&
+    parseDecimal(input.settlementAmount) <= 0n
+  ) {
+    throw new Error(
+      "Owner loan repayments require a positive settlement amount when supplied",
+    );
+  }
   if (isOwnerFundingKind(input.kind)) {
     if (input.taxTreatment !== "no_tax")
       throw new Error(
-        "Owner contributions and loans must use no tax treatment",
+        isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments must use no tax treatment"
+          : "Owner contributions and loans must use no tax treatment",
       );
     if (input.documentTaxAmount && parseDecimal(input.documentTaxAmount) !== 0n)
-      throw new Error("Owner contributions and loans cannot have document tax");
+      throw new Error(
+        isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments cannot have document tax"
+          : "Owner contributions and loans cannot have document tax",
+      );
     if (!["not_claimable", "not_registered"].includes(input.gstCreditStatus))
       throw new Error(
-        "Owner contributions and loans must be not claimable or not registered",
+        isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments must be not claimable or not registered"
+          : "Owner contributions and loans must be not claimable or not registered",
       );
     if (input.claimableGstAud && parseDecimal(input.claimableGstAud) !== 0n)
       throw new Error(
-        "Owner contributions and loans require zero claimable GST",
+        isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments require zero claimable GST"
+          : "Owner contributions and loans require zero claimable GST",
       );
   }
   if (!gstRegistered && input.gstCreditStatus === "claimable") {

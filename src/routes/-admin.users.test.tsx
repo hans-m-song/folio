@@ -77,6 +77,43 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("user activation controls", () => {
+  it("copies the selected user's ID without modifying the user", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(createElement(UsersPage));
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy user ID for Workspace member" }),
+    );
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("user-1"));
+    expect(screen.getByRole("status").textContent).toBe("User ID copied.");
+    expect(operations.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("reports clipboard failure without exposing the ID in a message", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("Clipboard denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(createElement(UsersPage));
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy user ID for Workspace member" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Could not copy user ID",
+      ),
+    );
+    expect(screen.getByRole("status").textContent).not.toContain("user-1");
+  });
+
   it("requires confirmation before deactivation and restores focus when cancelled", () => {
     render(createElement(UsersPage));
     const trigger = screen.getByRole("button", { name: "Deactivate" });

@@ -3,14 +3,19 @@ import type { BankProposalSuggestion } from "../database/proposal-repository";
 interface BankProposalSuggestionsProps {
   bankTransactionId: string;
   suggestions: readonly BankProposalSuggestion[];
+  onEditDraft?: (transactionId: string) => void;
 }
 
 export const BankProposalSuggestions = ({
   bankTransactionId,
   suggestions,
+  onEditDraft,
 }: BankProposalSuggestionsProps) => {
-  const active = suggestions.filter(
-    (suggestion) => suggestion.actionability !== "void",
+  const active = suggestions.filter((suggestion) =>
+    suggestion.kind === "draft_transaction"
+      ? suggestion.transaction.status === "draft"
+      : suggestion.actionability === "actionable" ||
+        suggestion.actionability === "stale",
   );
   if (active.length === 0) return null;
 
@@ -22,9 +27,7 @@ export const BankProposalSuggestions = ({
       </p>
       <div className="banking-proposal-list">
         {active.map((suggestion) => {
-          const draft =
-            suggestion.kind === "draft_transaction" &&
-            suggestion.transaction.status === "draft";
+          const draft = suggestion.kind === "draft_transaction";
           const transactionHref = draft
             ? `/transactions/${suggestion.transaction.id}/edit?bank=${bankTransactionId}`
             : `/transactions/${suggestion.transaction.id}`;
@@ -67,16 +70,26 @@ export const BankProposalSuggestions = ({
               )}
               {suggestion.actionability === "resolved" && (
                 <p className="banking-proposal-warning">
-                  This bank row is already resolved. The suggestion cannot be
-                  applied.
+                  This bank row is already resolved. The draft can be reviewed,
+                  but matching requires resetting the bank row.
                 </p>
               )}
-              <a
-                className="banking-button-link banking-button-secondary"
-                href={transactionHref}
-              >
-                {draft ? "Review draft" : "Review transaction"}
-              </a>
+              {draft && onEditDraft ? (
+                <button
+                  type="button"
+                  className="banking-button-link banking-button-secondary"
+                  onClick={() => onEditDraft(suggestion.transaction.id)}
+                >
+                  Edit draft here
+                </button>
+              ) : (
+                <a
+                  className="banking-button-link banking-button-secondary"
+                  href={transactionHref}
+                >
+                  {draft ? "Review draft" : "Review transaction"}
+                </a>
+              )}
             </article>
           );
         })}

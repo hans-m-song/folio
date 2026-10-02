@@ -37,6 +37,36 @@ describe("managed manual transaction values", () => {
     });
   });
 
+  it("builds repayments from positive principal without tax or GST", () => {
+    const values = {
+      ...manualTransactionValues(base),
+      kind: "owner_loan_repayment" as const,
+      documentAmount: "125.0000",
+      documentCurrency: "AUD",
+      taxTreatment: "gst_included" as const,
+      documentTaxAmount: "11.3636",
+      gstCreditStatus: "claimable" as const,
+      claimableGstAud: "11.3636",
+    };
+
+    expect(
+      buildManualTransaction(values, {
+        action: "save_recorded",
+        sourceArtifactId: null,
+        gstRegistered: true,
+      }),
+    ).toMatchObject({
+      ownerId: base.ownerId,
+      kind: "owner_loan_repayment",
+      documentAmount: "125.0000",
+      documentCurrency: "AUD",
+      documentTaxAmount: null,
+      taxTreatment: "no_tax",
+      gstCreditStatus: "not_claimable",
+      claimableGstAud: "0.0000",
+    });
+  });
+
   it("maps exact-decimal failures to their managed fields", () => {
     const errors = manualTransactionFieldErrors(
       {

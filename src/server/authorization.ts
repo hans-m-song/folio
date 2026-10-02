@@ -17,6 +17,7 @@ export const permissions = {
   bankActivityReconcile: "bank_activity:reconcile",
   reportRead: "report:read",
   reportExport: "report:export",
+  reportReview: "report:review",
   userAdmin: "user:admin",
   auditRead: "audit:read",
   sessionAdmin: "session:admin",
@@ -39,6 +40,7 @@ const memberPermissions = [
   permissions.bankActivityReconcile,
   permissions.reportRead,
   permissions.reportExport,
+  permissions.reportReview,
 ] as const satisfies readonly Permission[];
 
 export const rolePermissionBundles = {
@@ -62,11 +64,21 @@ export const operationPermissions = {
     permissions.artifactLink,
   ],
   voidTransaction: [permissions.transactionWrite],
+  previewBulkTransactionEdit: [
+    permissions.transactionRead,
+    permissions.transactionWrite,
+  ],
+  applyBulkTransactionEdit: [permissions.transactionWrite],
+  deleteDraftTransaction: [permissions.transactionWrite],
   createUser: [permissions.userAdmin],
   updateUser: [permissions.userAdmin],
   startArtifactUpload: [permissions.artifactUpload],
   confirmArtifactUpload: [permissions.artifactUpload],
   downloadArtifact: [permissions.artifactDownload],
+  extractInvoiceFields: [
+    permissions.artifactDownload,
+    permissions.artifactUpload,
+  ],
   rejectArtifact: [permissions.artifactUpload],
   deleteArtifact: [permissions.artifactDelete],
   listAvailableInvoiceArtifacts: [permissions.artifactList],
@@ -84,6 +96,11 @@ export const operationPermissions = {
     permissions.transactionRead,
     permissions.artifactList,
   ],
+  getNextBankReconciliation: [
+    permissions.bankActivityView,
+    permissions.transactionRead,
+    permissions.artifactList,
+  ],
   reconcileBankTransaction: [permissions.bankActivityReconcile],
   createAndMatchBankTransaction: [
     permissions.bankActivityReconcile,
@@ -92,6 +109,18 @@ export const operationPermissions = {
   ],
   getReport: [permissions.reportRead],
   exportReport: [permissions.reportRead, permissions.reportExport],
+  getTaxWorksheet: [permissions.reportRead],
+  getTaxPartnerOptions: [permissions.reportRead, permissions.reportReview],
+  exportTaxSource: [permissions.reportRead, permissions.reportExport],
+  reviewTaxWorksheet: [permissions.reportRead, permissions.reportReview],
+  exportTaxWorksheet: [permissions.reportRead, permissions.reportExport],
+  getRecurringBillsWorkspace: [permissions.transactionRead],
+  getRecurringBillAttention: [permissions.transactionRead],
+  previewRecurringBill: [permissions.transactionRead],
+  saveRecurringBill: [permissions.transactionWrite],
+  setRecurringBillActive: [permissions.transactionWrite],
+  linkRecurringBillTransaction: [permissions.transactionWrite],
+  unlinkRecurringBillTransaction: [permissions.transactionWrite],
 } as const satisfies Record<string, readonly Permission[]>;
 
 export const hasPermission = (

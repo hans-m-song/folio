@@ -15,12 +15,19 @@ export const transactionKindSchema = z.enum([
   "transfer",
   "owner_contribution",
   "owner_loan",
+  "owner_loan_repayment",
   "adjustment",
 ]);
-export const ownerFundingKinds = ["owner_contribution", "owner_loan"] as const;
-export const isOwnerFundingKind = (
-  kind: z.infer<typeof transactionKindSchema>,
-): boolean =>
+export type TransactionKind = z.infer<typeof transactionKindSchema>;
+export const ownerLoanRepaymentKind = "owner_loan_repayment" as const;
+export const ownerFundingKinds = [
+  "owner_contribution",
+  "owner_loan",
+  ownerLoanRepaymentKind,
+] as const;
+export const isOwnerLoanRepaymentKind = (kind: TransactionKind): boolean =>
+  kind === ownerLoanRepaymentKind;
+export const isOwnerFundingKind = (kind: TransactionKind): boolean =>
   ownerFundingKinds.includes(kind as (typeof ownerFundingKinds)[number]);
 export const transactionKindLabels: Record<
   z.infer<typeof transactionKindSchema>,
@@ -35,6 +42,7 @@ export const transactionKindLabels: Record<
   transfer: "Transfer",
   owner_contribution: "Owner contribution",
   owner_loan: "Owner loan to business",
+  owner_loan_repayment: "Owner loan repayment",
   adjustment: "Adjustment",
 };
 export const transactionTaxTreatmentSchema = z.enum([
@@ -106,6 +114,13 @@ export const transactionInputSchema = z
   })
   .strict()
   .superRefine((input, context) => {
+    if (isOwnerLoanRepaymentKind(input.kind) && !input.ownerId) {
+      context.addIssue({
+        code: "custom",
+        path: ["ownerId"],
+        message: "Choose an owner",
+      });
+    }
     if (input.gstCreditStatus === "claimable" && !input.sourceArtifactId) {
       context.addIssue({
         code: "custom",
@@ -120,14 +135,30 @@ export const transactionInputSchema = z
       context.addIssue({
         code: "custom",
         path: ["documentAmount"],
-        message: "Owner contributions and loans require a positive amount",
+        message: isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments require a positive principal amount"
+          : "Owner contributions and loans require a positive amount",
+      });
+    }
+    if (
+      isOwnerLoanRepaymentKind(input.kind) &&
+      input.settlementAmount !== null &&
+      parseDecimal(input.settlementAmount) <= 0n
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["settlementAmount"],
+        message:
+          "Owner loan repayments require a positive settlement amount when supplied",
       });
     }
     if (isOwnerFundingKind(input.kind) && input.taxTreatment !== "no_tax") {
       context.addIssue({
         code: "custom",
         path: ["taxTreatment"],
-        message: "Owner contributions and loans must use no tax treatment",
+        message: isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments must use no tax treatment"
+          : "Owner contributions and loans must use no tax treatment",
       });
     }
     if (
@@ -138,7 +169,9 @@ export const transactionInputSchema = z
       context.addIssue({
         code: "custom",
         path: ["documentTaxAmount"],
-        message: "Owner contributions and loans cannot have document tax",
+        message: isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments cannot have document tax"
+          : "Owner contributions and loans cannot have document tax",
       });
     }
     if (
@@ -148,8 +181,9 @@ export const transactionInputSchema = z
       context.addIssue({
         code: "custom",
         path: ["gstCreditStatus"],
-        message:
-          "Owner contributions and loans must be not claimable or not registered",
+        message: isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments must be not claimable or not registered"
+          : "Owner contributions and loans must be not claimable or not registered",
       });
     }
     if (
@@ -160,7 +194,9 @@ export const transactionInputSchema = z
       context.addIssue({
         code: "custom",
         path: ["claimableGstAud"],
-        message: "Owner contributions and loans require zero claimable GST",
+        message: isOwnerLoanRepaymentKind(input.kind)
+          ? "Owner loan repayments require zero claimable GST"
+          : "Owner contributions and loans require zero claimable GST",
       });
     }
   });

@@ -8,12 +8,13 @@ const current = vi.hoisted(() => ({
   repository: {
     listUsers: vi.fn().mockResolvedValue([]),
     listTransactions: vi.fn().mockResolvedValue([]),
+    listArtifacts: vi.fn().mockResolvedValue({ rows: [], total: 0 }),
     findArtifactFilenameMatches: vi.fn(),
     listTransactionPage: vi
       .fn()
       .mockResolvedValue({ rows: [], total: 0, page: 1, pageSize: 50 }),
     transactionOverviewSummary: vi.fn().mockResolvedValue({
-      transactionLinkedEvidenceGaps: 0,
+      missingInvoiceOrCreditNoteCount: 0,
       pendingImportUploads: 0,
       abandonedImportUploads: 0,
       recentTransactions: [],
@@ -25,6 +26,9 @@ const current = vi.hoisted(() => ({
     }),
     createManual: vi.fn(),
     updateManual: vi.fn(),
+    previewBulkTransactionEdit: vi.fn(),
+    applyBulkTransactionEdit: vi.fn(),
+    deleteDraftTransaction: vi.fn(),
     createUser: vi.fn(),
     previewStripeImport: vi.fn(),
   },
@@ -57,6 +61,7 @@ const permissionProbe = vi.hoisted(() => ({
 
 vi.mock("@tanstack/react-start/server", () => ({
   getCookie: vi.fn().mockReturnValue("opaque-session"),
+  setResponseStatus: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-start", () => ({
@@ -90,8 +95,11 @@ import { permissions } from "./authorization";
 import { FolioDiagnosticError } from "../domain/diagnostics";
 import { ArtifactPresignRecoveryError } from "../documents/service";
 import {
+  applyBulkTransactionEdit,
+  previewBulkTransactionEdit,
   createUser,
   deleteArtifact,
+  deleteDraftTransaction,
   discardProposedDraftEvidence,
   getOverviewSummary,
   getProposedDraftEvidence,
@@ -99,6 +107,7 @@ import {
   listTransactionFormOptions,
   listTransactionPage,
   listWorkspace,
+  listArtifacts,
   findArtifactFilenameMatches,
   previewStripeCsv,
   reportClientRenderFailure,
@@ -129,6 +138,120 @@ const viewer = {
 const ownerId = "00000000-0000-4000-8000-000000000001";
 
 describe("server operation authorization", () => {
+  it("authorizes bulk preview and apply using the trusted session actor", async () => {
+    const data = {
+      transactions: [{ id: ownerId, updatedAt: "2026-10-01T01:02:03.123456Z" }],
+      change: {
+        field: "category" as const,
+        value: "Software and subscriptions",
+      },
+    };
+    const preview = { change: data.change, rows: [], changedCount: 1 };
+    const result = { selectedCount: 1, updatedCount: 1 };
+    current.repository.previewBulkTransactionEdit.mockResolvedValue(preview);
+    current.repository.applyBulkTransactionEdit.mockResolvedValue(result);
+    await expect(previewBulkTransactionEdit({ data })).resolves.toEqual(
+      preview,
+    );
+    await expect(applyBulkTransactionEdit({ data })).resolves.toEqual(result);
+    expect(current.repository.previewBulkTransactionEdit).toHaveBeenCalledWith(
+      member.id,
+      data,
+    );
+    expect(current.repository.applyBulkTransactionEdit).toHaveBeenCalledWith(
+      member.id,
+      data,
+    );
+  });
+
+  it("denies unauthenticated and read-only bulk mutations before repository access", async () => {
+    const data = {
+      transactions: [{ id: ownerId, updatedAt: "2026-10-01T01:02:03.123456Z" }],
+      change: { field: "counterparty" as const, value: "CommBank" },
+    };
+    for (const operation of [
+      previewBulkTransactionEdit,
+      applyBulkTransactionEdit,
+    ]) {
+      current.auth.session.mockResolvedValue(viewer);
+      await expect(operation({ data })).rejects.toThrow(
+        "Code PERMISSION_DENIED",
+      );
+      current.auth.session.mockResolvedValue(null);
+      await expect(operation({ data })).rejects.toThrow("Code UNAUTHENTICATED");
+    }
+    expect(
+      current.repository.previewBulkTransactionEdit,
+    ).not.toHaveBeenCalled();
+    expect(current.repository.applyBulkTransactionEdit).not.toHaveBeenCalled();
+  });
+
+  it("rejects unapproved bulk fields and client-supplied actors before repository access", () => {
+    const data = {
+      transactions: [{ id: ownerId, updatedAt: "2026-10-01T01:02:03.123456Z" }],
+      change: { field: "category", value: "Example" },
+    };
+    for (const operation of [
+      previewBulkTransactionEdit,
+      applyBulkTransactionEdit,
+    ]) {
+      expect(() =>
+        operation({ data: { ...data, actorId: ownerId } } as never),
+      ).toThrow();
+      expect(() =>
+        operation({
+          data: { ...data, change: { field: "status", value: "recorded" } },
+        } as never),
+      ).toThrow();
+    }
+    expect(
+      current.repository.previewBulkTransactionEdit,
+    ).not.toHaveBeenCalled();
+    expect(current.repository.applyBulkTransactionEdit).not.toHaveBeenCalled();
+  });
+
+  it("validates artifact membership while retaining legacy scalar filters", async () => {
+    const filters = [
+      {
+        field: "state" as const,
+        operator: "contains_any" as const,
+        value: ["available", "awaiting_review"],
+      },
+      {
+        field: "linkage" as const,
+        operator: "contains_none" as const,
+        value: ["unlinked"],
+      },
+      { field: "type" as const, operator: "is" as const, value: "text/csv" },
+    ];
+    await listArtifacts({ data: { filters, limit: 25, offset: 25 } });
+    expect(current.repository.listArtifacts).toHaveBeenCalledWith(
+      member.id,
+      expect.objectContaining({ filters, limit: 25, offset: 25 }),
+    );
+  });
+
+  it.each([
+    { field: "state", operator: "contains_any", value: ["unknown"] },
+    { field: "state", operator: "is", value: ["available"] },
+    { field: "linkage", operator: "contains_none", value: "unlinked" },
+    {
+      field: "state",
+      operator: "contains_any",
+      value: Array(21).fill("available"),
+    },
+  ])(
+    "rejects malformed artifact enum choices before repository access: %j",
+    (filter) => {
+      expect(() =>
+        listArtifacts({
+          data: { filters: [filter as never], limit: 25, offset: 0 },
+        }),
+      ).toThrow();
+      expect(current.repository.listArtifacts).not.toHaveBeenCalled();
+    },
+  );
+
   beforeEach(() => {
     vi.clearAllMocks();
     current.auth.session.mockResolvedValue(member);
@@ -141,7 +264,7 @@ describe("server operation authorization", () => {
       pageSize: 50,
     });
     current.repository.transactionOverviewSummary.mockResolvedValue({
-      transactionLinkedEvidenceGaps: 0,
+      missingInvoiceOrCreditNoteCount: 0,
       pendingImportUploads: 0,
       abandonedImportUploads: 0,
       recentTransactions: [],
@@ -407,6 +530,12 @@ describe("server operation authorization", () => {
         filters: [
           { field: "status", operator: "is", value: "recorded" },
           {
+            field: "source",
+            operator: "contains_none",
+            value: ["stripe"],
+          },
+          { field: "evidence", operator: "is_not", value: "missing" },
+          {
             field: "amount",
             operator: "greater_than_or_equal",
             value: "100.00",
@@ -424,6 +553,12 @@ describe("server operation authorization", () => {
         filters: [
           { field: "status", operator: "is", value: "recorded" },
           {
+            field: "source",
+            operator: "contains_none",
+            value: ["stripe"],
+          },
+          { field: "evidence", operator: "is_not", value: "missing" },
+          {
             field: "amount",
             operator: "greater_than_or_equal",
             value: "100.00",
@@ -433,6 +568,32 @@ describe("server operation authorization", () => {
         page: 2,
         reportingTimezone: "Australia/Brisbane",
       },
+    );
+  });
+
+  it("accepts independent kind-aware invoice filter values", async () => {
+    await listTransactionPage({
+      data: {
+        filters: [
+          {
+            field: "invoice",
+            operator: "contains_any",
+            value: ["missing", "not_expected"],
+          },
+        ],
+      },
+    });
+    expect(current.repository.listTransactionPage).toHaveBeenCalledWith(
+      member.id,
+      expect.objectContaining({
+        filters: [
+          {
+            field: "invoice",
+            operator: "contains_any",
+            value: ["missing", "not_expected"],
+          },
+        ],
+      }),
     );
   });
 
@@ -449,6 +610,73 @@ describe("server operation authorization", () => {
     expect(current.repository.listTransactionPage).not.toHaveBeenCalled();
   });
 
+  it("rejects invalid or mismatched enum membership values before repository access", () => {
+    expect(() =>
+      listTransactionPage({
+        data: {
+          filters: [
+            {
+              field: "status",
+              operator: "contains_any",
+              value: ["recorded", "unknown"],
+            },
+          ],
+        },
+      } as never),
+    ).toThrow();
+    expect(() =>
+      listTransactionPage({
+        data: {
+          filters: [
+            { field: "status", operator: "contains_any", value: "recorded" },
+          ],
+        },
+      } as never),
+    ).toThrow();
+    expect(() =>
+      listTransactionPage({
+        data: {
+          filters: [{ field: "status", operator: "is", value: ["recorded"] }],
+        },
+      } as never),
+    ).toThrow();
+    expect(() =>
+      listTransactionPage({
+        data: {
+          filters: [
+            {
+              field: "status",
+              operator: "contains_any",
+              value: Array.from({ length: 21 }, () => "recorded"),
+            },
+          ],
+        },
+      } as never),
+    ).toThrow();
+    expect(current.repository.listTransactionPage).not.toHaveBeenCalled();
+  });
+
+  it("passes bounded ordered transaction sort clauses to the repository", async () => {
+    await listTransactionPage({
+      data: {
+        sortClauses: [
+          { key: "state", direction: "asc" },
+          { key: "amount", direction: "desc" },
+        ],
+      },
+    });
+
+    expect(current.repository.listTransactionPage).toHaveBeenCalledWith(
+      member.id,
+      expect.objectContaining({
+        sortClauses: [
+          { key: "state", direction: "asc" },
+          { key: "amount", direction: "desc" },
+        ],
+      }),
+    );
+  });
+
   it("denies transaction page access before repository access", async () => {
     current.auth.session.mockResolvedValue(viewer);
     await expect(listTransactionPage({ data: {} })).rejects.toThrow(
@@ -459,7 +687,7 @@ describe("server operation authorization", () => {
 
   it("returns exact overview aggregates and bounded record snapshots", async () => {
     current.repository.transactionOverviewSummary.mockResolvedValue({
-      transactionLinkedEvidenceGaps: 4,
+      missingInvoiceOrCreditNoteCount: 4,
       pendingImportUploads: 2,
       abandonedImportUploads: 3,
       recentTransactions: [{ id: "transaction" }],
@@ -474,7 +702,7 @@ describe("server operation authorization", () => {
       attention: {
         unresolvedBankRows: 7,
         importsWithUnresolvedRows: 2,
-        transactionLinkedEvidenceGaps: 4,
+        missingInvoiceOrCreditNoteCount: 4,
         pendingImportUploads: 2,
         abandonedImportUploads: 3,
       },
@@ -504,6 +732,28 @@ describe("server operation authorization", () => {
       current.repository.transactionOverviewSummary,
     ).not.toHaveBeenCalled();
     expect(current.bankRepository.overviewSummary).not.toHaveBeenCalled();
+  });
+
+  it("uses the authenticated actor for draft deletion and denies viewers", async () => {
+    const input = {
+      data: {
+        id: "11111111-1111-4111-8111-111111111111",
+        expectedUpdatedAt: "2026-09-27T00:00:00.000Z",
+      },
+    };
+    await deleteDraftTransaction(input);
+    expect(current.repository.deleteDraftTransaction).toHaveBeenCalledWith(
+      member.id,
+      input.data.id,
+      input.data.expectedUpdatedAt,
+    );
+
+    current.repository.deleteDraftTransaction.mockClear();
+    current.auth.session.mockResolvedValue(viewer);
+    await expect(deleteDraftTransaction(input)).rejects.toThrow(
+      "Code PERMISSION_DENIED",
+    );
+    expect(current.repository.deleteDraftTransaction).not.toHaveBeenCalled();
   });
 
   it("returns safe structured manual transaction validation issues after authorization", async () => {

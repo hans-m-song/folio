@@ -4,6 +4,37 @@ import { BankRepository } from "./bank-repository";
 import { transactionInputSchema } from "../domain/types";
 
 describe("bank repository queries", () => {
+  it("returns only financial-year bank review states for source completeness", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          posted_date_text: "2026-06-30",
+          revision: 3,
+          updated_at: new Date("2026-07-01T01:00:00.000Z"),
+          matched_transaction_id: null,
+          classification: null,
+        },
+      ],
+    });
+    const rows = await new BankRepository(
+      { query } as never,
+      "folio",
+    ).financialYearReviewRows("22222222-2222-4222-8222-222222222222", 2025);
+    expect(rows).toEqual([
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        postedDate: "2026-06-30",
+        revision: "3",
+        updatedAt: "2026-07-01T01:00:00.000Z",
+        reviewState: "unresolved",
+      },
+    ]);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("bank.posted_date >= $2::date"),
+      ["22222222-2222-4222-8222-222222222222", "2025-07-01", "2026-07-01"],
+    );
+  });
   it("serializes CommBank confirmation and re-requests acknowledgement when overlaps change", async () => {
     const artifactId = "11111111-1111-4111-8111-111111111111";
     const artifactA = "22222222-2222-4222-8222-222222222222";
@@ -386,6 +417,10 @@ describe("bank repository queries", () => {
       14,
       bankTransactionId,
     ]);
+    expect(query.mock.calls[2]?.[0]).toContain("owner_loan_repayment");
+    expect(query.mock.calls[2]?.[0]).toContain(
+      "ELSE -candidate.settlement_amount END=$1::numeric",
+    );
   });
 
   it("returns one activity row with every deterministic source attribution", async () => {
@@ -430,6 +465,207 @@ describe("bank repository queries", () => {
       "array_agg(link.source_artifact_id ORDER BY link.source_artifact_id)",
     );
     expect(query.mock.calls[0]?.[1]).toEqual(["actor", null, null, 50, 0]);
+  });
+
+  it("filters aggregate import rows and applies ordered sorts before pagination", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    await new BankRepository({ query } as never, "folio").listImports("actor", {
+      limit: 51,
+      offset: 50,
+      filters: [
+        { field: "filename", operator: "contains", value: "sept" },
+        {
+          field: "reviewedCount",
+          operator: "greater_than",
+          value: "0",
+        },
+        { field: "state", operator: "is", value: "available" },
+      ],
+      sort: [
+        { key: "state", direction: "asc" },
+        { key: "rowCount", direction: "desc" },
+      ],
+    });
+
+    const [sql, parameters] = query.mock.calls[0] as [string, unknown[]];
+    expect(parameters).toEqual([
+      "commbank_transaction_history_csv_v1",
+      "actor",
+      "sept",
+      "0",
+      "available",
+      51,
+      50,
+    ]);
+    expect(sql).toContain("GROUP BY artifact.id");
+    expect(sql).toContain(
+      "(imports.row_count - imports.unresolved_count) > $4::numeric",
+    );
+    expect(sql).toContain("imports.state = $5");
+    expect(sql).toContain(
+      "ORDER BY imports.state ASC NULLS LAST, imports.row_count DESC NULLS LAST, imports.artifact_id DESC LIMIT $6 OFFSET $7",
+    );
+    expect(sql.indexOf("GROUP BY artifact.id")).toBeLessThan(
+      sql.indexOf("WHERE position(lower($3) in lower(imports.filename))"),
+    );
+    expect(
+      sql.indexOf("WHERE position(lower($3) in lower(imports.filename))"),
+    ).toBeLessThan(sql.indexOf("ORDER BY imports.state"));
+    expect(sql.indexOf("ORDER BY imports.state")).toBeLessThan(
+      sql.indexOf("LIMIT $6 OFFSET $7"),
+    );
+  });
+
+  it("AND-filters activity and keeps ordered sort clauses ahead of page limits", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    await new BankRepository({ query } as never, "folio").listTransactions(
+      "actor",
+      {
+        limit: 51,
+        offset: 100,
+        filters: [
+          {
+            field: "postedDate",
+            operator: "greater_than_or_equal",
+            value: "2026-09-01",
+          },
+          { field: "description", operator: "contains", value: "Coffee" },
+          { field: "reviewState", operator: "is", value: "unresolved" },
+        ],
+        sort: [
+          { key: "amountAud", direction: "asc" },
+          { key: "postedDate", direction: "desc" },
+        ],
+      },
+    );
+
+    const [sql, parameters] = query.mock.calls[0] as [string, unknown[]];
+    expect(parameters).toEqual([
+      "actor",
+      null,
+      null,
+      "2026-09-01",
+      "Coffee",
+      "unresolved",
+      51,
+      100,
+    ]);
+    expect(sql).toContain("bank.posted_date >= $4::date");
+    expect(sql).toContain("position(lower($5) in lower(bank.description)) > 0");
+    expect(sql).toContain(
+      "CASE WHEN bank.matched_transaction_id IS NOT NULL THEN 'matched' WHEN bank.classification IS NOT NULL THEN bank.classification ELSE 'unresolved' END = $6",
+    );
+    expect(sql).toContain(
+      "ORDER BY bank.amount_aud ASC NULLS LAST, bank.posted_date DESC NULLS LAST, bank.id DESC LIMIT $7 OFFSET $8",
+    );
+    expect(sql.indexOf("bank.posted_date >= $4::date")).toBeLessThan(
+      sql.indexOf("ORDER BY bank.amount_aud"),
+    );
+    expect(sql.indexOf("ORDER BY bank.amount_aud")).toBeLessThan(
+      sql.indexOf("LIMIT $7 OFFSET $8"),
+    );
+  });
+
+  it("uses exact enum membership and applies it before pagination", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const repository = new BankRepository({ query } as never, "folio");
+
+    await repository.listImports("actor", {
+      limit: 51,
+      offset: 50,
+      filters: [
+        {
+          field: "state",
+          operator: "contains_any",
+          value: ["available", "awaiting_review"],
+        },
+      ],
+    });
+
+    const [importSql, importParameters] = query.mock.calls[0] as [
+      string,
+      unknown[],
+    ];
+    expect(importParameters).toEqual([
+      "commbank_transaction_history_csv_v1",
+      "actor",
+      ["available", "awaiting_review"],
+      51,
+      50,
+    ]);
+    expect(importSql).toContain("imports.state = ANY($3::text[])");
+    expect(importSql.indexOf("imports.state = ANY($3::text[])")).toBeLessThan(
+      importSql.indexOf("LIMIT $4 OFFSET $5"),
+    );
+
+    await repository.listImports("actor", {
+      limit: 51,
+      offset: 50,
+      filters: [
+        { field: "state", operator: "contains_none", value: ["rejected"] },
+      ],
+    });
+    const [negativeImportSql, negativeImportParameters] = query.mock
+      .calls[1] as [string, unknown[]];
+    expect(negativeImportParameters).toEqual([
+      "commbank_transaction_history_csv_v1",
+      "actor",
+      ["rejected"],
+      51,
+      50,
+    ]);
+    expect(negativeImportSql).toContain("imports.state <> ALL($3::text[])");
+
+    await repository.listTransactions("actor", {
+      limit: 51,
+      offset: 100,
+      filters: [
+        {
+          field: "reviewState",
+          operator: "contains_any",
+          value: ["unresolved", "private"],
+        },
+        {
+          field: "matchStatus",
+          operator: "contains_none",
+          value: ["matched"],
+        },
+      ],
+    });
+    const [activitySql, activityParameters] = query.mock.calls[2] as [
+      string,
+      unknown[],
+    ];
+    expect(activityParameters).toEqual([
+      "actor",
+      null,
+      null,
+      ["unresolved", "private"],
+      ["matched"],
+      51,
+      100,
+    ]);
+    expect(activitySql).toContain(
+      "ELSE 'unresolved' END = ANY($4::text[]) AND CASE WHEN bank.matched_transaction_id IS NOT NULL THEN 'matched' ELSE 'unmatched' END <> ALL($5::text[])",
+    );
+    expect(activitySql.indexOf("= ANY($4::text[])")).toBeLessThan(
+      activitySql.indexOf("ORDER BY bank.posted_date"),
+    );
+    expect(activitySql.indexOf("ORDER BY bank.posted_date")).toBeLessThan(
+      activitySql.indexOf("LIMIT $6 OFFSET $7"),
+    );
+
+    await repository.listTransactions("actor", {
+      limit: 51,
+      offset: 0,
+      filters: [{ field: "reviewState", operator: "contains_any", value: [] }],
+    });
+    const [emptyActivitySql, emptyActivityParameters] = query.mock.calls[3] as [
+      string,
+      unknown[],
+    ];
+    expect(emptyActivitySql).not.toContain("ANY(");
+    expect(emptyActivityParameters).toEqual(["actor", null, null, 51, 0]);
   });
 
   it("abandons only the actor's pending CommBank artifact", async () => {
@@ -665,5 +901,127 @@ describe("bank repository queries", () => {
         String(statement).startsWith('INSERT INTO "folio"."transactions"'),
       ),
     ).toBe(false);
+  });
+
+  it("selects the next unresolved row by descending date and ID and ranks its displayed page", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            status: "target",
+            bank_id: "33333333-3333-4333-8333-333333333333",
+            page: 2,
+          },
+        ],
+      });
+    const repository = new BankRepository({ query } as never, "folio");
+    const result = await repository.nextReconciliationTarget(
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "44444444-4444-4444-8444-444444444444",
+      true,
+    );
+
+    expect(result).toEqual({
+      status: "target",
+      bankId: "33333333-3333-4333-8333-333333333333",
+      page: 2,
+    });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[1]?.[1]).toEqual([
+      "22222222-2222-4222-8222-222222222222",
+      "44444444-4444-4444-8444-444444444444",
+      true,
+    ]);
+    const sql = String(query.mock.calls[1]?.[0]);
+    expect(sql).toContain(
+      "(queue.posted_date, queue.id) < (anchor.posted_date, anchor.id)",
+    );
+    expect(sql).toContain(
+      "(queue.posted_date, queue.id) > (anchor.posted_date, anchor.id)",
+    );
+    expect(sql).toContain("queue.id<>$1");
+    expect(sql).toContain("link.source_artifact_id=$2");
+    expect(sql).toContain("link.bank_transaction_id=$1");
+    expect(sql).toContain(
+      "SELECT id, posted_date, matched_transaction_id, classification",
+    );
+    expect(sql).toContain("THEN 'anchor_unresolved'");
+    expect(sql).toContain("NOT $3::boolean");
+    expect(sql).toContain("ORDER BY queue.posted_date DESC, queue.id DESC");
+    expect(sql).toContain(
+      "ORDER BY displayed.posted_date DESC, displayed.id DESC",
+    );
+    expect(sql).toContain("LIMIT 10100");
+    expect(sql).toContain(">= 10100 THEN 'queue_limit'");
+    expect(sql).toContain("/ 100) + 1");
+  });
+
+  it.each([1, 100, 101])(
+    "returns a valid one-based queue page at the page %i boundary",
+    async (page) => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({ rowCount: 1 })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              status: "target",
+              bank_id: "33333333-3333-4333-8333-333333333333",
+              page,
+            },
+          ],
+        });
+      const repository = new BankRepository({ query } as never, "folio");
+
+      await expect(
+        repository.nextReconciliationTarget(
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222",
+          undefined,
+          false,
+        ),
+      ).resolves.toEqual({
+        status: "target",
+        bankId: "33333333-3333-4333-8333-333333333333",
+        page,
+      });
+    },
+  );
+
+  it.each([
+    ["none", { status: "none" }],
+    [
+      "anchor_missing",
+      { status: "advance_incomplete", reason: "anchor_missing" },
+    ],
+    [
+      "anchor_outside_import",
+      { status: "advance_incomplete", reason: "anchor_outside_import" },
+    ],
+    [
+      "anchor_unresolved",
+      { status: "advance_incomplete", reason: "anchor_unresolved" },
+    ],
+    ["queue_limit", { status: "advance_incomplete", reason: "queue_limit" }],
+  ])("preserves the queue selection status: %s", async (status, expected) => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ status, bank_id: null, page: null }],
+      });
+    const repository = new BankRepository({ query } as never, "folio");
+
+    await expect(
+      repository.nextReconciliationTarget(
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        undefined,
+        false,
+      ),
+    ).resolves.toEqual(expected);
   });
 });

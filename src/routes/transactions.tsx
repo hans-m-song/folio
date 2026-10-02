@@ -1,12 +1,27 @@
+import { AutocompleteSelect } from "../components/autocomplete";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 
+import {
+  QueryChipBuilder,
+  type QueryChipClause,
+  type QueryChipField,
+} from "../components/query-chip-builder";
+import { BulkTransactionEditor } from "../components/bulk-transaction-editor";
+import { MoneyText } from "../components/money-text";
 import { TableIconAction } from "../components/table-icon-action";
 import { getCurrentSession } from "../auth/session-server";
+import { hasPermission, permissions } from "../server/authorization";
 import type { BalanceSeries } from "../domain/reports";
+import { bulkTransactionLimit } from "../domain/bulk-transactions";
 import { formatAudDecimal, sumDecimals } from "../domain/money";
 import { manualCashEffectAud } from "../domain/cash-effect";
+import {
+  invoiceStatusSchema,
+  transactionInvoiceLabel,
+  transactionInvoiceStatus,
+} from "../domain/invoice-status";
 import { settlementDisplayState } from "../domain/settlement";
 import {
   transactionKindSchema,
@@ -35,70 +50,116 @@ const queryComparisonOperatorSchema = z.enum([
   "less_than_or_equal",
 ]);
 
-const transactionSearchFilterSchema = z.discriminatedUnion("field", [
-  z
-    .object({
-      field: z.enum(["counterparty", "description"]),
-      operator: z.enum(["equals", "not_equals", "contains", "not_contains"]),
-      value: z.string().trim().min(1).max(2_000),
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("date"),
-      operator: queryComparisonOperatorSchema,
-      value: z.string().date(),
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("amount"),
-      operator: queryComparisonOperatorSchema,
-      value: z
-        .string()
-        .trim()
-        .min(1)
-        .max(100)
-        .regex(/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/)
-        .refine((value) => Number.isFinite(Number(value))),
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("kind"),
-      operator: z.enum(["is", "is_not"]),
-      value: transactionKindSchema,
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("status"),
-      operator: z.enum(["is", "is_not"]),
-      value: transactionStatusSchema,
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("source"),
-      operator: z.enum(["is", "is_not"]),
-      value: z.enum(["manual", "stripe"]),
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("settlement"),
-      operator: z.enum(["is", "is_not"]),
-      value: z.enum(["settled", "pending", "not_applicable"]),
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("evidence"),
-      operator: z.enum(["is", "is_not"]),
-      value: z.enum(["attached", "missing"]),
-    })
-    .strict(),
-]);
+const transactionSearchFilterSchema = z
+  .discriminatedUnion("field", [
+    z
+      .object({
+        field: z.enum(["counterparty", "description"]),
+        operator: z.enum(["equals", "not_equals", "contains", "not_contains"]),
+        value: z.string().trim().min(1).max(2_000),
+      })
+      .strict(),
+    z
+      .object({
+        field: z.literal("date"),
+        operator: queryComparisonOperatorSchema,
+        value: z.string().date(),
+      })
+      .strict(),
+    z
+      .object({
+        field: z.literal("amount"),
+        operator: queryComparisonOperatorSchema,
+        value: z
+          .string()
+          .trim()
+          .min(1)
+          .max(100)
+          .regex(/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/)
+          .refine((value) => Number.isFinite(Number(value))),
+      })
+      .strict(),
+    z
+      .object({
+        field: z.literal("kind"),
+        operator: z.enum(["is", "is_not", "contains_any", "contains_none"]),
+        value: z.union([
+          transactionKindSchema,
+          z.array(transactionKindSchema).max(20),
+        ]),
+      })
+      .strict(),
+    z
+      .object({
+        field: z.literal("status"),
+        operator: z.enum(["is", "is_not", "contains_any", "contains_none"]),
+        value: z.union([
+          transactionStatusSchema,
+          z.array(transactionStatusSchema).max(20),
+        ]),
+      })
+      .strict(),
+    z
+      .object({
+        field: z.literal("source"),
+        operator: z.enum(["is", "is_not", "contains_any", "contains_none"]),
+        value: z.union([
+          z.enum(["manual", "stripe"]),
+          z.array(z.enum(["manual", "stripe"])).max(20),
+        ]),
+      })
+      .strict(),
+    z
+      .object({
+        field: z.literal("settlement"),
+        operator: z.enum(["is", "is_not", "contains_any", "contains_none"]),
+        value: z.union([
+          z.enum(["settled", "pending", "not_applicable"]),
+          z.array(z.enum(["settled", "pending", "not_applicable"])).max(20),
+        ]),
+      })
+      .strict(),
+    z
+      .object({
+        field: z.literal("evidence"),
+        operator: z.enum(["is", "is_not", "contains_any", "contains_none"]),
+        value: z.union([
+          z.enum(["attached", "missing"]),
+          z.array(z.enum(["attached", "missing"])).max(20),
+        ]),
+      })
+      .strict(),
+    z
+      .object({
+        field: z.literal("invoice"),
+        operator: z.enum(["is", "is_not", "contains_any", "contains_none"]),
+        value: z.union([
+          invoiceStatusSchema,
+          z.array(invoiceStatusSchema).max(20),
+        ]),
+      })
+      .strict(),
+  ])
+  .superRefine((filter, context) => {
+    if (
+      filter.field === "counterparty" ||
+      filter.field === "description" ||
+      filter.field === "date" ||
+      filter.field === "amount"
+    )
+      return;
+
+    const membershipOperator =
+      filter.operator === "contains_any" || filter.operator === "contains_none";
+    if (membershipOperator !== Array.isArray(filter.value))
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["value"],
+        message: membershipOperator
+          ? "Choose one or more enum values."
+          : "Choose one enum value.",
+      });
+  });
 
 const transactionSortSchema = z
   .object({
@@ -107,10 +168,26 @@ const transactionSortSchema = z
   })
   .strict();
 
+const transactionBuilderClauseSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("filter"),
+      clause: transactionSearchFilterSchema,
+    })
+    .strict(),
+  z.object({ kind: z.literal("sort"), clause: transactionSortSchema }).strict(),
+]);
+
 const transactionSearchSchema = z.object({
   search: z.string().trim().max(200).catch(""),
   filters: z.array(transactionSearchFilterSchema).max(20).catch([]),
   sort: transactionSortSchema.catch({ key: "date", direction: "desc" }),
+  sortClauses: z.array(transactionSortSchema).max(4).catch([]),
+  clauses: z
+    .array(transactionBuilderClauseSchema)
+    .max(24)
+    .optional()
+    .catch(undefined),
   page: z.coerce.number().int().min(1).max(2_001).catch(1),
 });
 
@@ -125,6 +202,16 @@ export const Route = createFileRoute("/transactions")({
   loader: () => getCurrentSession(),
   component: FolioPage,
 });
+
+interface SelectedBulkTransaction {
+  id: string;
+  updatedAt: string;
+}
+
+interface BulkSelectionContext {
+  queryKey: string;
+  transactions: SelectedBulkTransaction[];
+}
 
 export const transactionStatusFromSubmitter = (
   submitter: unknown,
@@ -154,7 +241,8 @@ export type TransactionFilterField =
   | "status"
   | "source"
   | "settlement"
-  | "evidence";
+  | "evidence"
+  | "invoice";
 export type TransactionFilterOperator =
   | "equals"
   | "not_equals"
@@ -165,13 +253,15 @@ export type TransactionFilterOperator =
   | "less_than"
   | "less_than_or_equal"
   | "is"
-  | "is_not";
+  | "is_not"
+  | "contains_any"
+  | "contains_none";
 
 export interface TransactionFilterClause {
   id: number;
   field: TransactionFilterField;
   operator: TransactionFilterOperator;
-  value: string;
+  value: string | string[];
 }
 
 export type TransactionSortKey = "date" | "counterparty" | "amount" | "state";
@@ -180,6 +270,18 @@ export interface TransactionSort {
   key: TransactionSortKey;
   direction: "asc" | "desc";
 }
+
+export interface TransactionSortClause extends TransactionSort {
+  id: number;
+}
+
+export type TransactionBuilderClause =
+  | (TransactionFilterClause & { kind: "filter" })
+  | (TransactionSortClause & { kind: "sort" });
+
+type TransactionBuilderSearchClause = z.infer<
+  typeof transactionBuilderClauseSchema
+>;
 
 export const defaultTransactionFilterClauses: TransactionFilterClause[] = [];
 
@@ -196,6 +298,7 @@ export const transactionFilterFieldLabels: Record<
   source: "Source",
   settlement: "Settlement",
   evidence: "Evidence",
+  invoice: "Invoice / credit note",
 };
 
 type TransactionFilterValueKind = "text" | "date" | "number" | "enum";
@@ -213,6 +316,7 @@ export const transactionFilterValueKinds: Record<
   source: "enum",
   settlement: "enum",
   evidence: "enum",
+  invoice: "enum",
 };
 
 export const transactionFilterOperatorOptions: Record<
@@ -242,36 +346,238 @@ export const transactionFilterOperatorOptions: Record<
     { value: "less_than_or_equal", label: "≤" },
   ],
   enum: [
+    { value: "contains_any", label: "contains any of" },
+    { value: "contains_none", label: "contains none of" },
     { value: "is", label: "is" },
     { value: "is_not", label: "is not" },
   ],
 };
 
+const isTransactionMembershipOperator = (
+  operator: TransactionFilterOperator,
+): boolean => operator === "contains_any" || operator === "contains_none";
+
+const defaultTransactionFilterOperator = (
+  field: TransactionFilterField,
+): TransactionFilterOperator => {
+  const valueKind = transactionFilterValueKinds[field];
+  return valueKind === "text"
+    ? "contains"
+    : transactionFilterOperatorOptions[valueKind][0].value;
+};
+
+export const transactionFilterValueForOperator = (
+  field: TransactionFilterField,
+  operator: TransactionFilterOperator,
+  value: string | string[],
+): string | string[] => {
+  if (transactionFilterValueKinds[field] !== "enum")
+    return Array.isArray(value) ? (value[0] ?? "") : value;
+
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return isTransactionMembershipOperator(operator) ? values : (values[0] ?? "");
+};
+
 export const resetTransactionFilterField = (
   clause: TransactionFilterClause,
   field: TransactionFilterField,
-): TransactionFilterClause => ({
-  ...clause,
-  field,
-  operator:
-    transactionFilterOperatorOptions[transactionFilterValueKinds[field]][0]
-      .value,
-  value: "",
-});
+): TransactionFilterClause => {
+  const operator = defaultTransactionFilterOperator(field);
+  return {
+    ...clause,
+    field,
+    operator,
+    value:
+      transactionFilterValueKinds[field] === "enum" &&
+      isTransactionMembershipOperator(operator)
+        ? []
+        : "",
+  };
+};
 
 export const defaultTransactionSort: TransactionSort = {
   key: "date",
   direction: "desc",
 };
 
+export const transactionSortFieldLabels: Record<TransactionSortKey, string> = {
+  date: "Date",
+  counterparty: "Counterparty",
+  amount: "Amount",
+  state: "State",
+};
+
+export const uniqueTransactionSorts = (
+  clauses: readonly TransactionSort[],
+): TransactionSort[] => {
+  const seen = new Set<TransactionSortKey>();
+  return clauses.filter((clause) => {
+    if (seen.has(clause.key)) return false;
+    seen.add(clause.key);
+    return true;
+  });
+};
+
+export const effectiveTransactionSorts = (
+  search: Pick<TransactionSearch, "sort" | "sortClauses">,
+): TransactionSort[] => {
+  const clauses = uniqueTransactionSorts(search.sortClauses ?? []);
+  return clauses.length > 0 ? clauses : [search.sort ?? defaultTransactionSort];
+};
+
+export const transactionBuilderClausesForSearch = (
+  search: Pick<
+    TransactionSearch,
+    "filters" | "sort" | "sortClauses" | "clauses"
+  >,
+): TransactionBuilderClause[] => {
+  const clauses = search.clauses ?? [
+    ...search.filters.map((clause) => ({ kind: "filter" as const, clause })),
+    ...effectiveTransactionSorts(search).map((clause) => ({
+      kind: "sort" as const,
+      clause,
+    })),
+  ];
+  const seenSortKeys = new Set<TransactionSortKey>();
+  const normalizedClauses: TransactionBuilderSearchClause[] = [];
+  for (const clause of clauses) {
+    if (clause.kind === "filter") {
+      normalizedClauses.push(clause);
+      continue;
+    }
+    if (seenSortKeys.has(clause.clause.key)) continue;
+    seenSortKeys.add(clause.clause.key);
+    normalizedClauses.push(clause);
+  }
+
+  if (!normalizedClauses.some((clause) => clause.kind === "sort"))
+    normalizedClauses.push({ kind: "sort", clause: defaultTransactionSort });
+
+  return normalizedClauses.map((clause, index) =>
+    clause.kind === "filter"
+      ? { ...clause.clause, kind: "filter", id: index + 1 }
+      : { ...clause.clause, kind: "sort", id: index + 1 },
+  );
+};
+
+export const transactionBuilderClausesForUrl = (
+  clauses: readonly TransactionBuilderClause[],
+): TransactionBuilderSearchClause[] => {
+  const seenSortKeys = new Set<TransactionSortKey>();
+  const searchClauses: TransactionBuilderSearchClause[] = [];
+
+  for (const clause of clauses) {
+    if (clause.kind === "filter") {
+      const value = Array.isArray(clause.value)
+        ? clause.value
+        : clause.value.trim();
+      const parsed = transactionSearchFilterSchema.safeParse({
+        field: clause.field,
+        operator: clause.operator,
+        value,
+      });
+      if (parsed.success)
+        searchClauses.push({ kind: "filter", clause: parsed.data });
+      continue;
+    }
+
+    if (seenSortKeys.has(clause.key)) continue;
+    seenSortKeys.add(clause.key);
+    searchClauses.push({
+      kind: "sort",
+      clause: { key: clause.key, direction: clause.direction },
+    });
+  }
+
+  return searchClauses;
+};
+
+const transactionChipClausesFromBuilder = (
+  clauses: readonly TransactionBuilderClause[],
+): QueryChipClause[] =>
+  clauses.map((clause) =>
+    clause.kind === "filter"
+      ? {
+          id: clause.id,
+          type: "filter",
+          field: clause.field,
+          operator: clause.operator,
+          value: clause.value,
+        }
+      : {
+          id: clause.id,
+          type: "sort",
+          field: clause.key,
+          operator: clause.direction,
+          value: "",
+        },
+  );
+
+const transactionBuilderClausesFromChips = (
+  clauses: readonly QueryChipClause[],
+): TransactionBuilderClause[] => {
+  const seenSortKeys = new Set<TransactionSortKey>();
+  return clauses.flatMap<TransactionBuilderClause>(
+    (clause): TransactionBuilderClause[] => {
+      if (clause.type === "filter")
+        return [
+          {
+            id: clause.id,
+            kind: "filter" as const,
+            field: clause.field as TransactionFilterField,
+            operator: clause.operator as TransactionFilterOperator,
+            value: clause.value,
+          },
+        ];
+
+      const key = clause.field as TransactionSortKey;
+      if (seenSortKeys.has(key)) return [];
+      seenSortKeys.add(key);
+      return [
+        {
+          id: clause.id,
+          kind: "sort" as const,
+          key,
+          direction: clause.operator as TransactionSort["direction"],
+        },
+      ];
+    },
+  );
+};
+
+const isTransactionChipClauseValid = (clause: QueryChipClause): boolean => {
+  const parsed =
+    clause.type === "filter"
+      ? transactionSearchFilterSchema.safeParse({
+          field: clause.field,
+          operator: clause.operator,
+          value: Array.isArray(clause.value)
+            ? clause.value
+            : clause.value.trim(),
+        })
+      : transactionSortSchema.safeParse({
+          key: clause.field,
+          direction: clause.operator,
+        });
+
+  return parsed.success;
+};
+
+const defaultTransactionQueryChipSort: readonly QueryChipClause[] = [
+  { id: 0, type: "sort", field: "date", operator: "desc", value: "" },
+];
+
 export const transactionFiltersForPage = (
   clauses: readonly TransactionFilterClause[],
 ): TransactionSearch["filters"] =>
   clauses.flatMap((clause) => {
+    const value = Array.isArray(clause.value)
+      ? clause.value
+      : clause.value.trim();
     const parsed = transactionSearchFilterSchema.safeParse({
       field: clause.field,
       operator: clause.operator,
-      value: clause.value.trim(),
+      value,
     });
     return parsed.success ? [parsed.data] : [];
   });
@@ -280,6 +586,9 @@ export const transactionPageQueryForSearch = (search: TransactionSearch) => ({
   search: search.search,
   filters: search.filters,
   sort: search.sort,
+  ...(search.sortClauses?.length > 0
+    ? { sortClauses: effectiveTransactionSorts(search) }
+    : {}),
   page: search.page,
 });
 
@@ -425,9 +734,13 @@ const signedTransactionAmount = (
 ): number | null => {
   if (value === null || value === 0) return value;
   if (
-    ["supplier_expense", "processing_fee", "sale_refund", "dispute"].includes(
-      transaction.kind,
-    )
+    [
+      "supplier_expense",
+      "processing_fee",
+      "sale_refund",
+      "dispute",
+      "owner_loan_repayment",
+    ].includes(transaction.kind)
   )
     return -Math.abs(value);
   if (
@@ -599,14 +912,17 @@ export const filterTransactions = (
         ? "attached"
         : "missing";
     return clauses.every((clause) => {
-      const value = clause.value.trim();
-      if (!value) return true;
+      const value = Array.isArray(clause.value)
+        ? clause.value
+        : clause.value.trim();
+      if (typeof value === "string" ? !value : value.length === 0) return true;
       const valueKind = transactionFilterValueKinds[clause.field];
       const allowedOperators = transactionFilterOperatorOptions[valueKind];
       if (!allowedOperators.some(({ value }) => value === clause.operator))
         return true;
 
       if (valueKind === "text") {
+        if (typeof value !== "string") return true;
         const candidate =
           clause.field === "counterparty"
             ? transactionCounterparty(transaction)
@@ -626,11 +942,22 @@ export const filterTransactions = (
           source: transaction.sourceSystem,
           settlement,
           evidence,
+          invoice: transactionInvoiceStatus(transaction),
         };
         const candidate = candidates[clause.field as keyof typeof candidates];
-        const matches = candidate === value;
-        return clause.operator === "is" ? matches : !matches;
+        if (Array.isArray(value)) {
+          if (clause.operator === "contains_any")
+            return value.includes(candidate);
+          if (clause.operator === "contains_none")
+            return !value.includes(candidate);
+          return true;
+        }
+        if (clause.operator === "is") return candidate === value;
+        if (clause.operator === "is_not") return candidate !== value;
+        return true;
       }
+
+      if (typeof value !== "string") return true;
 
       if (valueKind === "date") {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return true;
@@ -919,15 +1246,23 @@ const LifetimeMovementSummary = ({
           <dl className="transaction-lifetime-summary__metrics">
             <div>
               <dt>Inflows</dt>
-              <dd>{formatAmount(summary.inflowAud)}</dd>
+              <dd>
+                <MoneyText>{formatAmount(summary.inflowAud)}</MoneyText>
+              </dd>
             </div>
             <div>
               <dt>Outflows</dt>
-              <dd>{formatAmount(summary.outflowAud)}</dd>
+              <dd>
+                <MoneyText>{formatAmount(summary.outflowAud)}</MoneyText>
+              </dd>
             </div>
             <div>
               <dt>Net movement</dt>
-              <dd>{formatAudDecimal(summary.netMovementAud)}</dd>
+              <dd>
+                <MoneyText>
+                  {formatAudDecimal(summary.netMovementAud)}
+                </MoneyText>
+              </dd>
             </div>
             <div>
               <dt>Included transactions</dt>
@@ -1060,7 +1395,11 @@ function FolioPage() {
   const authentication = Route.useLoaderData();
   const routeSearch = Route.useSearch();
   const navigate = useNavigate({ from: "/transactions" });
+  const canWriteTransactions =
+    authentication.authenticated &&
+    hasPermission(authentication.user.role, permissions.transactionWrite);
   const transactionPageRequestRef = useRef(0);
+  const pageSelectionCheckboxRef = useRef<HTMLInputElement>(null);
   const workspaceRequestRef = useRef(0);
   const [transactionPageReloadVersion, setTransactionPageReloadVersion] =
     useState(0);
@@ -1074,12 +1413,14 @@ function FolioPage() {
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [search, setSearch] = useState(routeSearch.search);
-  const [transactionFilters, setTransactionFilters] = useState<
-    TransactionFilterClause[]
-  >(() =>
-    routeSearch.filters.map((filter, index) => ({ ...filter, id: index + 1 })),
+  const [transactionBuilderClauses, setTransactionBuilderClauses] = useState<
+    TransactionBuilderClause[]
+  >(() => transactionBuilderClausesForSearch(routeSearch));
+  const lastAppliedBuilderDraftRef = useRef(
+    JSON.stringify(transactionBuilderClauses),
   );
-  const nextFilterIdRef = useRef(routeSearch.filters.length + 1);
+  const selfAppliedBuilderKeyRef = useRef<string | null>(null);
+  const nextBuilderClauseIdRef = useRef(transactionBuilderClauses.length + 1);
   const lifetimeReportRequestRef = useRef(0);
   const [lifetimeReportState, setLifetimeReportState] =
     useState<LifetimeReportState>(() =>
@@ -1098,8 +1439,21 @@ function FolioPage() {
       : "Sign in to open the workspace.",
   );
   const [evidenceMessage, setEvidenceMessage] = useState("");
+  const [bulkSelectionContext, setBulkSelectionContext] =
+    useState<BulkSelectionContext>({ queryKey: "", transactions: [] });
+  const [bulkEditorOpen, setBulkEditorOpen] = useState(false);
+  const [bulkApplyBusy, setBulkApplyBusy] = useState(false);
   const transactionPageQuery = transactionPageQueryForSearch(routeSearch);
+  const primarySort =
+    effectiveTransactionSorts(routeSearch)[0] ?? defaultTransactionSort;
   const transactionPageQueryKey = JSON.stringify(transactionPageQuery);
+  const selectedBulkTransactions =
+    bulkSelectionContext.queryKey === transactionPageQueryKey
+      ? bulkSelectionContext.transactions
+      : [];
+  const selectedBulkTransactionIds = new Set(
+    selectedBulkTransactions.map(({ id }) => id),
+  );
   const transactionPageResult =
     transactionPageState.status === "ready" &&
     transactionPageState.queryKey === transactionPageQueryKey
@@ -1139,6 +1493,23 @@ function FolioPage() {
     ((transactionPageState.status === "ready" ||
       transactionPageState.status === "error") &&
       transactionPageState.queryKey !== transactionPageQueryKey);
+  const selectableTransactions = transactionPageData.items.filter(
+    (item) => item.status !== "void",
+  );
+  const selectedSelectableCount = selectableTransactions.filter((item) =>
+    selectedBulkTransactionIds.has(item.id),
+  ).length;
+  const allSelectableTransactionsSelected =
+    selectableTransactions.length > 0 &&
+    selectedSelectableCount === selectableTransactions.length;
+  const partiallySelectedTransactions =
+    selectedSelectableCount > 0 && !allSelectableTransactionsSelected;
+
+  useEffect(() => {
+    if (pageSelectionCheckboxRef.current)
+      pageSelectionCheckboxRef.current.indeterminate =
+        partiallySelectedTransactions;
+  }, [partiallySelectedTransactions]);
   const transactionFilterOptions: Partial<
     Record<TransactionFilterField, readonly { value: string; label: string }[]>
   > = {
@@ -1164,7 +1535,28 @@ function FolioPage() {
       { value: "attached", label: "Attached" },
       { value: "missing", label: "Missing" },
     ],
+    invoice: [
+      { value: "attached", label: "Attached" },
+      { value: "missing", label: "Missing" },
+      { value: "not_expected", label: "Not expected" },
+    ],
   };
+  const transactionQueryFilterFields: QueryChipField[] = (
+    Object.keys(transactionFilterFieldLabels) as TransactionFilterField[]
+  ).map((field) => ({
+    value: field,
+    label: transactionFilterFieldLabels[field],
+    valueKind: transactionFilterValueKinds[field],
+    operators:
+      transactionFilterOperatorOptions[transactionFilterValueKinds[field]],
+    options: transactionFilterOptions[field] ?? [],
+  }));
+  const transactionQuerySortFields = (
+    Object.keys(transactionSortFieldLabels) as TransactionSortKey[]
+  ).map((field) => ({
+    value: field,
+    label: transactionSortFieldLabels[field],
+  }));
   const updateTransactionSearch = (
     updates: Partial<TransactionSearch>,
     replace = false,
@@ -1172,6 +1564,88 @@ function FolioPage() {
     void navigate({
       replace,
       search: (previous) => ({ ...previous, ...updates }),
+    });
+  };
+
+  const updateBulkSelection = (transactions: SelectedBulkTransaction[]) => {
+    setBulkSelectionContext({
+      queryKey: transactionPageQueryKey,
+      transactions: transactions.slice(0, bulkTransactionLimit),
+    });
+    setBulkEditorOpen(transactions.length > 0);
+  };
+
+  const selectCurrentPageTransactions = () => {
+    if (transactionPageBusy || bulkApplyBusy) return;
+    updateBulkSelection(
+      selectableTransactions.map(({ id, updatedAt }) => ({ id, updatedAt })),
+    );
+  };
+
+  const setCurrentPageTransactionsSelected = (selected: boolean) => {
+    if (transactionPageBusy || bulkApplyBusy) return;
+    if (!selected) {
+      updateBulkSelection([]);
+      return;
+    }
+
+    const currentSnapshots = new Map(
+      selectedBulkTransactions.map(({ id, updatedAt }) => [id, updatedAt]),
+    );
+    updateBulkSelection(
+      selectableTransactions.map(({ id, updatedAt }) => ({
+        id,
+        updatedAt: currentSnapshots.get(id) ?? updatedAt,
+      })),
+    );
+  };
+
+  const setTransactionSelected = (
+    item: TransactionRecord,
+    selected: boolean,
+  ) => {
+    if (bulkApplyBusy || item.status === "void") return;
+    const current =
+      bulkSelectionContext.queryKey === transactionPageQueryKey
+        ? bulkSelectionContext.transactions
+        : [];
+    const next = selected
+      ? current.some(({ id }) => id === item.id)
+        ? current
+        : [...current, { id: item.id, updatedAt: item.updatedAt }]
+      : current.filter(({ id }) => id !== item.id);
+    updateBulkSelection(next);
+  };
+
+  const clearBulkSelection = () => updateBulkSelection([]);
+
+  const setPrimaryTransactionSort = (sort: TransactionSort) => {
+    const currentClauses = transactionBuilderClausesForSearch(routeSearch);
+    const nextClauses: TransactionBuilderClause[] = [];
+    let replacedPrimarySort = false;
+
+    for (const clause of currentClauses) {
+      if (clause.kind === "filter") {
+        nextClauses.push(clause);
+        continue;
+      }
+      if (replacedPrimarySort) continue;
+      nextClauses.push({ ...clause, ...sort });
+      replacedPrimarySort = true;
+    }
+
+    if (!replacedPrimarySort)
+      nextClauses.push({
+        ...sort,
+        kind: "sort",
+        id: nextBuilderClauseIdRef.current++,
+      });
+
+    updateTransactionSearch({
+      sort,
+      sortClauses: [],
+      clauses: transactionBuilderClausesForUrl(nextClauses),
+      page: 1,
     });
   };
 
@@ -1261,6 +1735,14 @@ function FolioPage() {
   }, []);
 
   useEffect(() => {
+    setBulkSelectionContext({
+      queryKey: transactionPageQueryKey,
+      transactions: [],
+    });
+    setBulkEditorOpen(false);
+  }, [transactionPageQueryKey]);
+
+  useEffect(() => {
     if (!authentication.authenticated) return;
     const request = ++transactionPageRequestRef.current;
     setTransactionPageState({
@@ -1304,15 +1786,58 @@ function FolioPage() {
   ]);
 
   const appliedFiltersKey = JSON.stringify(routeSearch.filters);
+  const appliedSortsKey = JSON.stringify([
+    routeSearch.sort,
+    routeSearch.sortClauses,
+  ]);
+  const appliedBuilderClausesKey = JSON.stringify(routeSearch.clauses);
   useEffect(() => {
+    if (selfAppliedBuilderKeyRef.current === appliedBuilderClausesKey) {
+      selfAppliedBuilderKeyRef.current = null;
+      return;
+    }
     setSearch(routeSearch.search);
-    const nextFilters = routeSearch.filters.map((filter, index) => ({
-      ...filter,
-      id: index + 1,
-    }));
-    setTransactionFilters(nextFilters);
-    nextFilterIdRef.current = nextFilters.length + 1;
-  }, [appliedFiltersKey, routeSearch.search]);
+    const nextClauses = transactionBuilderClausesForSearch(routeSearch);
+    lastAppliedBuilderDraftRef.current = JSON.stringify(nextClauses);
+    setTransactionBuilderClauses(nextClauses);
+    nextBuilderClauseIdRef.current = nextClauses.length + 1;
+  }, [
+    appliedBuilderClausesKey,
+    appliedFiltersKey,
+    appliedSortsKey,
+    routeSearch.search,
+  ]);
+
+  useEffect(() => {
+    const draftKey = JSON.stringify(transactionBuilderClauses);
+    if (lastAppliedBuilderDraftRef.current === draftKey) return;
+    lastAppliedBuilderDraftRef.current = draftKey;
+    const timeout = window.setTimeout(() => {
+      const clauses = transactionBuilderClausesForUrl(
+        transactionBuilderClauses,
+      );
+      const nextKey = JSON.stringify(clauses);
+      if (nextKey === appliedBuilderClausesKey) return;
+      const filters = clauses.flatMap((clause) =>
+        clause.kind === "filter" ? [clause.clause] : [],
+      );
+      const sortClauses = clauses.flatMap((clause) =>
+        clause.kind === "sort" ? [clause.clause] : [],
+      );
+      selfAppliedBuilderKeyRef.current = nextKey;
+      updateTransactionSearch(
+        {
+          filters,
+          sort: sortClauses[0] ?? defaultTransactionSort,
+          sortClauses: sortClauses.length > 1 ? sortClauses : [],
+          clauses,
+          page: 1,
+        },
+        true,
+      );
+    }, 300);
+    return () => window.clearTimeout(timeout);
+  }, [transactionBuilderClauses, appliedBuilderClausesKey]);
 
   const downloadTransactionEvidence = async (
     transaction: TransactionRecord,
@@ -1393,7 +1918,8 @@ function FolioPage() {
         <div>
           <section
             aria-labelledby="transactions-heading"
-            aria-busy={transactionPageBusy}
+            aria-busy={transactionPageBusy || bulkApplyBusy}
+            inert={bulkApplyBusy}
           >
             <div className="section-heading">
               <h2 id="transactions-heading">Transactions</h2>
@@ -1432,6 +1958,77 @@ function FolioPage() {
                 <button disabled={transactionPageBusy}>Search</button>
               </form>
             </div>
+            {canWriteTransactions && (
+              <div
+                className="bulk-selection-toolbar"
+                role="group"
+                aria-label="Select transactions for a bulk edit"
+              >
+                <p aria-live="polite">
+                  {selectedBulkTransactions.length} selected on this page
+                </p>
+                <div className="actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={
+                      transactionPageBusy ||
+                      bulkApplyBusy ||
+                      selectableTransactions.length === 0
+                    }
+                    onClick={selectCurrentPageTransactions}
+                  >
+                    {allSelectableTransactionsSelected
+                      ? "Reselect this page"
+                      : "Select this page"}
+                  </button>
+                  {selectedBulkTransactions.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={bulkApplyBusy}
+                        onClick={clearBulkSelection}
+                      >
+                        Clear selection
+                      </button>
+                      {!bulkEditorOpen && (
+                        <button
+                          type="button"
+                          disabled={bulkApplyBusy}
+                          onClick={() => setBulkEditorOpen(true)}
+                        >
+                          Edit selected transactions
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+            {canWriteTransactions &&
+              bulkEditorOpen &&
+              bulkSelectionContext.queryKey === transactionPageQueryKey && (
+                <BulkTransactionEditor
+                  transactions={selectedBulkTransactions}
+                  onApplyBusyChange={setBulkApplyBusy}
+                  onApplyFailed={() => {
+                    setBulkSelectionContext({
+                      queryKey: transactionPageQueryKey,
+                      transactions: [],
+                    });
+                    refreshTransactionPage();
+                  }}
+                  onClose={() => setBulkEditorOpen(false)}
+                  onApplied={() => {
+                    setBulkSelectionContext({
+                      queryKey: transactionPageQueryKey,
+                      transactions: [],
+                    });
+                    refreshTransactionPage();
+                  }}
+                />
+              )}
             {evidenceMessage && (
               <p role="status" aria-live="polite">
                 {evidenceMessage}
@@ -1442,176 +2039,23 @@ function FolioPage() {
                 Filtered transactions for “{routeSearch.search}”.
               </p>
             )}
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                updateTransactionSearch({
-                  filters: transactionFiltersForPage(transactionFilters),
-                  page: 1,
-                });
-              }}
-            >
-              <div className="filter-builder" aria-label="Transaction filters">
-                <div className="filter-builder-heading">
-                  <span>Match all clauses</span>
-                  <button
-                    type="button"
-                    className="secondary compact-button"
-                    disabled={transactionFilters.length >= 20}
-                    onClick={() =>
-                      setTransactionFilters((current) => [
-                        ...current,
-                        {
-                          id: nextFilterIdRef.current++,
-                          field: "counterparty",
-                          operator: "contains",
-                          value: "",
-                        },
-                      ])
-                    }
-                  >
-                    Add filter
-                  </button>
-                </div>
-                {transactionFilters.length === 0 ? (
-                  <p className="field-help">No filters applied.</p>
-                ) : (
-                  transactionFilters.map((clause) => (
-                    <div className="filter-clause" key={clause.id}>
-                      <label>
-                        <span className="sr-only">Filter field</span>
-                        <select
-                          aria-label="Filter field"
-                          value={clause.field}
-                          onChange={(event) => {
-                            const field = event.currentTarget
-                              .value as TransactionFilterField;
-                            setTransactionFilters((current) =>
-                              current.map((item) =>
-                                item.id === clause.id
-                                  ? resetTransactionFilterField(item, field)
-                                  : item,
-                              ),
-                            );
-                          }}
-                        >
-                          {Object.entries(transactionFilterFieldLabels).map(
-                            ([value, label]) => (
-                              <option key={value} value={value}>
-                                {label}
-                              </option>
-                            ),
-                          )}
-                        </select>
-                      </label>
-                      <label>
-                        <span className="sr-only">Filter operator</span>
-                        <select
-                          aria-label="Filter operator"
-                          value={clause.operator}
-                          onChange={(event) => {
-                            const operator = event.currentTarget
-                              .value as TransactionFilterOperator;
-                            setTransactionFilters((current) =>
-                              current.map((item) =>
-                                item.id === clause.id
-                                  ? { ...item, operator }
-                                  : item,
-                              ),
-                            );
-                          }}
-                        >
-                          {transactionFilterOperatorOptions[
-                            transactionFilterValueKinds[clause.field]
-                          ].map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label>
-                        <span className="sr-only">Filter value</span>
-                        {transactionFilterValueKinds[clause.field] ===
-                        "enum" ? (
-                          <select
-                            aria-label={`${transactionFilterFieldLabels[clause.field]} filter value`}
-                            value={clause.value}
-                            onChange={(event) => {
-                              const value = event.currentTarget.value;
-                              setTransactionFilters((current) =>
-                                current.map((item) =>
-                                  item.id === clause.id
-                                    ? { ...item, value }
-                                    : item,
-                                ),
-                              );
-                            }}
-                          >
-                            <option value="">Choose a value</option>
-                            {(transactionFilterOptions[clause.field] ?? []).map(
-                              (option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ),
-                            )}
-                          </select>
-                        ) : (
-                          <input
-                            aria-label={`${transactionFilterFieldLabels[clause.field]} filter value`}
-                            type={transactionFilterValueKinds[clause.field]}
-                            step={
-                              transactionFilterValueKinds[clause.field] ===
-                              "number"
-                                ? "any"
-                                : undefined
-                            }
-                            value={clause.value}
-                            onChange={(event) => {
-                              const value = event.currentTarget.value;
-                              setTransactionFilters((current) =>
-                                current.map((item) =>
-                                  item.id === clause.id
-                                    ? { ...item, value }
-                                    : item,
-                                ),
-                              );
-                            }}
-                          />
-                        )}
-                      </label>
-                      <button
-                        type="button"
-                        className="link danger compact-button"
-                        aria-label={`Remove ${transactionFilterFieldLabels[clause.field]} filter`}
-                        title={`Remove ${transactionFilterFieldLabels[clause.field]} filter`}
-                        onClick={() => {
-                          setTransactionFilters((current) =>
-                            current.filter((item) => item.id !== clause.id),
-                          );
-                        }}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-              <div className="actions">
-                <button type="submit">Apply filters</button>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => {
-                    setTransactionFilters([]);
-                    updateTransactionSearch({ filters: [], page: 1 });
-                  }}
-                >
-                  Reset filters
-                </button>
-              </div>
-            </form>
+            <QueryChipBuilder
+              label="Transaction filter and sort builder"
+              clauses={transactionChipClausesFromBuilder(
+                transactionBuilderClauses,
+              )}
+              filterFields={transactionQueryFilterFields}
+              sortFields={transactionQuerySortFields}
+              onChange={(clauses) =>
+                setTransactionBuilderClauses(
+                  transactionBuilderClausesFromChips(clauses),
+                )
+              }
+              defaultSort={defaultTransactionQueryChipSort}
+              isClauseValid={isTransactionChipClauseValid}
+              maxFilters={20}
+              maxSorts={4}
+            />
             {transactionPageState.status === "error" &&
               transactionPageState.queryKey === transactionPageQueryKey && (
                 <div className="transaction-query-error">
@@ -1637,15 +2081,13 @@ function FolioPage() {
             <div className="mobile-sort" aria-label="Transaction sorting">
               <label>
                 Sort by
-                <select
-                  value={routeSearch.sort.key}
-                  onChange={(event) => {
-                    updateTransactionSearch({
-                      sort: {
-                        key: event.currentTarget.value as TransactionSortKey,
-                        direction: "asc",
-                      },
-                      page: 1,
+                <AutocompleteSelect
+                  aria-label="Sort by"
+                  value={primarySort.key}
+                  onValueChange={(event) => {
+                    setPrimaryTransactionSort({
+                      key: event as TransactionSortKey,
+                      direction: "asc",
                     });
                   }}
                 >
@@ -1653,32 +2095,60 @@ function FolioPage() {
                   <option value="counterparty">Counterparty</option>
                   <option value="amount">Amount</option>
                   <option value="state">State</option>
-                </select>
+                </AutocompleteSelect>
               </label>
               <label>
                 Direction
-                <select
-                  value={routeSearch.sort.direction}
-                  onChange={(event) => {
-                    updateTransactionSearch({
-                      sort: {
-                        ...routeSearch.sort,
-                        direction: event.currentTarget
-                          .value as TransactionSort["direction"],
-                      },
-                      page: 1,
+                <AutocompleteSelect
+                  aria-label="Direction"
+                  value={primarySort.direction}
+                  onValueChange={(event) => {
+                    setPrimaryTransactionSort({
+                      ...primarySort,
+                      direction: event as TransactionSort["direction"],
                     });
                   }}
                 >
                   <option value="asc">Ascending</option>
                   <option value="desc">Descending</option>
-                </select>
+                </AutocompleteSelect>
               </label>
             </div>
             <div className="table-wrap">
-              <table className="transaction-table">
+              <table
+                className={
+                  canWriteTransactions
+                    ? "transaction-table transaction-table--bulk-selection"
+                    : "transaction-table"
+                }
+              >
                 <thead>
                   <tr>
+                    {canWriteTransactions && (
+                      <th scope="col" className="bulk-selection-cell">
+                        <input
+                          ref={pageSelectionCheckboxRef}
+                          type="checkbox"
+                          aria-label="Select all visible transactions"
+                          aria-checked={
+                            partiallySelectedTransactions
+                              ? "mixed"
+                              : allSelectableTransactionsSelected
+                          }
+                          checked={allSelectableTransactionsSelected}
+                          disabled={
+                            transactionPageBusy ||
+                            bulkApplyBusy ||
+                            selectableTransactions.length === 0
+                          }
+                          onChange={(event) =>
+                            setCurrentPageTransactionsSelected(
+                              event.currentTarget.checked,
+                            )
+                          }
+                        />
+                      </th>
+                    )}
                     {(
                       [
                         ["date", "Date"],
@@ -1689,8 +2159,8 @@ function FolioPage() {
                         scope="col"
                         key={key}
                         aria-sort={
-                          routeSearch.sort.key === key
-                            ? routeSearch.sort.direction === "asc"
+                          primarySort.key === key
+                            ? primarySort.direction === "asc"
                               ? "ascending"
                               : "descending"
                             : "none"
@@ -1700,15 +2170,14 @@ function FolioPage() {
                           type="button"
                           className="sort-button"
                           onClick={() => {
-                            updateTransactionSearch({
-                              sort: nextTransactionSort(routeSearch.sort, key),
-                              page: 1,
-                            });
+                            setPrimaryTransactionSort(
+                              nextTransactionSort(primarySort, key),
+                            );
                           }}
                         >
                           {label}
-                          {routeSearch.sort.key === key
-                            ? routeSearch.sort.direction === "asc"
+                          {primarySort.key === key
+                            ? primarySort.direction === "asc"
                               ? " ↑"
                               : " ↓"
                             : ""}
@@ -1726,9 +2195,12 @@ function FolioPage() {
                       <th
                         scope="col"
                         key={key}
+                        className={
+                          key === "amount" ? "money-column" : undefined
+                        }
                         aria-sort={
-                          routeSearch.sort.key === key
-                            ? routeSearch.sort.direction === "asc"
+                          primarySort.key === key
+                            ? primarySort.direction === "asc"
                               ? "ascending"
                               : "descending"
                             : "none"
@@ -1736,17 +2208,20 @@ function FolioPage() {
                       >
                         <button
                           type="button"
-                          className="sort-button"
+                          className={
+                            key === "amount"
+                              ? "sort-button money-column"
+                              : "sort-button"
+                          }
                           onClick={() => {
-                            updateTransactionSearch({
-                              sort: nextTransactionSort(routeSearch.sort, key),
-                              page: 1,
-                            });
+                            setPrimaryTransactionSort(
+                              nextTransactionSort(primarySort, key),
+                            );
                           }}
                         >
                           {label}
-                          {routeSearch.sort.key === key
-                            ? routeSearch.sort.direction === "asc"
+                          {primarySort.key === key
+                            ? primarySort.direction === "asc"
                               ? " ↑"
                               : " ↓"
                             : ""}
@@ -1759,7 +2234,11 @@ function FolioPage() {
                 <tbody>
                   {transactionPageData.items.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="table-empty" role="status">
+                      <td
+                        colSpan={canWriteTransactions ? 8 : 7}
+                        className="table-empty"
+                        role="status"
+                      >
                         {transactionPageBusy
                           ? "Loading transactions…"
                           : transactionPageState.status === "error" &&
@@ -1780,6 +2259,31 @@ function FolioPage() {
                       const evidenceLabel = transactionEvidenceLabel(item);
                       return (
                         <tr key={item.id}>
+                          {canWriteTransactions && (
+                            <td
+                              data-label="Select"
+                              className="bulk-selection-cell"
+                            >
+                              <input
+                                type="checkbox"
+                                aria-label={`Select transaction: ${transactionDescription(item)}`}
+                                checked={selectedBulkTransactionIds.has(
+                                  item.id,
+                                )}
+                                disabled={
+                                  bulkApplyBusy ||
+                                  transactionPageBusy ||
+                                  item.status === "void"
+                                }
+                                onChange={(event) =>
+                                  setTransactionSelected(
+                                    item,
+                                    event.currentTarget.checked,
+                                  )
+                                }
+                              />
+                            </td>
+                          )}
                           <td data-label="Date">
                             {formatTransactionDate(item, reportingTimezone)}
                           </td>
@@ -1792,19 +2296,33 @@ function FolioPage() {
                           <td data-label="Type">
                             {transactionKindLabels[item.kind]}
                           </td>
-                          <td data-label="Amount" className="amount-cell">
-                            <span
+                          <td
+                            data-label="Amount"
+                            className="amount-cell money-column"
+                          >
+                            <MoneyText
                               className={`amount-primary amount-${amount.tone}`}
                             >
                               {formatAudAmount(amount.aud)}
-                            </span>
-                            {amount.source && <small>{amount.source}</small>}
+                            </MoneyText>
+                            {amount.source && (
+                              <MoneyText as="small">{amount.source}</MoneyText>
+                            )}
                             {amount.detail && <small>{amount.detail}</small>}
                           </td>
                           <td data-label="State">
                             <span className="state-cell-label">
                               {transactionStateLabel(item)}
                             </span>
+                            <small
+                              className={
+                                transactionInvoiceStatus(item) === "missing"
+                                  ? "missing-evidence"
+                                  : undefined
+                              }
+                            >
+                              {transactionInvoiceLabel(item)}
+                            </small>
                             {item.sourceArtifactId ? (
                               <button
                                 type="button"

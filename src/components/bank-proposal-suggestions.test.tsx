@@ -53,7 +53,7 @@ describe("bank proposal suggestions", () => {
     expect(screen.queryByRole("button", { name: /match/i })).toBeNull();
   });
 
-  it("shows existing matches for review and omits void drafts", () => {
+  it("keeps an actionable match suggestion but omits recorded and void drafts", () => {
     render(
       <BankProposalSuggestions
         bankTransactionId="33333333-3333-4333-8333-333333333333"
@@ -67,6 +67,10 @@ describe("bank proposal suggestions", () => {
           }),
           suggestion({
             submissionId: "44444444-4444-4444-8444-444444444444",
+            transaction: { ...suggestion().transaction, status: "recorded" },
+          }),
+          suggestion({
+            submissionId: "55555555-5555-4555-8555-555555555555",
             actionability: "void",
             transaction: { ...suggestion().transaction, status: "void" },
           }),
@@ -77,10 +81,11 @@ describe("bank proposal suggestions", () => {
     expect(
       screen.getAllByRole("link", { name: "Review transaction" }),
     ).toHaveLength(1);
-    expect(screen.queryByText("Suggested draft")).toBeNull();
+    expect(screen.getByText("Suggested match")).toBeTruthy();
+    expect(screen.queryByText("Recorded transaction")).toBeNull();
   });
 
-  it("warns when a suggestion is stale or its bank row is resolved", () => {
+  it("keeps drafts visible when the bank row is resolved", () => {
     render(
       <BankProposalSuggestions
         bankTransactionId="33333333-3333-4333-8333-333333333333"
@@ -89,11 +94,6 @@ describe("bank proposal suggestions", () => {
           suggestion({
             submissionId: "44444444-4444-4444-8444-444444444444",
             actionability: "resolved",
-            kind: "existing_match",
-            transaction: {
-              ...suggestion().transaction,
-              status: "recorded",
-            },
           }),
         ]}
       />,
@@ -103,6 +103,29 @@ describe("bank proposal suggestions", () => {
       screen.getByText(/bank row changed after this suggestion/),
     ).toBeTruthy();
     expect(screen.getByText(/bank row is already resolved/)).toBeTruthy();
+    expect(screen.getAllByText("Suggested draft")).toHaveLength(2);
     expect(screen.queryByRole("button", { name: /match/i })).toBeNull();
+  });
+
+  it("hides recorded suggestions on a resolved bank row", () => {
+    render(
+      <BankProposalSuggestions
+        bankTransactionId="33333333-3333-4333-8333-333333333333"
+        suggestions={[
+          suggestion({
+            actionability: "resolved",
+            transaction: { ...suggestion().transaction, status: "recorded" },
+          }),
+          suggestion({
+            submissionId: "44444444-4444-4444-8444-444444444444",
+            kind: "existing_match",
+            actionability: "resolved",
+            transaction: { ...suggestion().transaction, status: "recorded" },
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByRole("region", { name: "Suggestions" })).toBeNull();
   });
 });

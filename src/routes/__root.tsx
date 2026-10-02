@@ -4,11 +4,13 @@ import {
   HeadContent,
   Outlet,
   Scripts,
+  redirect,
   useRouterState,
 } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
 
 import { getCurrentSession } from "../auth/session-server";
+import { safeReturnPath } from "../auth/http";
 import { AppShell } from "../components/app-shell";
 import { sanitizeClientRenderFailure } from "../domain/diagnostics";
 import appCss from "../styles/app.css?url";
@@ -22,9 +24,27 @@ const DevelopmentFormDevtools = import.meta.env.DEV
     )
   : null;
 
+const isAuthenticationPath = (pathname: string): boolean =>
+  pathname === "/auth" || pathname.startsWith("/auth/");
+
 export const Route = createRootRoute({
-  beforeLoad: () => privateGate(),
-  loader: () => getCurrentSession(),
+  beforeLoad: async ({ location }) => {
+    if (location.pathname === "/health")
+      return { session: { authenticated: false as const } };
+
+    await privateGate();
+    const session = await getCurrentSession();
+    if (!session.authenticated && !isAuthenticationPath(location.pathname)) {
+      const returnTo = safeReturnPath(location.href, "http://folio.invalid");
+      throw redirect({
+        to: "/auth/login",
+        search: { return_to: returnTo },
+        replace: true,
+      });
+    }
+
+    return { session };
+  },
   head: () => ({
     meta: [
       { charSet: "utf-8" },
@@ -42,14 +62,14 @@ export const Route = createRootRoute({
 });
 
 function RootLayout() {
-  const session = Route.useLoaderData();
+  const { session } = Route.useRouteContext();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
 
   if (
     !session.authenticated ||
-    pathname.startsWith("/auth/") ||
+    isAuthenticationPath(pathname) ||
     pathname === "/health"
   )
     return <Outlet />;
@@ -101,14 +121,18 @@ function FolioErrorBoundary({
   reset: () => void;
 }) {
   const lastReportedError = useRef<unknown>(null);
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
 
   useEffect(() => {
+    if (pathname === "/health") return;
     if (lastReportedError.current === error) return;
     lastReportedError.current = error;
     void reportClientRenderFailure({
       data: sanitizeClientRenderFailure(error),
     }).catch(() => undefined);
-  }, [error]);
+  }, [error, pathname]);
 
   return (
     <main className="boundary-page">

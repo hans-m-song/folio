@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { getRequest, setResponseStatus } from "@tanstack/react-start/server";
 import { ZodError } from "zod";
 
 import {
@@ -130,11 +131,33 @@ const awsErrorNames = new Set([
 
 const failure = (values: DiagnosticFailure): DiagnosticFailure => values;
 
+const responseStatusFor = (
+  diagnostic: DiagnosticFailure,
+): number | undefined => {
+  if (diagnostic.code === "BANK_MATCH_EDIT_CONFLICT") return 409;
+  if (diagnostic.code === "BULK_TRANSACTION_CONFLICT") return 409;
+  if (
+    diagnostic.code === "BULK_TRANSACTION_INELIGIBLE" ||
+    diagnostic.code === "BULK_OWNER_INACTIVE"
+  )
+    return 422;
+  if (diagnostic.category !== "actor") return undefined;
+  if (diagnostic.code === "UNAUTHENTICATED") return 401;
+  if (diagnostic.code === "PERMISSION_DENIED") return 403;
+  return undefined;
+};
+
 const clientMessageFor = (diagnostic: DiagnosticFailure): string => {
   const { code } = diagnostic;
   if (code === "ACTOR_NOT_FOUND")
     return "Provision or activate the Folio user, then try again.";
   if (code === "REVISION_CONFLICT") return revisionConflictGuidance;
+  if (code === "BULK_TRANSACTION_CONFLICT")
+    return "A selected transaction changed. No transactions were updated. Refresh, reselect, and preview again.";
+  if (code === "BULK_TRANSACTION_INELIGIBLE")
+    return "A selected transaction is missing or void. No transactions were updated. Refresh and choose draft or recorded transactions.";
+  if (code === "BULK_OWNER_INACTIVE")
+    return "The selected owner is unavailable or inactive. No transactions were updated. Choose an active Folio user and preview again.";
   if (code === "STRIPE_CSV_INVALID")
     return safeStripeCsvDetail(diagnostic.detail)?.reason ===
       "unsupported_all_activity_export"
@@ -148,6 +171,8 @@ const clientMessageFor = (diagnostic: DiagnosticFailure): string => {
     return "The bank row was resolved elsewhere. Reload it before choosing another action.";
   if (code === "BANK_MATCH_INVALID")
     return "The transaction is not an eligible exact signed-AUD match. Review its status, kind, and settlement.";
+  if (code === "BANK_MATCH_EDIT_CONFLICT")
+    return "Keep the recorded AUD amount/direction, or unmatch the bank row before changing it.";
   if (code === "BANK_MATCH_CONFLICT")
     return "The transaction is already matched or the create-and-match request conflicts with current state. Reload before retrying.";
   return "The operation failed. Check the server log using the reference below.";
@@ -395,6 +420,7 @@ export const writeClientRenderFailure = (
     event: "folio.client_render_failure",
     version: 1,
     correlationId,
+    ...requestLogFields(),
     name: trimFailure
       ? "TypeError"
       : safeClientRenderNames.has(failure.name)
@@ -414,13 +440,29 @@ export const writeClientRenderFailure = (
   return correlationId;
 };
 
+export const requestLogFieldsFor = (
+  request: Pick<Request, "method" | "url">,
+) => {
+  const pathname = new URL(request.url).pathname;
+  if (pathname === "/_serverFn" || pathname.startsWith("/_serverFn/"))
+    return {};
+  return { requestMethod: request.method, requestPath: pathname };
+};
+
+const requestLogFields = () => {
+  try {
+    return requestLogFieldsFor(getRequest());
+  } catch {
+    return {};
+  }
+};
+
 export const runOperation = async <T>(
   operation: string,
   action: () => Promise<T>,
   writers: { info?: LogWriter; error?: LogWriter } = {},
-  options: { mutation?: boolean } = {},
+  options: { mutation?: boolean; log?: "all" | "failures" | "none" } = {},
 ): Promise<T> => {
-  const correlationId = randomUUID();
   const startedAt = performance.now();
   const operationId = operation
     .trim()
@@ -430,17 +472,19 @@ export const runOperation = async <T>(
     timestamp: new Date().toISOString(),
     event: "folio.operation",
     version: 1,
-    correlationId,
     operation: operationId,
+    ...requestLogFields(),
   };
   try {
     const result = await action();
-    writeSafely(writers.info ?? console.log, {
-      ...common,
-      timestamp: new Date().toISOString(),
-      phase: "success",
-      durationMs: Math.round(performance.now() - startedAt),
-    });
+    if (options.log !== "none" && options.log !== "failures") {
+      writeSafely(writers.info ?? console.log, {
+        ...common,
+        timestamp: new Date().toISOString(),
+        phase: "success",
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+    }
     return result;
   } catch (error) {
     const classified = classifyError(error);
@@ -455,23 +499,32 @@ export const runOperation = async <T>(
             provider: "postgres",
           })
         : classified;
-    writeSafely(writers.error ?? console.error, {
-      ...common,
-      timestamp: new Date().toISOString(),
-      phase: "failure",
-      durationMs: Math.round(performance.now() - startedAt),
-      category: diagnostic.category,
-      code: diagnostic.code,
-      retryable: diagnostic.retryable,
-      sourceError: sourceErrorOf(error),
-      ...((diagnostic.detail ?? fixedDetailFor(diagnostic.code))
-        ? { detail: diagnostic.detail ?? fixedDetailFor(diagnostic.code) }
-        : {}),
-      ...(diagnostic.provider ? { provider: diagnostic.provider } : {}),
-      ...(diagnostic.httpStatus ? { httpStatus: diagnostic.httpStatus } : {}),
-    });
+    const responseStatus = responseStatusFor(diagnostic);
+    if (responseStatus && typeof setResponseStatus === "function")
+      setResponseStatus(responseStatus);
+    const correlationId = options.log === "none" ? null : randomUUID();
+    if (correlationId) {
+      writeSafely(writers.error ?? console.error, {
+        ...common,
+        timestamp: new Date().toISOString(),
+        phase: "failure",
+        correlationId,
+        durationMs: Math.round(performance.now() - startedAt),
+        category: diagnostic.category,
+        code: diagnostic.code,
+        retryable: diagnostic.retryable,
+        sourceError: sourceErrorOf(error),
+        ...((diagnostic.detail ?? fixedDetailFor(diagnostic.code))
+          ? { detail: diagnostic.detail ?? fixedDetailFor(diagnostic.code) }
+          : {}),
+        ...(diagnostic.provider ? { provider: diagnostic.provider } : {}),
+        ...(diagnostic.httpStatus ? { httpStatus: diagnostic.httpStatus } : {}),
+      });
+    }
     throw new Error(
-      `${clientMessageFor(diagnostic)} Code ${diagnostic.code}. Reference ${correlationId}.`,
+      correlationId
+        ? `${clientMessageFor(diagnostic)} Code ${diagnostic.code}. Reference ${correlationId}.`
+        : `${operation} failed. Code ${diagnostic.code}.`,
     );
   }
 };

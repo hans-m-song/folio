@@ -1,12 +1,14 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 
 import { getCurrentSession } from "../auth/session-server";
+import { MoneyText } from "../components/money-text";
 import { formatDecimal, parseDecimal } from "../domain/money";
 import {
   transactionKindLabels,
   transactionSourceLabels,
 } from "../domain/types";
 import { getOverviewSummary, getReport } from "../server/operations";
+import { getRecurringBillAttention } from "../server/recurring-bill-operations";
 import "../styles/overview.css";
 
 const OverviewError = () => {
@@ -27,15 +29,21 @@ export const Route = createFileRoute("/")({
   loader: async () => {
     const session = await getCurrentSession();
     if (!session.authenticated)
-      return { session, balance: null, summary: null };
+      return {
+        session,
+        balance: null,
+        summary: null,
+        recurringAttention: { count: 0, pendingCount: 0, dueCount: 0 },
+      };
 
-    const [result, summary] = await Promise.all([
+    const [result, summary, recurringAttention] = await Promise.all([
       getReport({
         data: { basis: "cash", periodType: "month", format: "json" },
       }),
       getOverviewSummary(),
+      getRecurringBillAttention(),
     ]);
-    return { session, balance: result.balance, summary };
+    return { session, balance: result.balance, summary, recurringAttention };
   },
   pendingComponent: () => (
     <main className="overview-page overview-state">
@@ -58,7 +66,8 @@ const money = (value: string) => {
 };
 
 function OverviewPage() {
-  const { session, balance, summary } = Route.useLoaderData();
+  const { session, balance, summary, recurringAttention } =
+    Route.useLoaderData();
   if (!session.authenticated)
     return (
       <main className="overview-page">
@@ -117,21 +126,22 @@ function OverviewPage() {
         <div className="overview-metrics">
           <div>
             <span>Inflow</span>
-            <strong>{money(inflow)}</strong>
+            <MoneyText as="strong">{money(inflow)}</MoneyText>
           </div>
           <div>
             <span>Outflow</span>
-            <strong>{money(outflow)}</strong>
+            <MoneyText as="strong">{money(outflow)}</MoneyText>
           </div>
           <div>
             <span>Net movement</span>
-            <strong
+            <MoneyText
+              as="strong"
               className={
                 net.startsWith("-") ? "amount-negative" : "amount-positive"
               }
             >
               {money(net)}
-            </strong>
+            </MoneyText>
           </div>
           <div>
             <span>Included movements</span>
@@ -155,16 +165,33 @@ function OverviewPage() {
               <strong>{attention?.unresolvedBankRows ?? 0}</strong>
               <span>Unresolved imported bank rows</span>
             </a>
+            <a
+              className="overview-attention-card"
+              href="/transactions/recurring"
+              aria-label={`${recurringAttention?.pendingCount ?? 0} Pending · ${recurringAttention?.dueCount ?? 0} Due Recurring bills needing attention`}
+            >
+              <strong>{recurringAttention?.count ?? 0}</strong>
+              <span>
+                {recurringAttention?.pendingCount ?? 0} Pending ·{" "}
+                {recurringAttention?.dueCount ?? 0} Due
+              </span>
+              <span>Recurring bills needing attention</span>
+            </a>
             <a className="overview-attention-card" href="/banking/imports">
               <strong>{attention?.importsWithUnresolvedRows ?? 0}</strong>
               <span>Imports with unresolved rows</span>
             </a>
             <a
               className="overview-attention-card"
-              href="/transactions#transactions-heading"
+              href={`/transactions?filters=${encodeURIComponent(
+                JSON.stringify([
+                  { field: "status", operator: "is", value: "recorded" },
+                  { field: "invoice", operator: "is", value: "missing" },
+                ]),
+              )}`}
             >
-              <strong>{attention?.transactionLinkedEvidenceGaps ?? 0}</strong>
-              <span>Transactions without linked evidence</span>
+              <strong>{attention?.missingInvoiceOrCreditNoteCount ?? 0}</strong>
+              <span>Missing invoices or credit notes</span>
             </a>
           </div>
           <div
@@ -257,7 +284,9 @@ function OverviewPage() {
                         className="overview-activity-item"
                         href={`/banking/reconcile?bank=${encodeURIComponent(row.id)}`}
                       >
-                        <strong>{money(row.amountAud)}</strong>
+                        <MoneyText as="strong">
+                          {money(row.amountAud)}
+                        </MoneyText>
                         <span>Posted {row.postedDate}</span>
                         <span className="overview-activity-state">
                           {row.reviewState}
@@ -323,25 +352,35 @@ function OverviewPage() {
                 <thead>
                   <tr>
                     <th scope="col">Month</th>
-                    <th scope="col">Inflow</th>
-                    <th scope="col">Outflow</th>
-                    <th scope="col">Net</th>
+                    <th scope="col" className="money-column">
+                      Inflow
+                    </th>
+                    <th scope="col" className="money-column">
+                      Outflow
+                    </th>
+                    <th scope="col" className="money-column">
+                      Net
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {recentLines.map((line) => (
                     <tr key={line.period}>
                       <td>{line.period}</td>
-                      <td>{money(line.inflowAud)}</td>
-                      <td>{money(line.outflowAud)}</td>
+                      <td className="money-column">
+                        <MoneyText>{money(line.inflowAud)}</MoneyText>
+                      </td>
+                      <td className="money-column">
+                        <MoneyText>{money(line.outflowAud)}</MoneyText>
+                      </td>
                       <td
-                        className={
+                        className={`money-column ${
                           line.netMovementAud.startsWith("-")
                             ? "amount-negative"
                             : "amount-positive"
-                        }
+                        }`}
                       >
-                        {money(line.netMovementAud)}
+                        <MoneyText>{money(line.netMovementAud)}</MoneyText>
                       </td>
                     </tr>
                   ))}

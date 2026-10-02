@@ -1,3 +1,4 @@
+import { AutocompleteSelect } from "../components/autocomplete";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 
@@ -98,6 +99,17 @@ export function UsersPage() {
     setDeactivatingUser(user);
   };
 
+  const copyUserId = async (userId: string) => {
+    try {
+      if (!navigator.clipboard?.writeText)
+        throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(userId);
+      setMessage("User ID copied.");
+    } catch {
+      setMessage("Could not copy user ID. Check clipboard access and retry.");
+    }
+  };
+
   return (
     <main className="admin-page">
       <header>
@@ -117,10 +129,14 @@ export function UsersPage() {
           </label>
           <label>
             Role
-            <select name="role" defaultValue="member">
+            <AutocompleteSelect
+              aria-label="Role"
+              name="role"
+              defaultValue="member"
+            >
               <option value="member">Member</option>
               <option value="administrator">Administrator</option>
-            </select>
+            </AutocompleteSelect>
           </label>
           <button type="submit" disabled={busy}>
             Add user
@@ -157,6 +173,13 @@ export function UsersPage() {
                     <td>{user.role}</td>
                     <td>{user.active ? "Active" : "Inactive"}</td>
                     <td>
+                      <button
+                        type="button"
+                        onClick={() => void copyUserId(user.id)}
+                        aria-label={`Copy user ID for ${user.displayName?.trim() || user.email}`}
+                      >
+                        Copy ID
+                      </button>{" "}
                       <button
                         type="button"
                         disabled={busy}

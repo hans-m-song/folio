@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { selectAutocompleteOption } from "../components/autocomplete-test-helpers";
 import type { ComponentType } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,9 +12,12 @@ const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   invalidate: vi.fn(),
   reconcileBankTransaction: vi.fn(),
+  getNextBankReconciliation: vi.fn(),
   createAndMatchBankTransaction: vi.fn(),
   startArtifactUpload: vi.fn(),
   confirmArtifactUpload: vi.fn(),
+  extractInvoiceFields: vi.fn(),
+  loadDraft: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -29,12 +33,22 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("../server/bank-operations", () => ({
   createAndMatchBankTransaction: mocks.createAndMatchBankTransaction,
   getBankReconciliation: vi.fn(),
+  getNextBankReconciliation: mocks.getNextBankReconciliation,
   reconcileBankTransaction: mocks.reconcileBankTransaction,
 }));
 
 vi.mock("../server/operations", () => ({
   startArtifactUpload: mocks.startArtifactUpload,
   confirmArtifactUpload: mocks.confirmArtifactUpload,
+}));
+
+vi.mock("../server/invoice-operations", () => ({
+  extractInvoiceFields: mocks.extractInvoiceFields,
+}));
+
+vi.mock("./-transaction-workflow", () => ({
+  loadManualTransactionRouteData: mocks.loadDraft,
+  ManualTransactionRoute: () => <div>Draft transaction editor</div>,
 }));
 
 import { Route } from "./banking.reconcile";
@@ -179,6 +193,24 @@ const ReconcilePage = (Route as unknown as { component: ComponentType })
 const selectedRow = () => (mocks.data as TestRouteData).detail.bankTransaction;
 const createKindButton = (kind: string) =>
   screen.getByRole("button", { name: `Create ${kind}` });
+const addMatchCandidate = () => {
+  const data = mocks.data as TestRouteData;
+  const transactionId = "33333333-3333-4333-8333-333333333333";
+  data.detail.candidates = [
+    {
+      id: transactionId,
+      counterparty: "Synthetic supplier",
+      amountAud: "35.1200",
+      settledAt: "2026-09-24T00:00:00.000Z",
+      kind: "supplier_expense",
+      dateDistanceDays: 0,
+      textScore: 1,
+      reference: null,
+      description: "Synthetic payment",
+    },
+  ];
+  return transactionId;
+};
 
 const applyMockReconciliation = async ({
   data,
@@ -218,9 +250,14 @@ beforeEach(() => {
   mocks.reconcileBankTransaction
     .mockReset()
     .mockImplementation(applyMockReconciliation);
+  mocks.getNextBankReconciliation.mockReset().mockResolvedValue({
+    status: "none",
+  });
   mocks.createAndMatchBankTransaction.mockReset();
   mocks.startArtifactUpload.mockReset();
   mocks.confirmArtifactUpload.mockReset();
+  mocks.extractInvoiceFields.mockReset();
+  mocks.loadDraft.mockReset();
 });
 
 afterEach(() => {
@@ -237,7 +274,447 @@ afterEach(() => {
 });
 
 describe("bank reconciliation actions", () => {
-  it("shows a bank-linked draft for review without recording or matching it", () => {
+  it("marks queue, imported movement, and candidate amounts as money", () => {
+    const data = makeRouteData();
+    data.detail.candidates = [
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        counterparty: "Example Supplier",
+        amountAud: "28.0000",
+        settledAt: "2026-09-24T00:00:00.000Z",
+        kind: "supplier_expense",
+        dateDistanceDays: 0,
+        textScore: 10,
+        reference: "INV-28",
+        description: "Hosting",
+      },
+    ];
+    mocks.data = data;
+    render(<ReconcilePage />);
+
+    const queueAmount = screen.getByText("-$35.1200");
+    expect(queueAmount.tagName).toBe("STRONG");
+    expect(queueAmount.getAttribute("data-money-value")).toBe("");
+
+    const importedMovement = screen.getByText("-35.1200");
+    expect(importedMovement.getAttribute("data-money-value")).toBe("");
+
+    const candidateAmount = screen.getByText("+$28.0000");
+    expect(candidateAmount.getAttribute("data-money-value")).toBe("");
+  });
+
+  it("keeps ordinary matching on the selected row", async () => {
+    const user = userEvent.setup();
+    const transactionId = addMatchCandidate();
+    render(<ReconcilePage />);
+
+    await user.click(screen.getByRole("radio"));
+    await user.click(
+      screen.getByRole("button", { name: "Match selected transaction" }),
+    );
+
+    expect(mocks.reconcileBankTransaction).toHaveBeenCalledWith({
+      data: {
+        bankTransactionId,
+        expectedRevision: "3",
+        command: { type: "match", transactionId },
+      },
+    });
+    expect(mocks.getNextBankReconciliation).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it.each(["applied", "already_applied"] as const)(
+    "advances after an explicit successful match (%s)",
+    async (status) => {
+      const user = userEvent.setup();
+      addMatchCandidate();
+      const artifactId = "55555555-5555-4555-8555-555555555555";
+      const targetId = "66666666-6666-4666-8666-666666666666";
+      mocks.search = {
+        bank: bankTransactionId,
+        artifact: artifactId,
+        unresolved: true,
+        window: "31",
+        page: 4,
+      };
+      mocks.reconcileBankTransaction.mockResolvedValueOnce({
+        status,
+        revision: "4",
+      });
+      mocks.getNextBankReconciliation.mockResolvedValueOnce({
+        status: "target",
+        bankId: targetId,
+        page: 5,
+      });
+      render(<ReconcilePage />);
+
+      await user.click(screen.getByRole("radio"));
+      await user.click(screen.getByRole("button", { name: "Match and next" }));
+
+      expect(mocks.reconcileBankTransaction).toHaveBeenCalledTimes(1);
+      expect(mocks.getNextBankReconciliation).toHaveBeenCalledWith({
+        data: {
+          bankTransactionId,
+          artifactId,
+          unresolvedOnly: true,
+        },
+      });
+      expect(mocks.navigate).toHaveBeenCalledWith({
+        search: {
+          bank: targetId,
+          artifact: artifactId,
+          unresolved: true,
+          window: "31",
+          page: 5,
+        },
+      });
+    },
+  );
+
+  it.each(["explicit match", "create and match"] as const)(
+    "uses the server target when an implicit loader selection changes after %s",
+    async (action) => {
+      const user = userEvent.setup();
+      const artifactId = "55555555-5555-4555-8555-555555555555";
+      const implicitNextId = "66666666-6666-4666-8666-666666666666";
+      const serverNextId = "77777777-7777-4777-8777-777777777777";
+      mocks.search = {
+        artifact: artifactId,
+        unresolved: true,
+        window: "31",
+        page: 4,
+      };
+      mocks.getNextBankReconciliation.mockResolvedValueOnce({
+        status: "target",
+        bankId: serverNextId,
+        page: 5,
+      });
+      mocks.createAndMatchBankTransaction.mockResolvedValueOnce({
+        status: "applied",
+        revision: "4",
+      });
+      let rerenderAfterInvalidate = () => {};
+      mocks.invalidate.mockImplementation(async () => {
+        const refreshed = makeRouteData();
+        refreshed.detail.bankTransaction.id = implicitNextId;
+        refreshed.rows = refreshed.rows.map((row) => ({
+          ...row,
+          id: implicitNextId,
+        }));
+        mocks.data = refreshed;
+        rerenderAfterInvalidate();
+      });
+      if (action === "explicit match") addMatchCandidate();
+      const view = render(<ReconcilePage />);
+      rerenderAfterInvalidate = () => view.rerender(<ReconcilePage />);
+
+      if (action === "explicit match") {
+        await user.click(screen.getByRole("radio"));
+        await user.click(
+          screen.getByRole("button", { name: "Match and next" }),
+        );
+      } else {
+        await user.click(
+          screen.getByRole("button", { name: "Create transaction" }),
+        );
+        await user.click(createKindButton("supplier expense"));
+        await user.click(
+          screen.getByRole("checkbox", {
+            name: "Go to the next unresolved row after a successful match",
+          }),
+        );
+        await user.click(
+          screen.getByRole("button", { name: "Save, match and next" }),
+        );
+      }
+
+      await waitFor(() =>
+        expect(mocks.getNextBankReconciliation).toHaveBeenCalledWith({
+          data: {
+            bankTransactionId,
+            artifactId,
+            unresolvedOnly: true,
+          },
+        }),
+      );
+      expect(mocks.navigate).toHaveBeenLastCalledWith({
+        search: {
+          bank: serverNextId,
+          artifact: artifactId,
+          unresolved: true,
+          window: "31",
+          page: 5,
+        },
+      });
+      expect(implicitNextId).not.toBe(serverNextId);
+    },
+  );
+
+  it("does not select a next row when matching fails", async () => {
+    const user = userEvent.setup();
+    addMatchCandidate();
+    mocks.reconcileBankTransaction.mockRejectedValueOnce(
+      new Error("The row changed since it was loaded."),
+    );
+    render(<ReconcilePage />);
+
+    await user.click(screen.getByRole("radio"));
+    await user.click(screen.getByRole("button", { name: "Match and next" }));
+
+    expect(mocks.getNextBankReconciliation).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed advance with only a queue read", async () => {
+    const user = userEvent.setup();
+    addMatchCandidate();
+    mocks.getNextBankReconciliation
+      .mockRejectedValueOnce(new Error("Queue read unavailable"))
+      .mockResolvedValueOnce({
+        status: "target",
+        bankId: "66666666-6666-4666-8666-666666666666",
+        page: 2,
+      });
+    render(<ReconcilePage />);
+
+    await user.click(screen.getByRole("radio"));
+    await user.click(screen.getByRole("button", { name: "Match and next" }));
+    expect(
+      await screen.findByRole("button", { name: "Retry advance" }),
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Retry advance" }));
+
+    expect(mocks.getNextBankReconciliation).toHaveBeenCalledTimes(2);
+    expect(mocks.reconcileBankTransaction).toHaveBeenCalledTimes(1);
+    expect(mocks.navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries queue selection after target navigation fails without rematching", async () => {
+    const user = userEvent.setup();
+    addMatchCandidate();
+    mocks.getNextBankReconciliation.mockResolvedValue({
+      status: "target",
+      bankId: "66666666-6666-4666-8666-666666666666",
+      page: 2,
+    });
+    mocks.navigate.mockRejectedValueOnce(new Error("Navigation failed"));
+    render(<ReconcilePage />);
+
+    await user.click(screen.getByRole("radio"));
+    await user.click(screen.getByRole("button", { name: "Match and next" }));
+    expect(
+      await screen.findByRole("button", { name: "Retry advance" }),
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Retry advance" }));
+
+    expect(mocks.getNextBankReconciliation).toHaveBeenCalledTimes(2);
+    expect(mocks.reconcileBankTransaction).toHaveBeenCalledTimes(1);
+    expect(mocks.navigate).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the matched detail visible when the unresolved queue is empty", async () => {
+    const user = userEvent.setup();
+    addMatchCandidate();
+    mocks.getNextBankReconciliation.mockResolvedValueOnce({ status: "none" });
+    render(<ReconcilePage />);
+
+    await user.click(screen.getByRole("radio"));
+    await user.click(screen.getByRole("button", { name: "Match and next" }));
+
+    expect(selectedRow().reviewState).toBe("matched");
+    expect(
+      screen.getByText(
+        "The bank row was matched. No unresolved rows remain in this queue.",
+      ),
+    ).toBeTruthy();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("rechecks a target resolved during loading once, then stops", async () => {
+    const user = userEvent.setup();
+    const targetId = "66666666-6666-4666-8666-666666666666";
+    const followingId = "77777777-7777-4777-8777-777777777777";
+    addMatchCandidate();
+    mocks.getNextBankReconciliation
+      .mockResolvedValueOnce({ status: "target", bankId: targetId, page: 2 })
+      .mockResolvedValueOnce({
+        status: "target",
+        bankId: followingId,
+        page: 2,
+      });
+    const view = render(<ReconcilePage />);
+
+    await user.click(screen.getByRole("radio"));
+    await user.click(screen.getByRole("button", { name: "Match and next" }));
+    const targetData = makeRouteData("matched");
+    targetData.detail.bankTransaction.id = targetId;
+    mocks.data = targetData;
+    mocks.search = { bank: targetId, window: "14", page: 2 };
+    view.rerender(<ReconcilePage />);
+
+    await waitFor(() =>
+      expect(mocks.getNextBankReconciliation).toHaveBeenCalledTimes(2),
+    );
+    expect(mocks.getNextBankReconciliation.mock.calls[1]?.[0]).toEqual({
+      data: {
+        bankTransactionId: targetId,
+        artifactId: undefined,
+        unresolvedOnly: false,
+      },
+    });
+    expect(mocks.navigate).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["filters", "bank selection"] as const)(
+    "ignores a late queue response after the active %s changes",
+    async (changedContext) => {
+      const user = userEvent.setup();
+      addMatchCandidate();
+      let resolveNext!: (value: {
+        status: "target";
+        bankId: string;
+        page: number;
+      }) => void;
+      mocks.getNextBankReconciliation.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveNext = resolve;
+        }),
+      );
+      const view = render(<ReconcilePage />);
+
+      await user.click(screen.getByRole("radio"));
+      const matchClick = user.click(
+        screen.getByRole("button", { name: "Match and next" }),
+      );
+      await waitFor(() =>
+        expect(mocks.getNextBankReconciliation).toHaveBeenCalledTimes(1),
+      );
+      mocks.search =
+        changedContext === "filters"
+          ? {
+              ...mocks.search,
+              artifact: "77777777-7777-4777-8777-777777777777",
+            }
+          : {
+              ...mocks.search,
+              bank: "77777777-7777-4777-8777-777777777777",
+            };
+      view.rerender(<ReconcilePage />);
+      resolveNext({
+        status: "target",
+        bankId: "66666666-6666-4666-8666-666666666666",
+        page: 2,
+      });
+      await matchClick;
+
+      expect(mocks.navigate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["applied", "already_applied"] as const)(
+    "offers create-and-next for a successful save (%s)",
+    async (status) => {
+      const user = userEvent.setup();
+      mocks.createAndMatchBankTransaction.mockResolvedValue({
+        status,
+        revision: "4",
+      });
+      mocks.getNextBankReconciliation.mockResolvedValueOnce({
+        status: "target",
+        bankId: "66666666-6666-4666-8666-666666666666",
+        page: 2,
+      });
+      render(<ReconcilePage />);
+
+      await user.click(
+        screen.getByRole("button", { name: "Create transaction" }),
+      );
+      await user.click(createKindButton("supplier expense"));
+      await user.click(
+        screen.getByRole("checkbox", {
+          name: "Go to the next unresolved row after a successful match",
+        }),
+      );
+      await user.click(
+        screen.getByRole("button", { name: "Save, match and next" }),
+      );
+
+      expect(mocks.createAndMatchBankTransaction).toHaveBeenCalledTimes(1);
+      expect(mocks.getNextBankReconciliation).toHaveBeenCalledWith({
+        data: {
+          bankTransactionId,
+          artifactId: undefined,
+          unresolvedOnly: false,
+        },
+      });
+      expect(mocks.navigate).toHaveBeenCalledWith({
+        search: {
+          bank: "66666666-6666-4666-8666-666666666666",
+          window: "14",
+          page: 2,
+        },
+      });
+    },
+  );
+
+  it("does not advance when the create-and-match operation is invalid", async () => {
+    const user = userEvent.setup();
+    mocks.createAndMatchBankTransaction.mockResolvedValueOnce({
+      status: "invalid",
+      issues: [],
+    });
+    render(<ReconcilePage />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Create transaction" }),
+    );
+    await user.click(createKindButton("supplier expense"));
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Go to the next unresolved row after a successful match",
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Save, match and next" }),
+    );
+
+    expect(mocks.getNextBankReconciliation).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("toggles the unresolved queue and pages using its filtered count", async () => {
+    const data = makeRouteData();
+    data.counts.total = 250;
+    data.counts.unresolved = 50;
+    mocks.data = data;
+    const user = userEvent.setup();
+    const { rerender } = render(<ReconcilePage />);
+
+    await user.click(screen.getByRole("checkbox", { name: "Unresolved only" }));
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      search: {
+        ...mocks.search,
+        unresolved: true,
+        page: 1,
+        bank: undefined,
+      },
+    });
+
+    mocks.search = { ...mocks.search, unresolved: true };
+    rerender(<ReconcilePage />);
+    expect(screen.getByRole("button", { name: "Next" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(
+      screen
+        .getByRole("link", { name: /PAYMENT TO EXAMPLE/ })
+        .getAttribute("href"),
+    ).toContain("unresolved=true");
+  });
+
+  it("opens a bank-linked draft inline without recording or matching it", async () => {
     (mocks.data as TestRouteData).suggestions = [
       {
         submissionId: "44444444-4444-4444-8444-444444444444",
@@ -262,10 +739,20 @@ describe("bank reconciliation actions", () => {
     render(<ReconcilePage />);
 
     expect(screen.getByText("Suggested draft")).toBeTruthy();
+    mocks.loadDraft.mockResolvedValue({
+      transaction: { status: "draft", sourceSystem: "manual" },
+    });
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Edit draft here" }));
+    await waitFor(() =>
+      expect(screen.getByText("Draft transaction editor")).toBeTruthy(),
+    );
     expect(
-      screen.getByRole("link", { name: "Review draft" }).getAttribute("href"),
-    ).toBe(
-      `/transactions/55555555-5555-4555-8555-555555555555/edit?bank=${bankTransactionId}`,
+      screen.getByRole("region", { name: "Bank row details" }),
+    ).toBeTruthy();
+    expect(mocks.loadDraft).toHaveBeenCalledWith(
+      "55555555-5555-4555-8555-555555555555",
     );
     expect(mocks.reconcileBankTransaction).not.toHaveBeenCalled();
     expect(mocks.createAndMatchBankTransaction).not.toHaveBeenCalled();
@@ -398,7 +885,7 @@ describe("bank reconciliation actions", () => {
       screen.getByRole("combobox", { name: "Settlement currency" }),
     ).toMatchObject({ value: "AUD" });
     expect(screen.getByRole("combobox", { name: "Owner" })).toMatchObject({
-      value: actorId,
+      value: "Owner",
     });
     expect(screen.getByLabelText("Occurrence date")).toMatchObject({
       value: "",
@@ -451,7 +938,7 @@ describe("bank reconciliation actions", () => {
     await user.click(screen.getByText("Tax and classification"));
     expect(
       screen.getByRole("combobox", { name: "Document tax treatment" }),
-    ).toMatchObject({ value: "no_tax", disabled: true });
+    ).toMatchObject({ value: "No tax", disabled: true });
     expect(
       screen.queryByRole("combobox", { name: "GST credit status" }),
     ).toBeNull();
@@ -479,11 +966,12 @@ describe("bank reconciliation actions", () => {
     expect(
       screen.queryByRole("option", { name: "Owner contribution" }),
     ).toBeNull();
-    expect(nestedKind).toMatchObject({ value: "supplier_expense" });
+    expect(nestedKind).toMatchObject({ value: "Supplier expense" });
+    await user.click(screen.getByRole("button", { name: "Show Kind options" }));
     expect(screen.getByRole("option", { name: "Processing fee" })).toBeTruthy();
 
-    await user.selectOptions(nestedKind, "processing_fee");
-    expect(nestedKind).toMatchObject({ value: "processing_fee" });
+    await selectAutocompleteOption(nestedKind, "Processing fee");
+    expect(nestedKind).toMatchObject({ value: "Processing fee" });
   });
 
   it("follows document currency defaults for a new bank-created expense", async () => {
@@ -502,11 +990,13 @@ describe("bank reconciliation actions", () => {
     const treatment = screen.getByRole("combobox", {
       name: "Document tax treatment",
     });
-    expect(treatment).toMatchObject({ value: "gst_included" });
+    expect(treatment).toMatchObject({
+      value: "Australian GST included (suggest total ÷ 11)",
+    });
 
     await user.clear(currency);
     await user.type(currency, "USD");
-    expect(treatment).toMatchObject({ value: "foreign_tax_included" });
+    expect(treatment).toMatchObject({ value: "Foreign tax included" });
   });
 
   it("confirms a new invoice PDF once and reuses it with the same transaction ID on retry", async () => {
@@ -587,6 +1077,155 @@ describe("bank reconciliation actions", () => {
     expect(retrySubmission.data.artifactIds).toContain(artifactId);
     expect(retrySubmission.data.transaction.sourceArtifactId).toBe(artifactId);
   });
+
+  it("confirms a new PDF for explicit extraction, then reuses it on create and match", async () => {
+    const user = userEvent.setup();
+    const artifactId = "44444444-4444-4444-8444-444444444444";
+    const uploadUrl = "https://storage.example.test/upload";
+    const digest = new Uint8Array(32).buffer;
+    vi.spyOn(crypto.subtle, "digest").mockResolvedValue(digest);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.startArtifactUpload.mockResolvedValue({
+      artifact: { id: artifactId },
+      uploadUrl,
+    });
+    mocks.confirmArtifactUpload.mockResolvedValue({ id: artifactId });
+    mocks.extractInvoiceFields.mockResolvedValue({
+      status: "unsupported",
+      artifactId,
+      checksumSha256: "synthetic-checksum",
+      versionId: "synthetic-version",
+      reason: "page_limit",
+    });
+    mocks.createAndMatchBankTransaction.mockResolvedValue({
+      status: "applied",
+      revision: "4",
+    });
+    Object.defineProperty(File.prototype, "arrayBuffer", {
+      configurable: true,
+      value: async () => new Uint8Array([1, 2, 3]).buffer,
+    });
+    render(<ReconcilePage />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Create transaction" }),
+    );
+    await user.click(createKindButton("supplier expense"));
+    await user.upload(
+      screen.getByLabelText("PDF evidence"),
+      new File(["%PDF-1.7"], "invoice.pdf", { type: "application/pdf" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Upload and extract invoice fields" }),
+    );
+
+    await screen.findByText(/This PDF could not be safely extracted/);
+    expect(mocks.startArtifactUpload).toHaveBeenCalledTimes(1);
+    expect(mocks.confirmArtifactUpload).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mocks.extractInvoiceFields).toHaveBeenCalledWith({
+      data: { artifactId },
+    });
+    expect(mocks.createAndMatchBankTransaction).not.toHaveBeenCalled();
+    expect(mocks.reconcileBankTransaction).not.toHaveBeenCalled();
+    expect(mocks.invalidate).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Save changes (recorded)" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.createAndMatchBankTransaction).toHaveBeenCalledTimes(1),
+    );
+    expect(mocks.startArtifactUpload).toHaveBeenCalledTimes(1);
+    expect(mocks.confirmArtifactUpload).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.createAndMatchBankTransaction.mock.calls[0]?.[0].data.artifactIds,
+    ).toContain(artifactId);
+    expect(
+      mocks.createAndMatchBankTransaction.mock.calls[0]?.[0].data.transaction
+        .sourceArtifactId,
+    ).toBe(artifactId);
+  });
+
+  it.each(["navigation", "selected PDF"] as const)(
+    "stops new-PDF preparation before confirmation when %s changes",
+    async (changedSource) => {
+      const user = userEvent.setup();
+      let finishStartUpload!: (result: {
+        artifact: { id: string };
+        uploadUrl: string;
+      }) => void;
+      mocks.startArtifactUpload.mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishStartUpload = resolve;
+        }),
+      );
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", fetchMock);
+      vi.spyOn(crypto.subtle, "digest").mockResolvedValue(
+        new Uint8Array(32).buffer,
+      );
+      Object.defineProperty(File.prototype, "arrayBuffer", {
+        configurable: true,
+        value: async () => new Uint8Array([1, 2, 3]).buffer,
+      });
+      const view = render(<ReconcilePage />);
+
+      await user.click(
+        screen.getByRole("button", { name: "Create transaction" }),
+      );
+      await user.click(createKindButton("supplier expense"));
+      await user.upload(
+        screen.getByLabelText("PDF evidence"),
+        new File(["%PDF-1.7"], "invoice.pdf", { type: "application/pdf" }),
+      );
+      await user.click(
+        screen.getByRole("button", {
+          name: "Upload and extract invoice fields",
+        }),
+      );
+      await waitFor(() =>
+        expect(mocks.startArtifactUpload).toHaveBeenCalledTimes(1),
+      );
+
+      if (changedSource === "navigation") {
+        mocks.search = {
+          bank: "77777777-7777-4777-8777-777777777777",
+          window: "14",
+          page: 1,
+        };
+        view.rerender(<ReconcilePage />);
+      } else {
+        await user.upload(
+          screen.getByLabelText("PDF evidence"),
+          new File(["%PDF-1.7"], "replacement.pdf", {
+            type: "application/pdf",
+          }),
+        );
+      }
+      finishStartUpload({
+        artifact: { id: "44444444-4444-4444-8444-444444444444" },
+        uploadUrl: "https://storage.example.test/upload",
+      });
+
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", {
+            name: "Upload and extract invoice fields",
+          }),
+        ).toHaveProperty("disabled", false),
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(mocks.confirmArtifactUpload).not.toHaveBeenCalled();
+      expect(mocks.extractInvoiceFields).not.toHaveBeenCalled();
+      expect(mocks.createAndMatchBankTransaction).not.toHaveBeenCalled();
+      expect(mocks.reconcileBankTransaction).not.toHaveBeenCalled();
+      expect(mocks.invalidate).not.toHaveBeenCalled();
+    },
+  );
 
   it("shows a prominent matched-transaction link after create-and-match and when revisited", async () => {
     const user = userEvent.setup();
@@ -669,7 +1308,7 @@ describe("bank reconciliation actions", () => {
     await user.click(createKindButton("sale"));
 
     expect(screen.getByRole("combobox", { name: "Kind" })).toMatchObject({
-      value: "sale",
+      value: "Sale",
     });
     expect(
       screen.getByRole("textbox", { name: "Settlement amount" }),

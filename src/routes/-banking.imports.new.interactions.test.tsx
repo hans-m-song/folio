@@ -167,6 +167,27 @@ describe("CommBank batch import interaction", () => {
     expect(await screen.findByText("Possible duplicate source")).toBeTruthy();
     expect(screen.getByText(/earlier\.csv/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add to batch" })).toBeTruthy();
+
+    const movementHeader = screen.getByRole("columnheader", {
+      name: "Movement",
+    });
+    const table = movementHeader.closest("table")!;
+    expect(movementHeader.classList.contains("money-column")).toBe(true);
+    expect(
+      screen
+        .getByRole("columnheader", { name: "Source running balance" })
+        .classList.contains("money-column"),
+    ).toBe(true);
+
+    const cells = table.querySelectorAll("tbody tr td");
+    expect(cells[3]?.classList.contains("money-column")).toBe(true);
+    expect(cells[3]?.querySelector("[data-money-value]")?.textContent).toBe(
+      "300.0000",
+    );
+    expect(cells[4]?.classList.contains("money-column")).toBe(true);
+    expect(cells[4]?.querySelector("[data-money-value]")?.textContent).toBe(
+      "350.0300",
+    );
   });
 
   it("supports embedding without adding another Banking shell", () => {

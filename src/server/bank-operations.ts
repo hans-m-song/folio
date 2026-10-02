@@ -182,8 +182,247 @@ const pageSchema = z
   })
   .strict();
 
+const queryTextOperatorSchema = z.enum([
+  "equals",
+  "not_equals",
+  "contains",
+  "not_contains",
+]);
+const queryComparisonOperatorSchema = z.enum([
+  "equals",
+  "not_equals",
+  "greater_than",
+  "greater_than_or_equal",
+  "less_than",
+  "less_than_or_equal",
+]);
+const queryEnumOperatorSchema = z.enum(["is", "is_not"]);
+const queryEnumMembershipOperatorSchema = z.enum([
+  "contains_any",
+  "contains_none",
+]);
+const bankReviewStateValues = [
+  "unresolved",
+  "matched",
+  "private",
+  "transfer",
+  "duplicate",
+] as const;
+const bankReviewStateSchema = z.enum(bankReviewStateValues);
+const bankMatchStatusValues = ["matched", "unmatched"] as const;
+const bankMatchStatusSchema = z.enum(bankMatchStatusValues);
+const bankImportStateValues = [
+  "pending",
+  "awaiting_review",
+  "available",
+  "rejected",
+  "abandoned",
+  "superseded",
+] as const;
+const bankImportStateSchema = z.enum(bankImportStateValues);
+const queryDateValueSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const timestamp = Date.parse(`${value}T00:00:00.000Z`);
+    return (
+      !Number.isNaN(timestamp) &&
+      new Date(timestamp).toISOString().slice(0, 10) === value
+    );
+  });
+const queryNumberValueSchema = z
+  .string()
+  .max(48)
+  .regex(/^-?(?:\d+(?:\.\d*)?|\.\d+)$/);
+const queryCountValueSchema = z.string().max(12).regex(/^\d+$/);
+const queryTextValueSchema = z.string().trim().min(1).max(200);
+
+const bankActivityFilterSchema = z.union([
+  z
+    .object({
+      field: z.literal("postedDate"),
+      operator: queryComparisonOperatorSchema,
+      value: queryDateValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("description"),
+      operator: queryTextOperatorSchema,
+      value: queryTextValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("amountAud"),
+      operator: queryComparisonOperatorSchema,
+      value: queryNumberValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("reviewState"),
+      operator: queryEnumOperatorSchema,
+      value: bankReviewStateSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("reviewState"),
+      operator: queryEnumMembershipOperatorSchema,
+      value: z.array(bankReviewStateSchema).max(bankReviewStateValues.length),
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("matchStatus"),
+      operator: queryEnumOperatorSchema,
+      value: bankMatchStatusSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("matchStatus"),
+      operator: queryEnumMembershipOperatorSchema,
+      value: z.array(bankMatchStatusSchema).max(bankMatchStatusValues.length),
+    })
+    .strict(),
+]);
+
+const bankImportFilterSchema = z.union([
+  z
+    .object({
+      field: z.literal("filename"),
+      operator: queryTextOperatorSchema,
+      value: queryTextValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("earliestDate"),
+      operator: queryComparisonOperatorSchema,
+      value: queryDateValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("latestDate"),
+      operator: queryComparisonOperatorSchema,
+      value: queryDateValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("rowCount"),
+      operator: queryComparisonOperatorSchema,
+      value: queryCountValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("reviewedCount"),
+      operator: queryComparisonOperatorSchema,
+      value: queryCountValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("unresolvedCount"),
+      operator: queryComparisonOperatorSchema,
+      value: queryCountValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("state"),
+      operator: queryEnumOperatorSchema,
+      value: bankImportStateSchema,
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("state"),
+      operator: queryEnumMembershipOperatorSchema,
+      value: z.array(bankImportStateSchema).max(bankImportStateValues.length),
+    })
+    .strict(),
+]);
+
+const bankActivitySortSchema = z
+  .array(
+    z
+      .object({
+        key: z.enum([
+          "postedDate",
+          "description",
+          "amountAud",
+          "reviewState",
+          "matchStatus",
+        ]),
+        direction: z.enum(["asc", "desc"]),
+      })
+      .strict(),
+  )
+  .max(5)
+  .superRefine((clauses, context) => {
+    const keys = new Set<string>();
+    clauses.forEach(({ key }, index) => {
+      if (keys.has(key))
+        context.addIssue({
+          code: "custom",
+          path: [index, "key"],
+          message: "Sort fields must be unique",
+        });
+      keys.add(key);
+    });
+  });
+
+const bankImportSortSchema = z
+  .array(
+    z
+      .object({
+        key: z.enum([
+          "filename",
+          "earliestDate",
+          "latestDate",
+          "rowCount",
+          "reviewedCount",
+          "unresolvedCount",
+          "state",
+        ]),
+        direction: z.enum(["asc", "desc"]),
+      })
+      .strict(),
+  )
+  .max(7)
+  .superRefine((clauses, context) => {
+    const keys = new Set<string>();
+    clauses.forEach(({ key }, index) => {
+      if (keys.has(key))
+        context.addIssue({
+          code: "custom",
+          path: [index, "key"],
+          message: "Sort fields must be unique",
+        });
+      keys.add(key);
+    });
+  });
+
+const bankImportsListSchema = pageSchema.extend({
+  filters: z.array(bankImportFilterSchema).max(20).default([]),
+  sort: bankImportSortSchema.default([]),
+});
+const bankTransactionsListSchema = pageSchema.extend({
+  artifactId: z.string().uuid().optional(),
+  state: z
+    .enum(["unresolved", "matched", "private", "transfer", "duplicate"])
+    .optional(),
+  filters: z.array(bankActivityFilterSchema).max(20).default([]),
+  sort: bankActivitySortSchema.default([]),
+});
+
 export const listBankImports = createServerFn({ method: "GET" })
-  .validator(pageSchema)
+  .validator(bankImportsListSchema)
   .handler(async ({ data }) =>
     runOperation("List bank imports", async () => {
       const { actor, current } = await authorize(
@@ -194,14 +433,7 @@ export const listBankImports = createServerFn({ method: "GET" })
   );
 
 export const listBankTransactions = createServerFn({ method: "GET" })
-  .validator(
-    pageSchema.extend({
-      artifactId: z.string().uuid().optional(),
-      state: z
-        .enum(["unresolved", "matched", "private", "transfer", "duplicate"])
-        .optional(),
-    }),
-  )
+  .validator(bankTransactionsListSchema)
   .handler(async ({ data }) =>
     runOperation("List bank activity", async () => {
       const { actor, current } = await authorize(
@@ -215,6 +447,7 @@ const reconciliationQuerySchema = z
   .object({
     bankTransactionId: z.string().uuid().optional(),
     artifactId: z.string().uuid().optional(),
+    unresolvedOnly: z.boolean().default(false),
     windowDays: z.union([z.literal(14), z.literal(31), z.null()]).default(14),
     offset: z.number().int().min(0).max(10_000).default(0),
   })
@@ -233,6 +466,7 @@ export const getBankReconciliation = createServerFn({ method: "GET" })
             limit: 100,
             offset: data.offset,
             artifactId: data.artifactId,
+            state: data.unresolvedOnly ? "unresolved" : undefined,
           }),
           current.bankRepository.reconciliationCounts(
             actor.id,
@@ -271,6 +505,30 @@ export const getBankReconciliation = createServerFn({ method: "GET" })
         availableArtifacts,
         gstRegistered: current.config.gstRegistered,
       };
+    }),
+  );
+
+const nextReconciliationQuerySchema = z
+  .object({
+    bankTransactionId: z.string().uuid(),
+    artifactId: z.string().uuid().optional(),
+    unresolvedOnly: z.boolean(),
+  })
+  .strict();
+
+export const getNextBankReconciliation = createServerFn({ method: "GET" })
+  .validator(nextReconciliationQuerySchema)
+  .handler(async ({ data }) =>
+    runOperation("Select next unresolved bank row", async () => {
+      const { actor, current } = await authorize(
+        operationPermissions.getNextBankReconciliation,
+      );
+      return current.bankRepository.nextReconciliationTarget(
+        actor.id,
+        data.bankTransactionId,
+        data.artifactId,
+        data.unresolvedOnly,
+      );
     }),
   );
 

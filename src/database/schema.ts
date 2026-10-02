@@ -163,7 +163,7 @@ export function createFolioSchema(schemaName: string) {
       ),
       check(
         "transactions_kind_check",
-        sql`${table.kind} in ('sale', 'supplier_expense', 'processing_fee', 'sale_refund', 'supplier_credit', 'dispute', 'transfer', 'owner_contribution', 'owner_loan', 'adjustment')`,
+        sql`${table.kind} in ('sale', 'supplier_expense', 'processing_fee', 'sale_refund', 'supplier_credit', 'dispute', 'transfer', 'owner_contribution', 'owner_loan', 'owner_loan_repayment', 'adjustment')`,
       ),
       check(
         "transactions_tax_treatment_check",
@@ -182,12 +182,24 @@ export function createFolioSchema(schemaName: string) {
         sql`${table.kind} not in ('owner_contribution', 'owner_loan') or ${table.documentAmount} > 0`,
       ),
       check(
+        "transactions_owner_loan_repayment_owner_check",
+        sql`${table.kind} <> 'owner_loan_repayment' or ${table.ownerId} is not null`,
+      ),
+      check(
+        "transactions_owner_loan_repayment_amount_check",
+        sql`${table.kind} <> 'owner_loan_repayment' or (${table.documentAmount} is not null and ${table.documentAmount} > 0)`,
+      ),
+      check(
+        "transactions_owner_loan_repayment_settlement_check",
+        sql`${table.kind} <> 'owner_loan_repayment' or ${table.settlementAmount} is null or ${table.settlementAmount} > 0`,
+      ),
+      check(
         "transactions_owner_gst_check",
-        sql`${table.kind} not in ('owner_contribution', 'owner_loan') or (${table.gstCreditStatus} in ('not_claimable', 'not_registered') and coalesce(${table.claimableGstAud}, 0) = 0)`,
+        sql`${table.kind} not in ('owner_contribution', 'owner_loan', 'owner_loan_repayment') or (${table.gstCreditStatus} in ('not_claimable', 'not_registered') and coalesce(${table.claimableGstAud}, 0) = 0)`,
       ),
       check(
         "transactions_owner_tax_check",
-        sql`${table.kind} not in ('owner_contribution', 'owner_loan') or (${table.taxTreatment} = 'no_tax' and coalesce(${table.documentTaxAmount}, 0) = 0)`,
+        sql`${table.kind} not in ('owner_contribution', 'owner_loan', 'owner_loan_repayment') or (${table.taxTreatment} = 'no_tax' and coalesce(${table.documentTaxAmount}, 0) = 0)`,
       ),
       check(
         "transactions_currency_check",
@@ -385,7 +397,7 @@ export function createFolioSchema(schemaName: string) {
       ),
       check(
         "mcp_credentials_scopes_check",
-        sql`cardinality(${table.scopes}) between 1 and 6 and ${table.scopes} <@ array['bank_rows:read', 'transactions:search', 'artifacts:read', 'artifacts:upload', 'proposals:submit', 'submissions:read']::text[]`,
+        sql`cardinality(${table.scopes}) between 1 and 8 and ${table.scopes} <@ array['bank_rows:read', 'transactions:search', 'transactions:draft', 'transactions:categorize', 'bank_matches:suggest', 'artifacts:read', 'artifacts:upload', 'submissions:read']::text[]`,
       ),
       index("mcp_credentials_actor_user_id_idx").on(table.actorUserId),
       index("mcp_credentials_default_owner_id_idx").on(table.defaultOwnerId),
@@ -522,6 +534,158 @@ export function createFolioSchema(schemaName: string) {
       ),
     ],
   );
+  const taxReviewSnapshots = namespace.table(
+    "tax_review_snapshots",
+    {
+      id: uuid().primaryKey().defaultRandom(),
+      financialYearStartYear: integer("financial_year_start_year").notNull(),
+      snapshot: jsonb().notNull(),
+      sourceFingerprint: text("source_fingerprint").notNull(),
+      reviewerUserId: uuid("reviewer_user_id")
+        .notNull()
+        .references(() => users.id, { onDelete: "restrict" }),
+      reviewedAt: timestamp("reviewed_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      check(
+        "tax_review_snapshots_financial_year_check",
+        sql`${table.financialYearStartYear} between 1 and 9999`,
+      ),
+      check(
+        "tax_review_snapshots_snapshot_check",
+        sql`jsonb_typeof(${table.snapshot}) = 'object' and ${table.snapshot} ?& array['cashLedger', 'humanAdjustments', 'partnerShares', 'totals', 'reviewerAttestation']::text[] and jsonb_typeof(${table.snapshot}->'reviewerAttestation') = 'string' and btrim(${table.snapshot}->>'reviewerAttestation') <> ''`,
+      ),
+      check(
+        "tax_review_snapshots_fingerprint_check",
+        sql`btrim(${table.sourceFingerprint}) <> ''`,
+      ),
+      index("tax_review_snapshots_fy_reviewed_idx").on(
+        table.financialYearStartYear,
+        table.reviewedAt,
+        table.id,
+      ),
+      index("tax_review_snapshots_reviewer_user_id_idx").on(
+        table.reviewerUserId,
+      ),
+    ],
+  );
+  const recurringBillSchedules = namespace.table(
+    "recurring_bill_schedules",
+    {
+      id: uuid().primaryKey().defaultRandom(),
+      label: text().notNull(),
+      counterparty: text().notNull(),
+      descriptionMatchText: text("description_match_text"),
+      descriptionMatchMode: text("description_match_mode")
+        .notNull()
+        .default("contains"),
+      documentCurrency: varchar("document_currency", { length: 3 }).notNull(),
+      expectedAmount: numeric("expected_amount", {
+        precision: 19,
+        scale: 4,
+      }),
+      frequency: text().notNull(),
+      anchorDate: date("anchor_date").notNull(),
+      daysEarly: integer("days_early").notNull().default(3),
+      daysLate: integer("days_late").notNull().default(3),
+      responsibleUserId: uuid("responsible_user_id").references(
+        () => users.id,
+        { onDelete: "restrict" },
+      ),
+      active: boolean().notNull().default(true),
+      createdById: uuid("created_by_id")
+        .notNull()
+        .references(() => users.id, { onDelete: "restrict" }),
+      updatedById: uuid("updated_by_id")
+        .notNull()
+        .references(() => users.id, { onDelete: "restrict" }),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+      updatedAt: timestamp("updated_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      check(
+        "recurring_bill_schedules_label_check",
+        sql`btrim(${table.label}) <> '' and char_length(${table.label}) <= 200`,
+      ),
+      check(
+        "recurring_bill_schedules_counterparty_check",
+        sql`btrim(${table.counterparty}) <> '' and char_length(${table.counterparty}) <= 300`,
+      ),
+      check(
+        "recurring_bill_schedules_description_check",
+        sql`${table.descriptionMatchText} is null or (btrim(${table.descriptionMatchText}) <> '' and char_length(${table.descriptionMatchText}) <= 2000)`,
+      ),
+      check(
+        "recurring_bill_schedules_description_match_mode_check",
+        sql`${table.descriptionMatchMode} in ('contains', 'regex')`,
+      ),
+      check(
+        "recurring_bill_schedules_currency_check",
+        sql`${table.documentCurrency} ~ '^[A-Z]{3}$'`,
+      ),
+      check(
+        "recurring_bill_schedules_amount_check",
+        sql`${table.expectedAmount} is null or ${table.expectedAmount} >= 0`,
+      ),
+      check(
+        "recurring_bill_schedules_frequency_check",
+        sql`${table.frequency} in ('monthly', 'annual')`,
+      ),
+      check(
+        "recurring_bill_schedules_days_early_check",
+        sql`${table.daysEarly} between 0 and 365`,
+      ),
+      check(
+        "recurring_bill_schedules_days_late_check",
+        sql`${table.daysLate} between 0 and 365`,
+      ),
+      check(
+        "recurring_bill_schedules_updated_at_check",
+        sql`${table.updatedAt} >= ${table.createdAt}`,
+      ),
+      index("recurring_bill_schedules_active_anchor_idx").on(
+        table.active,
+        table.anchorDate,
+      ),
+      index("recurring_bill_schedules_responsible_user_id_idx").on(
+        table.responsibleUserId,
+      ),
+    ],
+  );
+  const recurringBillLinks = namespace.table(
+    "recurring_bill_links",
+    {
+      scheduleId: uuid("schedule_id")
+        .notNull()
+        .references(() => recurringBillSchedules.id, { onDelete: "restrict" }),
+      expectedDate: date("expected_date").notNull(),
+      transactionId: uuid("transaction_id")
+        .notNull()
+        .references(() => transactions.id, { onDelete: "restrict" }),
+      createdById: uuid("created_by_id")
+        .notNull()
+        .references(() => users.id, { onDelete: "restrict" }),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      primaryKey({
+        name: "recurring_bill_links_pkey",
+        columns: [table.scheduleId, table.expectedDate],
+      }),
+      uniqueIndex("recurring_bill_links_transaction_uidx").on(
+        table.transactionId,
+      ),
+      index("recurring_bill_links_created_by_id_idx").on(table.createdById),
+    ],
+  );
   return {
     namespace,
     users,
@@ -535,5 +699,8 @@ export function createFolioSchema(schemaName: string) {
     mcpCredentials,
     mcpSubmissions,
     mcpUploadIntents,
+    taxReviewSnapshots,
+    recurringBillSchedules,
+    recurringBillLinks,
   };
 }

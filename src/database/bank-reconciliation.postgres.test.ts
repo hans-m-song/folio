@@ -65,13 +65,7 @@ const insertAwaitingBankArtifact = async () => {
   await pool.query(
     `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, version_id, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
      VALUES ($1,$2,$2,'commbank_transaction_history_csv_v1',$3,$4,'synthetic-bank-history.csv','text/csv',1,$5,'awaiting_review',now())`,
-    [
-      id,
-      actorId,
-      `tests/bill-t41/${id}`,
-      `synthetic-version-${id}`,
-      checksum,
-    ],
+    [id, actorId, `tests/bill-t41/${id}`, `synthetic-version-${id}`, checksum],
   );
   createdArtifactIds.push(id);
   return id;
@@ -434,7 +428,7 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
     });
   });
 
-  it("protects matched financial identity while allowing unrelated edits", async () => {
+  it("revalidates matched financial identity while allowing safe edits", async () => {
     const bankTransactionId = await insertBankActivity("-41.0000");
     const input = manualInput({ kind: "supplier_expense", amount: "41.0000" });
     const transaction = await folioRepository.createManual(actorId, input);
@@ -464,11 +458,37 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
       notes: "Non-financial correction",
     });
 
-    const guardedUpdates: Array<[string, string]> = [
+    await pool.query(
+      `UPDATE ${transactionsTable} SET kind='processing_fee' WHERE id=$1`,
+      [transaction.id],
+    );
+    await pool.query(
+      `UPDATE ${transactionsTable} SET settled_at='2026-09-23T00:00:00.000Z' WHERE id=$1`,
+      [transaction.id],
+    );
+    const safelyEditedMatch = await pool.query(
+      `SELECT transaction.kind,
+         transaction.settled_at = '2026-09-23T00:00:00.000Z'::timestamptz AS settlement_date_changed,
+         bank.matched_transaction_id::text AS match_id,
+         bank.amount_aud::text AS bank_amount
+       FROM ${transactionsTable} transaction
+       JOIN ${bankTransactionsTable} bank ON bank.matched_transaction_id=transaction.id
+       WHERE transaction.id=$1`,
+      [transaction.id],
+    );
+    expect(safelyEditedMatch.rows[0]).toMatchObject({
+      kind: "processing_fee",
+      settlement_date_changed: true,
+      match_id: transaction.id,
+      bank_amount: "-41.0000",
+    });
+
+    const guardedUpdates: Array<[string, string | null]> = [
       ["source_system", "stripe"],
       ["status", "void"],
-      ["kind", "processing_fee"],
-      ["settled_at", "2026-09-23T00:00:00.000Z"],
+      ["kind", "sale"],
+      ["kind", "transfer"],
+      ["settled_at", null],
       ["settlement_currency", "USD"],
       ["settlement_amount", "42.0000"],
     ];
@@ -479,7 +499,7 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
           transaction.id,
         ]),
       ).rejects.toThrow(
-        "Unmatch the bank transaction before changing financial identity",
+        "Keep the recorded AUD amount and direction, or unmatch the bank transaction before this edit",
       );
     }
   });

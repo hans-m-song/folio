@@ -37,6 +37,20 @@ export class ProposalDraftNotEditableError extends Error {
   }
 }
 
+export class ProposalTransactionConflictError extends Error {
+  constructor() {
+    super("Transaction changed after it was read");
+    this.name = "ProposalTransactionConflictError";
+  }
+}
+
+export class ProposalTransactionNotFoundError extends Error {
+  constructor() {
+    super("Transaction was not found");
+    this.name = "ProposalTransactionNotFoundError";
+  }
+}
+
 export type CredentialParticipant = "administrator" | "actor" | "owner";
 export type CredentialEligibilityReason =
   | "not_found"
@@ -72,21 +86,6 @@ export interface ProposalSubmissionResult {
   replayed: boolean;
 }
 
-export interface ProposalSubmissionStatus {
-  submissionId: string;
-  kind: ProposalSubmission["kind"];
-  linkedId: string;
-  outcome:
-    | "awaiting_human_review"
-    | "recorded"
-    | "void"
-    | "matched"
-    | "no_longer_actionable";
-  intendedBankTransactionId: string | null;
-  resolvedBankTransactionId: string | null;
-  createdAt: string;
-}
-
 export interface BankProposalSuggestion {
   submissionId: string;
   kind: ProposalSubmission["kind"];
@@ -119,6 +118,9 @@ export interface ProposedDraftEvidence {
 
 const iso = (value: Date | string): string =>
   value instanceof Date ? value.toISOString() : String(value);
+
+const updatedAtTokenProjection = (column: string): string =>
+  `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_token`;
 
 const mapCredential = (row: QueryResultRow): ProposalCredentialRecord => ({
   id: String(row.id),
@@ -222,6 +224,21 @@ export class ProposalRepository {
     } finally {
       client.release();
     }
+  }
+
+  async listCredentials(
+    administratorId: string,
+  ): Promise<ProposalCredentialRecord[]> {
+    const authorization = await this.pool.query(
+      `SELECT EXISTS (SELECT 1 FROM ${this.usersTable} administrator WHERE administrator.id=$1 AND administrator.active=true AND administrator.role='administrator') AS authorized`,
+      [administratorId],
+    );
+    if (!authorization.rows[0]?.authorized)
+      throw new ProposalAuthorizationError();
+    const result = await this.pool.query(
+      `SELECT credential.id, credential.label, credential.actor_user_id, credential.default_owner_id, credential.scopes, credential.created_by_id, credential.revoked_at, credential.created_at FROM ${this.credentialsTable} credential ORDER BY credential.created_at DESC, credential.id DESC`,
+    );
+    return result.rows.map(mapCredential);
   }
 
   async credentialForTokenHash(
@@ -387,6 +404,7 @@ export class ProposalRepository {
   async updateDraft(
     credentialId: string,
     transactionId: string,
+    expectedUpdatedAt: string,
     changes: Partial<TransactionInput>,
   ): Promise<{ transactionId: string; updatedAt: string }> {
     const client = await this.pool.connect();
@@ -395,10 +413,10 @@ export class ProposalRepository {
       const credential = await this.requireCredential(
         client,
         credentialId,
-        "proposals:submit",
+        "transactions:draft",
       );
       const result = await client.query(
-        `SELECT transaction.*, transaction.invoice_date::text AS invoice_date_text FROM ${this.transactionsTable} transaction
+        `SELECT transaction.*, transaction.invoice_date::text AS invoice_date_text, ${updatedAtTokenProjection("transaction.updated_at")} FROM ${this.transactionsTable} transaction
          JOIN ${this.submissionsTable} submission ON submission.draft_transaction_id=transaction.id
          WHERE transaction.id=$1 AND submission.credential_id=$2 AND submission.kind='draft_transaction'
          FOR UPDATE OF transaction`,
@@ -408,6 +426,8 @@ export class ProposalRepository {
       if (!row) throw new ProposalAuthorizationError();
       if (row.status !== "draft" || row.source_system !== "manual")
         throw new ProposalDraftNotEditableError();
+      if (String(row.updated_at_token) !== expectedUpdatedAt)
+        throw new ProposalTransactionConflictError();
 
       const linkedEvidence = await client.query(
         `SELECT artifact.id, artifact.artifact_profile, artifact.state
@@ -459,8 +479,8 @@ export class ProposalRepository {
           : null,
       );
       const updated = await client.query(
-        `UPDATE ${this.transactionsTable} SET owner_id=$2, updated_by_id=$3, kind=$4, reference=$5, counterparty=$6, description=$7, category=$8, notes=$9, occurred_at=$10, available_at=$11, invoice_date=$12, settled_at=$13, document_currency=$14, document_amount=$15, document_tax_amount=$16, tax_treatment=$17, settlement_currency=$18, settlement_amount=$19, gst_credit_status=$20, claimable_gst_aud=$21, updated_at=now()
-         WHERE id=$1 AND status='draft' RETURNING updated_at`,
+        `UPDATE ${this.transactionsTable} SET owner_id=$2, updated_by_id=$3, kind=$4, reference=$5, counterparty=$6, description=$7, category=$8, notes=$9, occurred_at=$10, available_at=$11, invoice_date=$12, settled_at=$13, document_currency=$14, document_amount=$15, document_tax_amount=$16, tax_treatment=$17, settlement_currency=$18, settlement_amount=$19, gst_credit_status=$20, claimable_gst_aud=$21, updated_at=greatest(clock_timestamp(), updated_at + interval '1 microsecond')
+         WHERE id=$1 AND status='draft' AND updated_at=$22::timestamptz RETURNING ${updatedAtTokenProjection("updated_at")}`,
         [
           transactionId,
           next.ownerId,
@@ -483,11 +503,54 @@ export class ProposalRepository {
           next.settlementAmount,
           next.gstCreditStatus,
           next.claimableGstAud,
+          expectedUpdatedAt,
         ],
       );
-      if (!updated.rows[0]) throw new ProposalDraftNotEditableError();
+      if (!updated.rows[0]) throw new ProposalTransactionConflictError();
       await client.query("COMMIT");
-      return { transactionId, updatedAt: iso(updated.rows[0].updated_at) };
+      return {
+        transactionId,
+        updatedAt: String(updated.rows[0].updated_at_token),
+      };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async categorizeTransaction(
+    credentialId: string,
+    transactionId: string,
+    expectedUpdatedAt: string,
+    category: string | null,
+  ): Promise<{ transactionId: string; updatedAt: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const credential = await this.requireCredential(
+        client,
+        credentialId,
+        "transactions:categorize",
+      );
+      const current = await client.query(
+        `SELECT ${updatedAtTokenProjection("updated_at")} FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
+        [transactionId],
+      );
+      if (!current.rows[0]) throw new ProposalTransactionNotFoundError();
+      if (String(current.rows[0].updated_at_token) !== expectedUpdatedAt)
+        throw new ProposalTransactionConflictError();
+      const updated = await client.query(
+        `UPDATE ${this.transactionsTable} SET category=$2, updated_by_id=$3, updated_at=greatest(clock_timestamp(), updated_at + interval '1 microsecond') WHERE id=$1 AND updated_at=$4::timestamptz RETURNING ${updatedAtTokenProjection("updated_at")}`,
+        [transactionId, category, credential.actor_user_id, expectedUpdatedAt],
+      );
+      if (!updated.rows[0]) throw new ProposalTransactionConflictError();
+      await client.query("COMMIT");
+      return {
+        transactionId,
+        updatedAt: String(updated.rows[0].updated_at_token),
+      };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -522,7 +585,9 @@ export class ProposalRepository {
       const credential = await this.requireCredential(
         client,
         credentialId,
-        "proposals:submit",
+        submission.kind === "draft_transaction"
+          ? "transactions:draft"
+          : "bank_matches:suggest",
       );
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -613,76 +678,6 @@ export class ProposalRepository {
         kind: submission.kind,
         linkedId: draftTransactionId ?? proposedTransactionId!,
         replayed: false,
-      };
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  async getSubmissionStatus(
-    credentialId: string,
-    submissionId: string,
-  ): Promise<ProposalSubmissionStatus | null> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.requireCredential(client, credentialId, "submissions:read");
-      const result = await client.query(
-        `SELECT submission.*, transaction.status AS transaction_status,
-          coalesce(submission.bank_transaction_id, resolved.bank_transaction_id) AS resolved_bank_transaction_id,
-          bank.matched_transaction_id, bank.classification
-         FROM ${this.submissionsTable} submission
-         JOIN ${this.transactionsTable} transaction ON transaction.id=coalesce(submission.draft_transaction_id, submission.proposed_transaction_id)
-         LEFT JOIN LATERAL (
-           SELECT link.bank_transaction_id FROM ${this.bankArtifactsTable} link
-           WHERE link.source_artifact_id=submission.source_artifact_id
-             AND link.metadata->>'row'=submission.source_row::text
-           ORDER BY link.bank_transaction_id LIMIT 1
-         ) resolved ON true
-         LEFT JOIN ${this.bankTransactionsTable} bank ON bank.id=coalesce(submission.bank_transaction_id, resolved.bank_transaction_id)
-         WHERE submission.id=$1 AND submission.credential_id=$2`,
-        [submissionId, credentialId],
-      );
-      await client.query("COMMIT");
-      const row = result.rows[0];
-      if (!row) return null;
-      const linkedId = String(
-        row.draft_transaction_id ?? row.proposed_transaction_id,
-      );
-      let outcome: ProposalSubmissionStatus["outcome"] =
-        "awaiting_human_review";
-      if (
-        row.kind === "draft_transaction" &&
-        row.transaction_status === "recorded"
-      )
-        outcome = "recorded";
-      if (row.kind === "draft_transaction" && row.transaction_status === "void")
-        outcome = "void";
-      if (
-        row.kind === "existing_match" &&
-        row.matched_transaction_id === row.proposed_transaction_id
-      )
-        outcome = "matched";
-      else if (
-        row.kind === "existing_match" &&
-        (row.matched_transaction_id !== null || row.classification !== null)
-      )
-        outcome = "no_longer_actionable";
-      return {
-        submissionId: String(row.id),
-        kind: row.kind,
-        linkedId,
-        outcome,
-        intendedBankTransactionId: row.bank_transaction_id
-          ? String(row.bank_transaction_id)
-          : null,
-        resolvedBankTransactionId: row.resolved_bank_transaction_id
-          ? String(row.resolved_bank_transaction_id)
-          : null,
-        createdAt: iso(row.created_at),
       };
     } catch (error) {
       await client.query("ROLLBACK");

@@ -11,4 +11,10 @@ export const requiredMigrationIds = [
   "0010_folio_artifact_review",
   "0011_folio_mcp_proposals",
   "0012_folio_mcp_upload_intents",
+  "0013_folio_mcp_transaction_scopes",
+  "0014_folio_tax_review_snapshots",
+  "0015_folio_matched_transaction_edits",
+  "0016_folio_owner_loan_repayments",
+  "0017_folio_recurring_bills",
+  "0018_folio_recurring_bill_rules",
 ] as const;

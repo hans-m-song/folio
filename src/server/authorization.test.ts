@@ -25,6 +25,7 @@ describe("authorization policy", () => {
       "bank_activity:reconcile",
       "report:read",
       "report:export",
+      "report:review",
       "user:admin",
       "audit:read",
       "session:admin",
@@ -32,6 +33,7 @@ describe("authorization policy", () => {
     expect(rolePermissionBundles.viewer).toEqual([]);
     expect(hasPermission("member", permissions.userAdmin)).toBe(false);
     expect(hasPermission("member", permissions.reportExport)).toBe(true);
+    expect(hasPermission("member", permissions.reportReview)).toBe(true);
     expect(hasPermission("administrator", permissions.sessionAdmin)).toBe(true);
     expect(operationPermissions.createUser).toEqual([permissions.userAdmin]);
     expect(operationPermissions.exportReport).toEqual([
@@ -42,6 +44,17 @@ describe("authorization policy", () => {
       permissions.bankActivityView,
       permissions.transactionRead,
       permissions.artifactList,
+    ]);
+    expect(operationPermissions.getNextBankReconciliation).toEqual(
+      operationPermissions.getBankReconciliation,
+    );
+    expect(operationPermissions.getTaxPartnerOptions).toEqual([
+      permissions.reportRead,
+      permissions.reportReview,
+    ]);
+    expect(operationPermissions.extractInvoiceFields).toEqual([
+      permissions.artifactDownload,
+      permissions.artifactUpload,
     ]);
     expect(operationPermissions.createAndMatchBankTransaction).toEqual([
       permissions.bankActivityReconcile,
@@ -55,11 +68,15 @@ describe("authorization policy", () => {
       "getTransaction",
       "saveManualTransaction",
       "voidTransaction",
+      "previewBulkTransactionEdit",
+      "applyBulkTransactionEdit",
+      "deleteDraftTransaction",
       "createUser",
       "updateUser",
       "startArtifactUpload",
       "confirmArtifactUpload",
       "downloadArtifact",
+      "extractInvoiceFields",
       "rejectArtifact",
       "deleteArtifact",
       "listAvailableInvoiceArtifacts",
@@ -73,10 +90,23 @@ describe("authorization policy", () => {
       "listBankImports",
       "listBankTransactions",
       "getBankReconciliation",
+      "getNextBankReconciliation",
       "reconcileBankTransaction",
       "createAndMatchBankTransaction",
       "getReport",
       "exportReport",
+      "getTaxWorksheet",
+      "getTaxPartnerOptions",
+      "exportTaxSource",
+      "reviewTaxWorksheet",
+      "exportTaxWorksheet",
+      "getRecurringBillsWorkspace",
+      "getRecurringBillAttention",
+      "previewRecurringBill",
+      "saveRecurringBill",
+      "setRecurringBillActive",
+      "linkRecurringBillTransaction",
+      "unlinkRecurringBillTransaction",
     ]);
     for (const required of Object.values(operationPermissions))
       for (const permission of required)
@@ -119,5 +149,16 @@ describe("authorization policy", () => {
         session: vi.fn().mockResolvedValue(actor),
       }),
     ).resolves.toBe(actor);
+  });
+
+  it("preserves unexpected session lookup failures", async () => {
+    const failure = new Error("session lookup unavailable");
+    await expect(
+      resolveAuthorizedActor({
+        token: "opaque",
+        permission: permissions.workspaceRead,
+        session: vi.fn().mockRejectedValue(failure),
+      }),
+    ).rejects.toBe(failure);
   });
 });

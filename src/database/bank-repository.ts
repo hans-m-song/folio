@@ -97,6 +97,89 @@ export interface BankTransactionRecord {
   updatedById: string;
 }
 
+export type BankQueryComparisonOperator =
+  | "equals"
+  | "not_equals"
+  | "greater_than"
+  | "greater_than_or_equal"
+  | "less_than"
+  | "less_than_or_equal";
+
+export type BankTextFilterOperator =
+  | "equals"
+  | "not_equals"
+  | "contains"
+  | "not_contains";
+
+export type BankEnumMembershipOperator = "contains_any" | "contains_none";
+
+type BankEnumFilterValue<Value extends string> =
+  | { operator: "is" | "is_not"; value: Value }
+  | { operator: BankEnumMembershipOperator; value: readonly Value[] };
+
+export type BankActivityFilterClause =
+  | {
+      field: "postedDate";
+      operator: BankQueryComparisonOperator;
+      value: string;
+    }
+  | {
+      field: "description";
+      operator: BankTextFilterOperator;
+      value: string;
+    }
+  | {
+      field: "amountAud";
+      operator: BankQueryComparisonOperator;
+      value: string;
+    }
+  | ({ field: "reviewState" } & BankEnumFilterValue<BankReviewState>)
+  | ({ field: "matchStatus" } & BankEnumFilterValue<"matched" | "unmatched">);
+
+export type BankActivitySortKey =
+  | "postedDate"
+  | "description"
+  | "amountAud"
+  | "reviewState"
+  | "matchStatus";
+
+export interface BankActivitySortClause {
+  key: BankActivitySortKey;
+  direction: "asc" | "desc";
+}
+
+export type BankImportFilterClause =
+  | {
+      field: "filename";
+      operator: BankTextFilterOperator;
+      value: string;
+    }
+  | {
+      field: "earliestDate" | "latestDate";
+      operator: BankQueryComparisonOperator;
+      value: string;
+    }
+  | {
+      field: "rowCount" | "reviewedCount" | "unresolvedCount";
+      operator: BankQueryComparisonOperator;
+      value: string;
+    }
+  | ({ field: "state" } & BankEnumFilterValue<BankImportRecord["state"]>);
+
+export type BankImportSortKey =
+  | "filename"
+  | "earliestDate"
+  | "latestDate"
+  | "rowCount"
+  | "reviewedCount"
+  | "unresolvedCount"
+  | "state";
+
+export interface BankImportSortClause {
+  key: BankImportSortKey;
+  direction: "asc" | "desc";
+}
+
 export interface BankMatchCandidate {
   id: string;
   settledAt: string;
@@ -132,6 +215,26 @@ export interface BankReconciliationCounts {
   duplicate: number;
 }
 
+export type NextBankReconciliationTarget =
+  | { status: "target"; bankId: string; page: number }
+  | { status: "none" }
+  | {
+      status: "advance_incomplete";
+      reason:
+        | "anchor_missing"
+        | "anchor_outside_import"
+        | "anchor_unresolved"
+        | "queue_limit";
+    };
+
+export interface FinancialYearBankReviewRow {
+  id: string;
+  postedDate: string;
+  revision: string;
+  updatedAt: string;
+  reviewState: "matched" | "private" | "transfer" | "duplicate" | "unresolved";
+}
+
 export interface BankOverviewSummary {
   unresolvedBankRows: number;
   importsWithUnresolvedRows: number;
@@ -162,6 +265,107 @@ const reviewState = (row: QueryResultRow): BankReviewState =>
   row.matched_transaction_id
     ? "matched"
     : ((row.classification as BankClassification | null) ?? "unresolved");
+
+const bankComparisonSql: Record<BankQueryComparisonOperator, string> = {
+  equals: "=",
+  not_equals: "<>",
+  greater_than: ">",
+  greater_than_or_equal: ">=",
+  less_than: "<",
+  less_than_or_equal: "<=",
+};
+
+const bankTextFilterSql = (
+  column: string,
+  operator: BankTextFilterOperator,
+  placeholder: string,
+) => {
+  if (operator === "contains")
+    return `position(lower(${placeholder}) in lower(${column})) > 0`;
+  if (operator === "not_contains")
+    return `position(lower(${placeholder}) in lower(${column})) = 0`;
+  return `lower(${column}) ${operator === "equals" ? "=" : "<>"} lower(${placeholder})`;
+};
+
+const bankReviewStateSql =
+  "CASE WHEN bank.matched_transaction_id IS NOT NULL THEN 'matched' WHEN bank.classification IS NOT NULL THEN bank.classification ELSE 'unresolved' END";
+
+const bankActivityFilterSql = (
+  filter: BankActivityFilterClause,
+  parameters: unknown[],
+): string | undefined => {
+  if (
+    (filter.operator === "contains_any" ||
+      filter.operator === "contains_none") &&
+    filter.value.length === 0
+  )
+    return undefined;
+  const placeholder = `$${parameters.push(filter.value)}`;
+  if (filter.field === "description")
+    return bankTextFilterSql("bank.description", filter.operator, placeholder);
+  if (filter.field === "postedDate")
+    return `bank.posted_date ${bankComparisonSql[filter.operator]} ${placeholder}::date`;
+  if (filter.field === "amountAud")
+    return `bank.amount_aud ${bankComparisonSql[filter.operator]} ${placeholder}::numeric`;
+  const column =
+    filter.field === "reviewState"
+      ? bankReviewStateSql
+      : "CASE WHEN bank.matched_transaction_id IS NOT NULL THEN 'matched' ELSE 'unmatched' END";
+  if (filter.operator === "contains_any" || filter.operator === "contains_none")
+    return `${column} ${filter.operator === "contains_any" ? "= ANY" : "<> ALL"}(${placeholder}::text[])`;
+  return `${column} ${filter.operator === "is" ? "=" : "<>"} ${placeholder}`;
+};
+
+const bankActivitySortColumns: Record<BankActivitySortKey, string> = {
+  postedDate: "bank.posted_date",
+  description: "bank.description",
+  amountAud: "bank.amount_aud",
+  reviewState: bankReviewStateSql,
+  matchStatus:
+    "CASE WHEN bank.matched_transaction_id IS NOT NULL THEN 'matched' ELSE 'unmatched' END",
+};
+
+const bankImportFilterSql = (
+  filter: BankImportFilterClause,
+  parameters: unknown[],
+): string | undefined => {
+  if (
+    (filter.operator === "contains_any" ||
+      filter.operator === "contains_none") &&
+    filter.value.length === 0
+  )
+    return undefined;
+  const placeholder = `$${parameters.push(filter.value)}`;
+  if (filter.field === "filename")
+    return bankTextFilterSql("imports.filename", filter.operator, placeholder);
+  if (filter.field === "earliestDate" || filter.field === "latestDate")
+    return `imports.${filter.field === "earliestDate" ? "earliest_date" : "latest_date"}::date ${bankComparisonSql[filter.operator]} ${placeholder}::date`;
+  if (filter.field === "state") {
+    if (
+      filter.operator === "contains_any" ||
+      filter.operator === "contains_none"
+    )
+      return `imports.state ${filter.operator === "contains_any" ? "= ANY" : "<> ALL"}(${placeholder}::text[])`;
+    return `imports.state ${filter.operator === "is" ? "=" : "<>"} ${placeholder}`;
+  }
+  const column =
+    filter.field === "reviewedCount"
+      ? "(imports.row_count - imports.unresolved_count)"
+      : filter.field === "rowCount"
+        ? "imports.row_count"
+        : "imports.unresolved_count";
+  return `${column} ${bankComparisonSql[filter.operator]} ${placeholder}::numeric`;
+};
+
+const bankImportSortColumns: Record<BankImportSortKey, string> = {
+  filename: "imports.filename",
+  earliestDate: "imports.earliest_date",
+  latestDate: "imports.latest_date",
+  rowCount: "imports.row_count",
+  reviewedCount: "(imports.row_count - imports.unresolved_count)",
+  unresolvedCount: "imports.unresolved_count",
+  state: "imports.state",
+};
 
 export class BankRepository {
   private readonly usersTable: string;
@@ -354,24 +558,49 @@ export class BankRepository {
 
   async listImports(
     actorId: string,
-    input: { limit: number; offset: number },
+    input: {
+      limit: number;
+      offset: number;
+      filters?: readonly BankImportFilterClause[];
+      sort?: readonly BankImportSortClause[];
+    },
   ): Promise<BankImportRecord[]> {
+    const parameters: unknown[] = [profile, actorId];
+    const filters = (input.filters ?? []).flatMap((filter) => {
+      const sql = bankImportFilterSql(filter, parameters);
+      return sql ? [sql] : [];
+    });
+    const sort = input.sort ?? [];
+    const orderBy = sort.length
+      ? [
+          ...sort.map(
+            ({ key, direction }) =>
+              `${bankImportSortColumns[key]} ${direction.toUpperCase()} NULLS LAST`,
+          ),
+          "imports.artifact_id DESC",
+        ]
+      : ["imports.created_at DESC", "imports.artifact_id DESC"];
+    const limitParameter = `$${parameters.push(input.limit)}`;
+    const offsetParameter = `$${parameters.push(input.offset)}`;
     const result = await this.pool.query(
-      `SELECT artifact.id, artifact.filename, artifact.state, artifact.created_at, artifact.confirmed_at,
-        count(bank.id)::integer AS row_count,
-        count(bank.id) FILTER (WHERE bank.matched_transaction_id IS NULL AND bank.classification IS NULL)::integer AS unresolved_count,
-        min(bank.posted_date)::text AS earliest_date, max(bank.posted_date)::text AS latest_date
-       FROM ${this.artifactsTable} artifact
-       LEFT JOIN ${this.bankArtifactsTable} link ON link.source_artifact_id=artifact.id
-       LEFT JOIN ${this.bankTransactionsTable} bank ON bank.id=link.bank_transaction_id
-       WHERE artifact.artifact_profile=$1
-       AND EXISTS (SELECT 1 FROM ${this.usersTable} actor WHERE actor.id=$2 AND actor.active=true)
-       GROUP BY artifact.id
-       ORDER BY artifact.created_at DESC, artifact.id DESC LIMIT $3 OFFSET $4`,
-      [profile, actorId, input.limit, input.offset],
+      `SELECT imports.* FROM (
+         SELECT artifact.id AS artifact_id, artifact.filename, artifact.state, artifact.created_at, artifact.confirmed_at,
+           count(bank.id)::integer AS row_count,
+           count(bank.id) FILTER (WHERE bank.matched_transaction_id IS NULL AND bank.classification IS NULL)::integer AS unresolved_count,
+           min(bank.posted_date)::text AS earliest_date, max(bank.posted_date)::text AS latest_date
+         FROM ${this.artifactsTable} artifact
+         LEFT JOIN ${this.bankArtifactsTable} link ON link.source_artifact_id=artifact.id
+         LEFT JOIN ${this.bankTransactionsTable} bank ON bank.id=link.bank_transaction_id
+         WHERE artifact.artifact_profile=$1
+         AND EXISTS (SELECT 1 FROM ${this.usersTable} actor WHERE actor.id=$2 AND actor.active=true)
+         GROUP BY artifact.id
+       ) imports
+       ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+       ORDER BY ${orderBy.join(", ")} LIMIT ${limitParameter} OFFSET ${offsetParameter}`,
+      parameters,
     );
     return result.rows.map((row) => ({
-      artifactId: String(row.id),
+      artifactId: String(row.artifact_id),
       filename: String(row.filename),
       state: row.state,
       createdAt: iso(row.created_at),
@@ -390,8 +619,31 @@ export class BankRepository {
       offset: number;
       artifactId?: string;
       state?: BankReviewState;
+      filters?: readonly BankActivityFilterClause[];
+      sort?: readonly BankActivitySortClause[];
     },
   ): Promise<BankTransactionRecord[]> {
+    const parameters: unknown[] = [
+      actorId,
+      input.artifactId ?? null,
+      input.state ?? null,
+    ];
+    const filters = (input.filters ?? []).flatMap((filter) => {
+      const sql = bankActivityFilterSql(filter, parameters);
+      return sql ? [sql] : [];
+    });
+    const sort = input.sort ?? [];
+    const orderBy = sort.length
+      ? [
+          ...sort.map(
+            ({ key, direction }) =>
+              `${bankActivitySortColumns[key]} ${direction.toUpperCase()} NULLS LAST`,
+          ),
+          "bank.id DESC",
+        ]
+      : ["bank.posted_date DESC", "bank.id DESC"];
+    const limitParameter = `$${parameters.push(input.limit)}`;
+    const offsetParameter = `$${parameters.push(input.offset)}`;
     const result = await this.pool.query(
       `SELECT bank.*, bank.posted_date::text AS posted_date_text, artifacts.source_artifact_ids
        FROM ${this.bankTransactionsTable} bank
@@ -405,15 +657,10 @@ export class BankRepository {
          SELECT 1 FROM ${this.bankArtifactsTable} selected_link
          WHERE selected_link.bank_transaction_id=bank.id AND selected_link.source_artifact_id=$2
        ))
-       AND ($3::text IS NULL OR CASE WHEN bank.matched_transaction_id IS NOT NULL THEN 'matched' WHEN bank.classification IS NOT NULL THEN bank.classification ELSE 'unresolved' END=$3)
-       ORDER BY bank.posted_date DESC, bank.id DESC LIMIT $4 OFFSET $5`,
-      [
-        actorId,
-        input.artifactId ?? null,
-        input.state ?? null,
-        input.limit,
-        input.offset,
-      ],
+       AND ($3::text IS NULL OR ${bankReviewStateSql}=$3)
+       ${filters.length ? `AND ${filters.join(" AND ")}` : ""}
+       ORDER BY ${orderBy.join(", ")} LIMIT ${limitParameter} OFFSET ${offsetParameter}`,
+      parameters,
     );
     return result.rows.map((row) => ({
       id: String(row.id),
@@ -465,6 +712,165 @@ export class BankRepository {
       transfer: Number(row.transfer),
       duplicate: Number(row.duplicate),
     };
+  }
+
+  async nextReconciliationTarget(
+    actorId: string,
+    bankTransactionId: string,
+    artifactId: string | undefined,
+    unresolvedOnly: boolean,
+  ): Promise<NextBankReconciliationTarget> {
+    await this.requireActor(this.pool, actorId);
+    const result = await this.pool.query(
+      `WITH anchor AS (
+         SELECT id, posted_date, matched_transaction_id, classification
+         FROM ${this.bankTransactionsTable}
+         WHERE id=$1
+       ),
+       target_candidates AS (
+         (
+           SELECT queue.id, queue.posted_date, 0 AS traversal_order
+           FROM ${this.bankTransactionsTable} queue
+           CROSS JOIN anchor
+           WHERE queue.matched_transaction_id IS NULL
+           AND queue.classification IS NULL
+           AND queue.id<>$1
+           AND ($2::uuid IS NULL OR EXISTS (
+             SELECT 1 FROM ${this.bankArtifactsTable} link
+             WHERE link.bank_transaction_id=queue.id
+             AND link.source_artifact_id=$2
+           ))
+           AND (queue.posted_date, queue.id) < (anchor.posted_date, anchor.id)
+           ORDER BY queue.posted_date DESC, queue.id DESC
+           LIMIT 1
+         )
+         UNION ALL
+         (
+           SELECT queue.id, queue.posted_date, 1 AS traversal_order
+           FROM ${this.bankTransactionsTable} queue
+           CROSS JOIN anchor
+           WHERE queue.matched_transaction_id IS NULL
+           AND queue.classification IS NULL
+           AND queue.id<>$1
+           AND ($2::uuid IS NULL OR EXISTS (
+             SELECT 1 FROM ${this.bankArtifactsTable} link
+             WHERE link.bank_transaction_id=queue.id
+             AND link.source_artifact_id=$2
+           ))
+           AND (queue.posted_date, queue.id) > (anchor.posted_date, anchor.id)
+           ORDER BY queue.posted_date DESC, queue.id DESC
+           LIMIT 1
+         )
+       ),
+       target AS (
+         SELECT id, posted_date
+         FROM target_candidates
+         ORDER BY traversal_order
+         LIMIT 1
+       ),
+       positioned_target AS (
+         SELECT target.id,
+           (
+             SELECT count(*)::integer
+             FROM (
+               SELECT displayed.id
+               FROM ${this.bankTransactionsTable} displayed
+               WHERE ($2::uuid IS NULL OR EXISTS (
+                 SELECT 1 FROM ${this.bankArtifactsTable} link
+                 WHERE link.bank_transaction_id=displayed.id
+                 AND link.source_artifact_id=$2
+               ))
+               AND (NOT $3::boolean OR (
+                 displayed.matched_transaction_id IS NULL
+                 AND displayed.classification IS NULL
+               ))
+               AND (displayed.posted_date, displayed.id) > (target.posted_date, target.id)
+               ORDER BY displayed.posted_date DESC, displayed.id DESC
+               LIMIT 10100
+             ) preceding
+           ) AS preceding_count
+         FROM target
+       )
+       SELECT
+         CASE
+           WHEN NOT EXISTS (SELECT 1 FROM anchor) THEN 'anchor_missing'
+           WHEN $2::uuid IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM ${this.bankArtifactsTable} link
+             WHERE link.bank_transaction_id=$1
+           AND link.source_artifact_id=$2
+           ) THEN 'anchor_outside_import'
+           WHEN EXISTS (
+             SELECT 1 FROM anchor
+             WHERE matched_transaction_id IS NULL AND classification IS NULL
+           ) THEN 'anchor_unresolved'
+           WHEN NOT EXISTS (SELECT 1 FROM positioned_target) THEN 'none'
+           WHEN (SELECT preceding_count FROM positioned_target) >= 10100 THEN 'queue_limit'
+           ELSE 'target'
+         END AS status,
+         (SELECT id::text FROM positioned_target) AS bank_id,
+         CASE
+           WHEN (SELECT preceding_count FROM positioned_target) < 10100
+           THEN ((SELECT preceding_count FROM positioned_target) / 100) + 1
+           ELSE NULL
+         END AS page`,
+      [bankTransactionId, artifactId ?? null, unresolvedOnly],
+    );
+    const row = result.rows[0];
+
+    if (!row) throw new Error("Bank reconciliation queue selection failed");
+    if (row.status === "none") return { status: "none" };
+    if (row.status === "target" && row.bank_id && row.page)
+      return {
+        status: "target",
+        bankId: String(row.bank_id),
+        page: Number(row.page),
+      };
+    if (
+      row.status === "anchor_missing" ||
+      row.status === "anchor_outside_import" ||
+      row.status === "anchor_unresolved" ||
+      row.status === "queue_limit"
+    )
+      return {
+        status: "advance_incomplete",
+        reason: row.status,
+      };
+
+    throw new Error(
+      "Bank reconciliation queue selection returned an invalid result",
+    );
+  }
+
+  async financialYearReviewRows(
+    actorId: string,
+    financialYearStartYear: number,
+  ): Promise<FinancialYearBankReviewRow[]> {
+    if (
+      !Number.isInteger(financialYearStartYear) ||
+      financialYearStartYear < 2000 ||
+      financialYearStartYear > 2100
+    )
+      throw new Error("Invalid financial year");
+    const result = await this.pool.query(
+      `SELECT bank.id, bank.posted_date::text AS posted_date_text, bank.revision, bank.updated_at,
+        bank.matched_transaction_id, bank.classification
+       FROM ${this.bankTransactionsTable} bank
+       WHERE bank.posted_date >= $2::date AND bank.posted_date < $3::date
+       AND EXISTS (SELECT 1 FROM ${this.usersTable} actor WHERE actor.id=$1 AND actor.active=true)
+       ORDER BY bank.posted_date, bank.id`,
+      [
+        actorId,
+        `${financialYearStartYear}-07-01`,
+        `${financialYearStartYear + 1}-07-01`,
+      ],
+    );
+    return result.rows.map((row) => ({
+      id: String(row.id),
+      postedDate: String(row.posted_date_text),
+      revision: String(row.revision),
+      updatedAt: iso(row.updated_at),
+      reviewState: reviewState(row),
+    }));
   }
 
   async overviewSummary(actorId: string): Promise<BankOverviewSummary> {
@@ -537,7 +943,7 @@ export class BankRepository {
        FROM ${this.transactionsTable} candidate
        WHERE candidate.source_system='manual' AND candidate.status='recorded'
        AND candidate.settled_at IS NOT NULL AND candidate.settlement_currency='AUD' AND candidate.settlement_amount IS NOT NULL
-       AND candidate.kind IN ('sale','supplier_expense','processing_fee','sale_refund','supplier_credit','owner_contribution','owner_loan')
+       AND candidate.kind IN ('sale','supplier_expense','processing_fee','sale_refund','supplier_credit','owner_contribution','owner_loan','owner_loan_repayment')
        AND CASE WHEN candidate.kind IN ('sale','supplier_credit','owner_contribution','owner_loan') THEN candidate.settlement_amount ELSE -candidate.settlement_amount END=$1::numeric
        AND ($3::integer IS NULL OR abs(candidate.settled_at::date - $2::date) <= $3)
        AND NOT EXISTS (SELECT 1 FROM ${this.bankTransactionsTable} matched WHERE matched.matched_transaction_id=candidate.id AND matched.id<>$4)`,

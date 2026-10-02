@@ -70,6 +70,53 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("Transaction detail page", () => {
+  it("offers explicit recurring setup only for recorded supplier expenses", () => {
+    mocks.transaction = { ...transaction, kind: "supplier_expense" };
+    renderTransaction();
+    const editLink = screen.getByRole("link", { name: "Edit transaction" });
+    const trackLink = screen.getByRole("link", {
+      name: "Track recurring bill",
+    });
+    expect(trackLink.getAttribute("href")).toBe(
+      `/transactions/recurring?sourceTransactionId=${transaction.id}`,
+    );
+    expect(trackLink.classList.contains("transaction-detail-edit")).toBe(true);
+    expect(editLink.parentElement).toBe(trackLink.parentElement);
+    expect(
+      editLink.parentElement?.classList.contains("transaction-detail-actions"),
+    ).toBe(true);
+    cleanup();
+    mocks.transaction = {
+      ...transaction,
+      kind: "supplier_expense",
+      status: "draft",
+    };
+    renderTransaction();
+    expect(
+      screen.queryByRole("link", { name: "Track recurring bill" }),
+    ).toBeNull();
+    cleanup();
+    mocks.transaction = { ...transaction, kind: "supplier_credit" };
+    renderTransaction();
+    expect(
+      screen.queryByRole("link", { name: "Track recurring bill" }),
+    ).toBeNull();
+  });
+
+  it.each([
+    { kind: "supplier_expense", label: "Invoice missing" },
+    { kind: "supplier_credit", label: "Credit note missing" },
+    { kind: "owner_loan", label: "Invoice not expected" },
+  ])(
+    "shows document status separately from recorded status for $kind",
+    ({ kind, label }) => {
+      mocks.transaction = { ...transaction, kind };
+      renderTransaction();
+      expect(screen.getByText("recorded")).toBeTruthy();
+      expect(screen.getByText(label)).toBeTruthy();
+    },
+  );
+
   it("shows the description once and presents editing as a secondary action", () => {
     renderTransaction();
 
@@ -79,5 +126,27 @@ describe("Transaction detail page", () => {
       "/transactions/123e4567-e89b-42d3-a456-426614174000/edit",
     );
     expect(editLink.classList.contains("transaction-detail-edit")).toBe(true);
+  });
+
+  it("marks document and settlement amounts while preserving their display strings", () => {
+    renderTransaction();
+
+    const amounts = screen.getAllByText("AUD 120.0000");
+    expect(amounts).toHaveLength(2);
+    for (const amount of amounts)
+      expect(amount.getAttribute("data-money-value")).toBe("");
+  });
+
+  it("marks the Stripe net amount without altering its source-currency text", () => {
+    mocks.transaction = {
+      ...transaction,
+      sourceSystem: "stripe",
+      sourceCurrency: "USD",
+      sourceNet: "119.0000",
+    };
+    renderTransaction();
+
+    const amount = screen.getByText("USD 119.0000");
+    expect(amount.getAttribute("data-money-value")).toBe("");
   });
 });

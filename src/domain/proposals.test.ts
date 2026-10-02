@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import type { ArtifactRecord } from "../documents/service";
 import {
+  expandCredentialScopes,
   MAX_PROPOSAL_REQUEST_BYTES,
   parseProposalSubmission,
   proposalCredentialInputSchema,
+  proposalCredentialScopeSchema,
   proposalDraftNotes,
   proposalPayloadHash,
   validatePreImportCommBankLocator,
@@ -62,7 +64,9 @@ describe("proposal domain", () => {
         sourceArtifactId: "11111111-1111-4111-8111-111111111111",
       },
     ])
-      expect(() => parseProposalSubmission({ ...draft, transaction })).toThrow();
+      expect(() =>
+        parseProposalSubmission({ ...draft, transaction }),
+      ).toThrow();
   });
 
   it("requires a distinct dedicated actor and unique bounded scopes", () => {
@@ -73,9 +77,44 @@ describe("proposal domain", () => {
         tokenHash: "a".repeat(64),
         actorUserId: id,
         defaultOwnerId: id,
-        scopes: ["proposals:submit", "proposals:submit"],
+        scopes: ["transactions:draft", "transactions:draft"],
       }),
     ).toThrow();
+  });
+
+  it("keeps the legacy scope valid for stored credentials but not explicit issuance", () => {
+    expect(proposalCredentialScopeSchema.parse("submissions:read")).toBe(
+      "submissions:read",
+    );
+    expect(
+      proposalCredentialInputSchema.safeParse({
+        label: "Synthetic credential",
+        tokenHash: "a".repeat(64),
+        actorUserId: "22222222-2222-4222-8222-222222222222",
+        defaultOwnerId: "33333333-3333-4333-8333-333333333333",
+        scopes: ["submissions:read"],
+      }).success,
+    ).toBe(true);
+    expect(() => expandCredentialScopes(["submissions:read"])).toThrow(
+      "Unknown credential scope",
+    );
+  });
+
+  it("expands only the current concrete credential scopes", () => {
+    expect(expandCredentialScopes(["transactions:*", "artifacts:*"])).toEqual([
+      "transactions:search",
+      "transactions:draft",
+      "transactions:categorize",
+      "artifacts:read",
+      "artifacts:upload",
+    ]);
+    expect(expandCredentialScopes(["bank_matches:*"])).toEqual([
+      "bank_matches:suggest",
+    ]);
+    expect(expandCredentialScopes(["*"])).toHaveLength(7);
+    expect(() => expandCredentialScopes(["future:*"])).toThrow(
+      "Unknown credential scope",
+    );
   });
 
   it("validates a positive row against the pinned CommBank preview", () => {

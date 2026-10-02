@@ -100,6 +100,19 @@ td {
 .amount-positive {
   color: var(--positive);
 }
+.money-text,
+.money-column,
+table th.money-column,
+table td.money-column {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.money-text {
+  display: block;
+}
+td.money-column::before {
+  text-align: left;
+}
 .acknowledgement {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
@@ -496,6 +509,10 @@ button:disabled {
 .compact-button {
   min-height: 2.25rem;
   padding: 0.35rem 0.65rem;
+}
+button.filter-clause-remove {
+  color: var(--danger);
+  border: 1px solid var(--border);
 }
 .copy-feedback {
   position: fixed;
