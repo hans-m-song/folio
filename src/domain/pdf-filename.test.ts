@@ -21,10 +21,17 @@ describe("PDF filename suggestions", () => {
     });
   });
 
+  it("returns supplier and date when the optional reference is absent", () => {
+    expect(parsePdfFilename("Acme-2026-02-28.pdf")).toEqual({
+      supplier: "Acme",
+      invoiceDate: "2026-02-28",
+      reference: null,
+    });
+  });
+
   it("rejects invalid dates and malformed or non-PDF filenames", () => {
     expect(parsePdfFilename("Acme-2025-02-29-INV-1.pdf")).toBeNull();
     expect(parsePdfFilename("Acme-2026-13-01-INV-1.pdf")).toBeNull();
-    expect(parsePdfFilename("Acme-2026-01-01.pdf")).toBeNull();
     expect(parsePdfFilename("Acme-2026-01-01-INV-1.txt")).toBeNull();
   });
 

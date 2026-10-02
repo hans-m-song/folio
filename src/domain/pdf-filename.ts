@@ -1,7 +1,7 @@
 export interface PdfFilenameSuggestions {
   supplier: string;
   invoiceDate: string;
-  reference: string;
+  reference: string | null;
 }
 
 export interface PdfTransactionFieldValues {
@@ -16,7 +16,7 @@ export interface PdfSuggestionApplication {
 }
 
 const pdfFilenamePattern =
-  /^(.+?)\s*-+\s*(\d{4}-\d{2}-\d{2})\s*-+\s*(.+)\.pdf$/i;
+  /^(.+?)\s*-+\s*(\d{4}-\d{2}-\d{2})(?:\s*-+\s*(.+))?\.pdf$/i;
 
 function isValidIsoDate(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -49,8 +49,8 @@ export function parsePdfFilename(
   const match = pdfFilenamePattern.exec(basename);
   if (!match || !isValidIsoDate(match[2]!)) return null;
   const supplier = match[1]!.trim();
-  const reference = match[3]!.trim();
-  if (!supplier || !reference) return null;
+  const reference = match[3]?.trim() || null;
+  if (!supplier) return null;
   return {
     supplier,
     invoiceDate: match[2]!,
@@ -64,18 +64,17 @@ export function applyPdfFilenameSuggestions(
 ): PdfSuggestionApplication {
   const values = { ...current };
   const filled: (keyof PdfTransactionFieldValues)[] = [];
-  const mappings: ReadonlyArray<
-    readonly [keyof PdfTransactionFieldValues, keyof PdfFilenameSuggestions]
-  > = [
-    ["counterparty", "supplier"],
-    ["invoiceDate", "invoiceDate"],
-    ["reference", "reference"],
-  ];
-  for (const [field, suggestion] of mappings) {
-    if (!values[field].trim()) {
-      values[field] = suggestions[suggestion];
-      filled.push(field);
-    }
+  if (!values.counterparty.trim()) {
+    values.counterparty = suggestions.supplier;
+    filled.push("counterparty");
+  }
+  if (!values.invoiceDate.trim()) {
+    values.invoiceDate = suggestions.invoiceDate;
+    filled.push("invoiceDate");
+  }
+  if (!values.reference.trim() && suggestions.reference) {
+    values.reference = suggestions.reference;
+    filled.push("reference");
   }
   return { values, filled };
 }

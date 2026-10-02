@@ -380,6 +380,90 @@ export class DocumentService {
     };
   }
 
+  async readInvoicePdf(
+    actorId: string,
+    id: string,
+    expected?: { checksumSha256?: string; versionId?: string },
+  ): Promise<{
+    artifactId: string;
+    checksumSha256: string;
+    versionId: string;
+    bytes: Uint8Array;
+  }> {
+    await this.repository.requireActiveActorId(actorId);
+    const artifact = await this.repository.getArtifact(id);
+    if (
+      !artifact ||
+      artifactProfileOf(artifact) !== "manual_invoice_pdf_v1" ||
+      artifact.mediaType !== "application/pdf" ||
+      (artifact.state !== "awaiting_review" &&
+        artifact.state !== "available") ||
+      !artifact.versionId ||
+      artifact.versionId === "null"
+    )
+      throw new Error("Confirmed invoice PDF not found");
+    if (
+      (expected?.checksumSha256 &&
+        !equalText(expected.checksumSha256, artifact.checksumSha256)) ||
+      (expected?.versionId && expected.versionId !== artifact.versionId)
+    )
+      throw new Error("Invoice PDF identity has changed");
+    const byteSize = Number(artifact.byteSize);
+    if (
+      !Number.isSafeInteger(byteSize) ||
+      byteSize <= 0 ||
+      byteSize > Math.min(this.settings.maxUploadBytes, 10 * 1024 * 1024)
+    )
+      throw new Error("Invoice PDF exceeds the extraction limit");
+    const versionId = artifact.versionId;
+    const head = await this.storage.headVersion(
+      this.settings.bucket,
+      artifact.objectKey,
+      versionId,
+    );
+    if (
+      head.contentLength !== byteSize ||
+      head.contentType !== artifact.mediaType ||
+      head.versionId !== versionId ||
+      !equalText(head.checksumSha256, artifact.checksumSha256) ||
+      !equalText(head.metadata?.["folio-artifact-id"], artifact.id)
+    )
+      throw new Error(
+        "Invoice PDF metadata does not match its confirmed identity",
+      );
+    const bytes = await this.storage.readPrefix(
+      this.settings.bucket,
+      artifact.objectKey,
+      versionId,
+      byteSize,
+    );
+    if (
+      bytes.byteLength !== byteSize ||
+      Buffer.from(bytes.subarray(0, 5)).toString("ascii") !== "%PDF-" ||
+      !equalText(
+        createHash("sha256").update(bytes).digest("base64"),
+        artifact.checksumSha256,
+      )
+    )
+      throw new Error("Invoice PDF bytes do not match the confirmed checksum");
+    const current = await this.repository.getArtifact(id);
+    if (
+      !current ||
+      (current.state !== "awaiting_review" && current.state !== "available") ||
+      artifactProfileOf(current) !== "manual_invoice_pdf_v1" ||
+      current.objectKey !== artifact.objectKey ||
+      current.versionId !== versionId ||
+      !equalText(current.checksumSha256, artifact.checksumSha256)
+    )
+      throw new Error("Invoice PDF identity has changed");
+    return {
+      artifactId: artifact.id,
+      checksumSha256: artifact.checksumSha256,
+      versionId,
+      bytes,
+    };
+  }
+
   async download(actorId: string, id: string): Promise<string> {
     await this.repository.requireActiveActorId(actorId);
     const artifact = await this.repository.getArtifact(id);

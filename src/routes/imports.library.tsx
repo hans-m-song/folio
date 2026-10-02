@@ -3,11 +3,17 @@ import {
   useNavigate,
   useRouter,
 } from "@tanstack/react-router";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 
 import { artifactProfiles, artifactProfileSchema } from "../artifacts/profiles";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
+import {
+  QueryChipBuilder,
+  type QueryChipClause,
+  type QueryChipField,
+} from "../components/query-chip-builder";
+import { enumFilterSchema } from "../domain/enum-filter";
 import {
   approveArtifact,
   deleteArtifact,
@@ -30,29 +36,239 @@ const artifactStateSchema = z.enum([
   "deleting",
 ]);
 
-const isCalendarDate = (value: string): boolean => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const date = new Date(`${value}T00:00:00.000Z`);
-  return (
-    !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value
-  );
-};
+export type ArtifactFilterField =
+  | "filename"
+  | "profile"
+  | "type"
+  | "uploaded"
+  | "state"
+  | "linkage"
+  | "transactions"
+  | "bank_activity";
 
-const artifactDateSearchSchema = z
-  .string()
-  .trim()
-  .refine((value) => value === "" || isCalendarDate(value))
-  .catch("");
+export type ArtifactFilterOperator =
+  | "equals"
+  | "not_equals"
+  | "contains"
+  | "not_contains"
+  | "greater_than"
+  | "greater_than_or_equal"
+  | "less_than"
+  | "less_than_or_equal"
+  | "is"
+  | "is_not"
+  | "contains_any"
+  | "contains_none";
 
-const artifactSearchSchema = z.object({
-  filename: z.string().trim().max(200).catch(""),
-  profile: z.union([z.literal("all"), artifactProfileSchema]).catch("all"),
-  from: artifactDateSearchSchema,
-  to: artifactDateSearchSchema,
-  state: z.union([z.literal("all"), artifactStateSchema]).catch("all"),
-  linkage: z.enum(["all", "linked", "unlinked"]).catch("all"),
-  page: z.coerce.number().int().min(1).max(4_001).catch(1),
+const artifactComparisonOperatorSchema = z.enum([
+  "equals",
+  "not_equals",
+  "greater_than",
+  "greater_than_or_equal",
+  "less_than",
+  "less_than_or_equal",
+]);
+
+const artifactFilterSchema = z.union([
+  z
+    .object({
+      field: z.literal("filename"),
+      operator: z.enum(["equals", "not_equals", "contains", "not_contains"]),
+      value: z.string().trim().min(1).max(200),
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("uploaded"),
+      operator: artifactComparisonOperatorSchema,
+      value: z.string().date(),
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("transactions"),
+      operator: artifactComparisonOperatorSchema,
+      value: z.string().trim().min(1).max(9).regex(/^\d+$/),
+    })
+    .strict(),
+  z
+    .object({
+      field: z.literal("bank_activity"),
+      operator: artifactComparisonOperatorSchema,
+      value: z.string().trim().min(1).max(9).regex(/^\d+$/),
+    })
+    .strict(),
+  enumFilterSchema("profile", artifactProfileSchema),
+  enumFilterSchema("type", z.enum(["application/pdf", "text/csv"])),
+  enumFilterSchema("state", artifactStateSchema),
+  enumFilterSchema("linkage", z.enum(["linked", "unlinked"])),
+]);
+
+export type ArtifactSearchFilter = z.infer<typeof artifactFilterSchema>;
+
+const artifactSortSchema = z
+  .object({
+    field: z.enum([
+      "filename",
+      "profile",
+      "type",
+      "uploaded",
+      "state",
+      "transactions",
+      "bank_activity",
+    ]),
+    direction: z.enum(["asc", "desc"]),
+  })
+  .strict();
+
+export type ArtifactSort = z.infer<typeof artifactSortSchema>;
+
+const artifactQueryClauseSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("filter"),
+      clause: artifactFilterSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("sort"),
+      clause: artifactSortSchema,
+    })
+    .strict(),
+]);
+
+export type ArtifactQueryClause = z.infer<typeof artifactQueryClauseSchema>;
+
+const artifactQueryClausesSchema = z
+  .array(artifactQueryClauseSchema)
+  .max(27)
+  .superRefine((clauses, context) => {
+    const filterCount = clauses.filter(({ kind }) => kind === "filter").length;
+    const sortCount = clauses.filter(({ kind }) => kind === "sort").length;
+
+    if (filterCount > 20)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "At most 20 filter clauses are allowed.",
+      });
+    if (sortCount > 7)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "At most 7 sort clauses are allowed.",
+      });
+  });
+
+const artifactQueryClausesSearchSchema = z.unknown().transform((input) => {
+  const parsed = artifactQueryClausesSchema.safeParse(input);
+  return parsed.success ? parsed.data : undefined;
 });
+
+export const defaultArtifactSort: ArtifactSort[] = [
+  { field: "uploaded", direction: "desc" },
+];
+
+export const defaultArtifactQueryClauses: ArtifactQueryClause[] =
+  defaultArtifactSort.map((clause) => ({ kind: "sort", clause }));
+
+const artifactSearchSchema = z
+  .object({
+    filters: z.array(artifactFilterSchema).max(20).catch([]).optional(),
+    sort: z
+      .array(artifactSortSchema)
+      .max(7)
+      .catch(defaultArtifactSort)
+      .optional(),
+    clauses: artifactQueryClausesSearchSchema.optional(),
+    filename: z.string().trim().max(200).catch("").optional(),
+    profile: z
+      .union([z.literal("all"), artifactProfileSchema])
+      .catch("all")
+      .optional(),
+    from: z.string().date().catch("").optional(),
+    to: z.string().date().catch("").optional(),
+    state: z
+      .union([z.literal("all"), artifactStateSchema])
+      .catch("all")
+      .optional(),
+    linkage: z.enum(["all", "linked", "unlinked"]).catch("all").optional(),
+    page: z.coerce.number().int().min(1).max(4_001).catch(1),
+  })
+  .transform(
+    ({
+      filters,
+      sort,
+      clauses,
+      filename,
+      profile,
+      from,
+      to,
+      state,
+      linkage,
+      page,
+    }) => {
+      const legacyFilters: ArtifactSearchFilter[] = [];
+      if (filename)
+        legacyFilters.push({
+          field: "filename",
+          operator: "contains",
+          value: filename,
+        });
+      if (profile && profile !== "all")
+        legacyFilters.push({
+          field: "profile",
+          operator: "is",
+          value: profile,
+        });
+      if (from)
+        legacyFilters.push({
+          field: "uploaded",
+          operator: "greater_than_or_equal",
+          value: from,
+        });
+      if (to)
+        legacyFilters.push({
+          field: "uploaded",
+          operator: "less_than_or_equal",
+          value: to,
+        });
+      if (state && state !== "all")
+        legacyFilters.push({ field: "state", operator: "is", value: state });
+      if (linkage && linkage !== "all")
+        legacyFilters.push({
+          field: "linkage",
+          operator: "is",
+          value: linkage,
+        });
+
+      const resolvedFilters = filters ?? legacyFilters;
+      const resolvedSort = sort ?? defaultArtifactSort;
+      const resolvedClauses = clauses ?? [
+        ...resolvedFilters.map((clause) => ({
+          kind: "filter" as const,
+          clause,
+        })),
+        ...resolvedSort.map((clause) => ({ kind: "sort" as const, clause })),
+      ];
+
+      return {
+        clauses: resolvedClauses,
+        filters:
+          clauses === undefined
+            ? resolvedFilters
+            : resolvedClauses.flatMap((item) =>
+                item.kind === "filter" ? [item.clause] : [],
+              ),
+        sort:
+          clauses === undefined
+            ? resolvedSort
+            : resolvedClauses.flatMap((item) =>
+                item.kind === "sort" ? [item.clause] : [],
+              ),
+        page,
+      };
+    },
+  );
 
 export type ArtifactSearch = z.infer<typeof artifactSearchSchema>;
 
@@ -61,15 +277,271 @@ export const validateArtifactSearch = (
 ): ArtifactSearch => artifactSearchSchema.parse(search);
 
 export const artifactListInput = (search: ArtifactSearch) => ({
-  search: search.filename,
-  profile: search.profile === "all" ? null : search.profile,
-  from: search.from || null,
-  to: search.to || null,
-  state: search.state === "all" ? null : search.state,
-  linkage: search.linkage,
+  filters: search.filters,
+  sort: search.sort,
   limit: artifactPageSize,
   offset: (search.page - 1) * artifactPageSize,
 });
+
+export type ArtifactFilterDraft = {
+  id: number;
+  field: ArtifactFilterField;
+  operator: ArtifactFilterOperator;
+  value: string | string[];
+};
+
+export type ArtifactSortDraft = ArtifactSort & { id: number };
+
+export type ArtifactQueryDraft =
+  | ({ kind: "filter" } & ArtifactFilterDraft)
+  | ({ kind: "sort" } & ArtifactSortDraft);
+
+export const artifactFilterFieldLabels: Record<ArtifactFilterField, string> = {
+  filename: "Filename",
+  profile: "Profile",
+  type: "Type",
+  uploaded: "Uploaded date (UTC)",
+  state: "State",
+  linkage: "Linkage",
+  transactions: "Transactions linked",
+  bank_activity: "Bank activity rows linked",
+};
+
+type ArtifactFilterValueKind = "text" | "date" | "number" | "enum";
+
+export const artifactFilterValueKinds: Record<
+  ArtifactFilterField,
+  ArtifactFilterValueKind
+> = {
+  filename: "text",
+  profile: "enum",
+  type: "enum",
+  uploaded: "date",
+  state: "enum",
+  linkage: "enum",
+  transactions: "number",
+  bank_activity: "number",
+};
+
+export const artifactFilterOperatorOptions: Record<
+  ArtifactFilterValueKind,
+  readonly { value: ArtifactFilterOperator; label: string }[]
+> = {
+  text: [
+    { value: "equals", label: "equals" },
+    { value: "not_equals", label: "does not equal" },
+    { value: "contains", label: "contains" },
+    { value: "not_contains", label: "does not contain" },
+  ],
+  date: [
+    { value: "equals", label: "=" },
+    { value: "not_equals", label: "≠" },
+    { value: "greater_than", label: ">" },
+    { value: "greater_than_or_equal", label: "≥" },
+    { value: "less_than", label: "<" },
+    { value: "less_than_or_equal", label: "≤" },
+  ],
+  number: [
+    { value: "equals", label: "=" },
+    { value: "not_equals", label: "≠" },
+    { value: "greater_than", label: ">" },
+    { value: "greater_than_or_equal", label: "≥" },
+    { value: "less_than", label: "<" },
+    { value: "less_than_or_equal", label: "≤" },
+  ],
+  enum: [
+    { value: "contains_any", label: "contains any of" },
+    { value: "contains_none", label: "contains none of" },
+    { value: "is", label: "is" },
+    { value: "is_not", label: "is not" },
+  ],
+};
+
+const defaultArtifactFilterOperator = (
+  field: ArtifactFilterField,
+): ArtifactFilterOperator => {
+  const valueKind = artifactFilterValueKinds[field];
+  return valueKind === "text"
+    ? "contains"
+    : artifactFilterOperatorOptions[valueKind][0]!.value;
+};
+
+export const resetArtifactFilterField = (
+  clause: ArtifactFilterDraft,
+  field: ArtifactFilterField,
+): ArtifactFilterDraft => ({
+  ...clause,
+  field,
+  operator: defaultArtifactFilterOperator(field),
+  value: artifactFilterValueKinds[field] === "enum" ? [] : "",
+});
+
+export const artifactFiltersForPage = (
+  clauses: readonly ArtifactFilterDraft[],
+): ArtifactSearch["filters"] =>
+  clauses.flatMap((clause) => {
+    const parsed = artifactFilterSchema.safeParse({
+      field: clause.field,
+      operator: clause.operator,
+      value: Array.isArray(clause.value) ? clause.value : clause.value.trim(),
+    });
+    return parsed.success ? [parsed.data] : [];
+  });
+
+export const artifactSortsForPage = (
+  clauses: readonly ArtifactSortDraft[],
+): ArtifactSearch["sort"] =>
+  clauses.flatMap((clause) => {
+    const parsed = artifactSortSchema.safeParse({
+      field: clause.field,
+      direction: clause.direction,
+    });
+    return parsed.success ? [parsed.data] : [];
+  });
+
+export const artifactQueryDraftsFromClauses = (
+  clauses: readonly ArtifactQueryClause[],
+): ArtifactQueryDraft[] =>
+  clauses.map((item, index) =>
+    item.kind === "filter"
+      ? { kind: "filter", ...item.clause, id: index + 1 }
+      : { kind: "sort", ...item.clause, id: index + 1 },
+  );
+
+const artifactQueryChipsFromDrafts = (
+  drafts: readonly ArtifactQueryDraft[],
+): QueryChipClause[] =>
+  drafts.map((draft) =>
+    draft.kind === "filter"
+      ? {
+          id: draft.id,
+          type: "filter",
+          field: draft.field,
+          operator: draft.operator,
+          value: draft.value,
+        }
+      : {
+          id: draft.id,
+          type: "sort",
+          field: draft.field,
+          operator: draft.direction,
+          value: "",
+        },
+  );
+
+const artifactQueryDraftsFromChips = (
+  clauses: readonly QueryChipClause[],
+): ArtifactQueryDraft[] =>
+  clauses.map((clause) =>
+    clause.type === "filter"
+      ? {
+          id: clause.id,
+          kind: "filter",
+          field: clause.field as ArtifactFilterField,
+          operator: clause.operator as ArtifactFilterOperator,
+          value: clause.value,
+        }
+      : {
+          id: clause.id,
+          kind: "sort",
+          field: clause.field as ArtifactSort["field"],
+          direction: clause.operator as ArtifactSort["direction"],
+        },
+  );
+
+const isArtifactQueryChipClauseValid = (clause: QueryChipClause): boolean => {
+  const parsed =
+    clause.type === "filter"
+      ? artifactFilterSchema.safeParse({
+          field: clause.field,
+          operator: clause.operator,
+          value: Array.isArray(clause.value)
+            ? clause.value
+            : clause.value.trim(),
+        })
+      : artifactSortSchema.safeParse({
+          field: clause.field,
+          direction: clause.operator,
+        });
+
+  return parsed.success;
+};
+
+const defaultArtifactQueryChipSort: readonly QueryChipClause[] = [
+  { id: 0, type: "sort", field: "uploaded", operator: "desc", value: "" },
+];
+
+export const artifactQueryClausesForPage = (
+  drafts: readonly ArtifactQueryDraft[],
+): ArtifactSearch["clauses"] => {
+  const clauses: ArtifactSearch["clauses"] = [];
+  for (const draft of drafts) {
+    if (draft.kind === "filter") {
+      const [clause] = artifactFiltersForPage([draft]);
+      if (clause) clauses.push({ kind: "filter", clause });
+      continue;
+    }
+
+    const [clause] = artifactSortsForPage([draft]);
+    if (clause) clauses.push({ kind: "sort", clause });
+  }
+  return clauses;
+};
+
+export const artifactSortFieldLabels: Record<ArtifactSort["field"], string> = {
+  filename: "Filename",
+  profile: "Profile",
+  type: "Type",
+  uploaded: "Uploaded date",
+  state: "State",
+  transactions: "Transactions linked",
+  bank_activity: "Bank activity rows linked",
+};
+
+const artifactFilterOptions: Partial<
+  Record<ArtifactFilterField, readonly { value: string; label: string }[]>
+> = {
+  profile: artifactProfiles.map(({ profile, label }) => ({
+    value: profile,
+    label,
+  })),
+  type: [
+    { value: "application/pdf", label: "PDF" },
+    { value: "text/csv", label: "CSV" },
+  ],
+  state: [
+    { value: "pending", label: "Pending" },
+    { value: "awaiting_review", label: "Awaiting review" },
+    { value: "available", label: "Available" },
+    { value: "superseded", label: "Superseded" },
+    { value: "abandoned", label: "Abandoned" },
+    { value: "rejected", label: "Rejected" },
+    { value: "deleting", label: "Deleting" },
+  ],
+  linkage: [
+    { value: "linked", label: "Linked" },
+    { value: "unlinked", label: "Unlinked" },
+  ],
+};
+
+const artifactSortFields = Object.keys(
+  artifactSortFieldLabels,
+) as ArtifactSort["field"][];
+
+const artifactQueryFilterFields: QueryChipField[] = (
+  Object.keys(artifactFilterFieldLabels) as ArtifactFilterField[]
+).map((field) => ({
+  value: field,
+  label: artifactFilterFieldLabels[field],
+  valueKind: artifactFilterValueKinds[field],
+  operators: artifactFilterOperatorOptions[artifactFilterValueKinds[field]],
+  options: artifactFilterOptions[field] ?? [],
+}));
+
+const artifactQuerySortFields = artifactSortFields.map((field) => ({
+  value: field,
+  label: artifactSortFieldLabels[field],
+}));
 
 export const artifactPagination = (total: number, requestedPage: number) => {
   const pageCount = Math.max(
@@ -114,9 +586,6 @@ export const copyArtifactId = async (
 };
 
 const loadArtifactPage = async (search: ArtifactSearch) => {
-  if (search.from && search.to && search.from > search.to)
-    return { status: "invalid-range" as const };
-
   try {
     const input = artifactListInput(search);
     let result = await listArtifacts({ data: input });
@@ -167,6 +636,12 @@ function ArtifactLibraryPage() {
   const [deletingArtifact, setDeletingArtifact] =
     useState<ArtifactListRow | null>(null);
   const [deletePending, setDeletePending] = useState(false);
+  const [queryClauses, setQueryClauses] = useState<ArtifactQueryDraft[]>(() =>
+    artifactQueryDraftsFromClauses(search.clauses),
+  );
+  const lastAppliedQueryDraftRef = useRef(JSON.stringify(queryClauses));
+  const selfAppliedQueryKeyRef = useRef<string | null>(null);
+  const appliedQueryKey = JSON.stringify(search.clauses);
 
   useEffect(() => {
     if (data.status !== "loaded" || data.pagination.page === search.page)
@@ -177,25 +652,43 @@ function ArtifactLibraryPage() {
     });
   }, [data, navigate, search.page]);
 
-  const applyFilters = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setPreview(null);
-    const next = validateArtifactSearch(
-      Object.fromEntries(new FormData(event.currentTarget)),
-    );
-    void navigate({
-      search: (previous) => ({
-        ...previous,
-        filename: next.filename,
-        profile: next.profile,
-        from: next.from,
-        to: next.to,
-        state: next.state,
-        linkage: next.linkage,
-        page: 1,
-      }),
-    });
-  };
+  useEffect(() => {
+    if (selfAppliedQueryKeyRef.current === appliedQueryKey) {
+      selfAppliedQueryKeyRef.current = null;
+      return;
+    }
+    const nextClauses = artifactQueryDraftsFromClauses(search.clauses);
+    lastAppliedQueryDraftRef.current = JSON.stringify(nextClauses);
+    setQueryClauses(nextClauses);
+  }, [appliedQueryKey, search.clauses]);
+
+  useEffect(() => {
+    const draftKey = JSON.stringify(queryClauses);
+    if (lastAppliedQueryDraftRef.current === draftKey) return;
+    lastAppliedQueryDraftRef.current = draftKey;
+    const timeout = window.setTimeout(() => {
+      const clauses = artifactQueryClausesForPage(queryClauses);
+      const nextKey = JSON.stringify(clauses);
+      if (nextKey === appliedQueryKey) return;
+      selfAppliedQueryKeyRef.current = nextKey;
+      setPreview(null);
+      void navigate({
+        replace: true,
+        search: (previous) => ({
+          ...previous,
+          clauses,
+          filters: clauses.flatMap((item) =>
+            item.kind === "filter" ? [item.clause] : [],
+          ),
+          sort: clauses.flatMap((item) =>
+            item.kind === "sort" ? [item.clause] : [],
+          ),
+          page: 1,
+        }),
+      });
+    }, 300);
+    return () => window.clearTimeout(timeout);
+  }, [queryClauses, appliedQueryKey, navigate]);
 
   const goToPage = (page: number) => {
     setPreview(null);
@@ -346,22 +839,7 @@ function ArtifactLibraryPage() {
     });
   };
 
-  const searchKey = [
-    search.filename,
-    search.profile,
-    search.from,
-    search.to,
-    search.state,
-    search.linkage,
-  ].join("\u001f");
-  const hasFilters = Boolean(
-    search.filename ||
-    search.profile !== "all" ||
-    search.from ||
-    search.to ||
-    search.state !== "all" ||
-    search.linkage !== "all",
-  );
+  const hasFilters = search.filters.length > 0;
 
   return (
     <main className="artifact-library-page">
@@ -393,66 +871,24 @@ function ArtifactLibraryPage() {
           </div>
         </div>
 
-        <form
-          key={searchKey}
-          className="artifact-library-filters"
-          onSubmit={applyFilters}
-        >
-          <label>
-            Filename
-            <input
-              type="search"
-              name="filename"
-              maxLength={200}
-              defaultValue={search.filename}
-              autoComplete="off"
-            />
-          </label>
-          <label>
-            Profile
-            <select name="profile" defaultValue={search.profile}>
-              <option value="all">All profiles</option>
-              {artifactProfiles.map(({ profile, label }) => (
-                <option key={profile} value={profile}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Uploaded from (UTC)
-            <input type="date" name="from" defaultValue={search.from} />
-          </label>
-          <label>
-            Uploaded to (UTC)
-            <input type="date" name="to" defaultValue={search.to} />
-          </label>
-          <label>
-            State
-            <select name="state" defaultValue={search.state}>
-              <option value="all">All states</option>
-              <option value="pending">Pending</option>
-              <option value="awaiting_review">Awaiting review</option>
-              <option value="available">Available</option>
-              <option value="superseded">Superseded</option>
-              <option value="abandoned">Abandoned</option>
-              <option value="rejected">Rejected</option>
-              <option value="deleting">Deleting</option>
-            </select>
-          </label>
-          <label>
-            Linkage
-            <select name="linkage" defaultValue={search.linkage}>
-              <option value="all">All artifacts</option>
-              <option value="linked">Linked</option>
-              <option value="unlinked">Unlinked</option>
-            </select>
-          </label>
+        <div className="artifact-library-query">
+          <QueryChipBuilder
+            label="Filters and sorting"
+            clauses={artifactQueryChipsFromDrafts(queryClauses)}
+            filterFields={artifactQueryFilterFields}
+            sortFields={artifactQuerySortFields}
+            onChange={(clauses) =>
+              setQueryClauses(artifactQueryDraftsFromChips(clauses))
+            }
+            defaultSort={defaultArtifactQueryChipSort}
+            isClauseValid={isArtifactQueryChipClauseValid}
+            maxFilters={20}
+            maxSorts={7}
+          />
           <div className="artifact-library-filter-actions">
-            <button type="submit">Apply filters</button>
-            <a href="/imports/library">Clear filters</a>
+            <a href="/imports/library">Clear query</a>
           </div>
-        </form>
+        </div>
 
         {actionMessage && (
           <p
@@ -470,11 +906,6 @@ function ArtifactLibraryPage() {
             <button type="button" onClick={() => void router.invalidate()}>
               Retry
             </button>
-          </div>
-        ) : data.status === "invalid-range" ? (
-          <div className="artifact-library-error" role="alert">
-            <h3>Check the upload date range</h3>
-            <p>The “Uploaded from” date must be on or before “Uploaded to”.</p>
           </div>
         ) : (
           <>

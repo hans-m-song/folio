@@ -1,0 +1,105 @@
+.invoice-suggestion-review {
+  display: grid;
+  gap: 0.75rem;
+  margin-block: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--surface-muted);
+  min-width: 0;
+}
+
+.invoice-suggestion-review h3,
+.invoice-suggestion-review p {
+  margin: 0;
+}
+
+.invoice-suggestion-review p,
+.invoice-suggestion-review li {
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.invoice-extraction-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.4rem 0.75rem;
+  align-items: center;
+}
+
+.invoice-extraction-actions > label {
+  grid-column: 1 / -1;
+}
+
+.invoice-facts-scroll {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.invoice-facts-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.invoice-facts-table th,
+.invoice-facts-table td {
+  padding: 0.5rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  font-size: 0.85rem;
+}
+
+.invoice-facts-table .money-column {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.invoice-field-actions,
+.invoice-money-review {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.invoice-field-actions > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.invoice-money-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(7rem, 0.5fr);
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.invoice-money-fields label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.manual-entry-form .invoice-confirmation {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.manual-entry-form .invoice-confirmation > input {
+  width: 1rem;
+  min-width: 1rem;
+  height: 1rem;
+  min-height: 1rem;
+  padding: 0;
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .invoice-extraction-actions,
+  .invoice-money-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
