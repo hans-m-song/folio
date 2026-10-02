@@ -1,6 +1,9 @@
 import { request as httpRequest } from "node:http";
 
-import { ProposalIdempotencyConflictError } from "../database/proposal-repository";
+import {
+  ProposalIdempotencyConflictError,
+  ProposalTransactionConflictError,
+} from "../database/proposal-repository";
 import type { ArtifactRecord } from "../documents/service";
 import { describe, expect, it, vi } from "vitest";
 
@@ -102,6 +105,8 @@ const createDependencies = () => {
         documentAmount: "1.00",
         settlementCurrency: null,
         settlementAmount: null,
+        category: "Synthetic category",
+        updatedAt: "2026-01-01T00:00:00.123456Z",
       })),
       total: 50,
       page: 2,
@@ -158,16 +163,11 @@ const createDependencies = () => {
     })),
     updateDraft: vi.fn(async () => ({
       transactionId: ids.transaction,
-      updatedAt: "2026-09-27T00:00:00.000Z",
+      updatedAt: "2026-09-27T00:00:00.123456Z",
     })),
-    getSubmissionStatus: vi.fn(async () => ({
-      submissionId: ids.submission,
-      kind: "draft_transaction" as const,
-      linkedId: ids.transaction,
-      outcome: "awaiting_human_review" as const,
-      intendedBankTransactionId: null,
-      resolvedBankTransactionId: null,
-      createdAt: "2026-01-01T00:00:00.000Z",
+    categorizeTransaction: vi.fn(async () => ({
+      transactionId: ids.transaction,
+      updatedAt: "2026-09-27T00:00:00.123456Z",
     })),
   };
   const getCsvDuplicateWarnings = vi.fn(async () => csvWarningReport);
@@ -299,15 +299,10 @@ describe("Folio MCP tools", () => {
         "artifacts:upload",
         ["begin_artifact_upload", "confirm_artifact_upload"],
       ],
-      [
-        "proposals:submit",
-        [
-          "submit_draft_transaction",
-          "edit_draft_transaction",
-          "suggest_existing_match",
-        ],
-      ],
-      ["submissions:read", ["get_submission_status"]],
+      ["transactions:draft", ["submit_draft_transaction", "edit_transaction"]],
+      ["transactions:categorize", ["edit_transaction"]],
+      ["bank_matches:suggest", ["suggest_existing_match"]],
+      ["submissions:read", []],
     ] as const;
 
     for (const [scope, authorizedTools] of scopeTools) {
@@ -331,6 +326,19 @@ describe("Folio MCP tools", () => {
           expect(toolNames).not.toContain("read_artifact");
           expect(toolNames).not.toContain("download_artifact");
 
+          if (scope === "submissions:read") {
+            expect(toolNames).not.toContain("get_submission_status");
+            const removedTool = await call(
+              address.port,
+              "get_submission_status",
+              { submissionId: ids.submission },
+            );
+            expect(
+              parseResult(removedTool).error ??
+                parseResult(removedTool).result?.isError,
+            ).toBeTruthy();
+          }
+
           const deniedTool =
             scope === "bank_rows:read"
               ? "list_artifacts"
@@ -346,7 +354,7 @@ describe("Folio MCP tools", () => {
     }
   });
 
-  it("returns bounded unresolved bank facts and unchanged 50-row search pages", async () => {
+  it("returns bounded unresolved bank facts and all-status 50-row search pages", async () => {
     const fakes = createDependencies();
     await withServer(fakes.dependencies, principal(), async ({ address }) => {
       const unresolved = await call(address.port, "list_unresolved_bank_rows", {
@@ -370,12 +378,17 @@ describe("Folio MCP tools", () => {
         ids.actor,
         expect.objectContaining({
           page: 2,
-          filters: [{ field: "status", operator: "is", value: "recorded" }],
+          filters: [],
           reportingTimezone: "Australia/Brisbane",
         }),
       );
       expect(searchedValue?.pageSize).toBe(50);
-      expect(searchedValue?.rows).toHaveLength(50);
+      const searchedRows = searchedValue?.rows as Record<string, unknown>[];
+      expect(searchedRows).toHaveLength(50);
+      expect(searchedRows[0]).toMatchObject({
+        category: "Synthetic category",
+        updatedAt: "2026-01-01T00:00:00.123456Z",
+      });
     });
   });
 
@@ -599,19 +612,22 @@ describe("Folio MCP tools", () => {
   it("passes only parsed draft field changes to the credential-bound update", async () => {
     const fakes = createDependencies();
     await withServer(fakes.dependencies, principal(), async ({ address }) => {
-      const edited = await call(address.port, "edit_draft_transaction", {
+      const edited = await call(address.port, "edit_transaction", {
         transactionId: ids.transaction,
+        expectedUpdatedAt: "2026-09-27T00:00:00.123456Z",
         changes: { reference: "INV-42", documentAmount: "37.08" },
       });
       expect(toolValue(edited).value?.transactionId).toBe(ids.transaction);
       expect(fakes.proposalRepository.updateDraft).toHaveBeenCalledWith(
         ids.credential,
         ids.transaction,
+        "2026-09-27T00:00:00.123456Z",
         { reference: "INV-42", documentAmount: "37.08" },
       );
 
-      const forbidden = await call(address.port, "edit_draft_transaction", {
+      const forbidden = await call(address.port, "edit_transaction", {
         transactionId: ids.transaction,
+        expectedUpdatedAt: "2026-09-27T00:00:00.123456Z",
         changes: { status: "recorded" },
       });
       expect(toolValue(forbidden).result?.isError).toBe(true);
@@ -619,7 +635,50 @@ describe("Folio MCP tools", () => {
     });
   });
 
-  it("stores existing-match suggestions without matching and exposes own status only", async () => {
+  it("routes a category-only edit through categorization authority", async () => {
+    const fakes = createDependencies();
+    await withServer(
+      fakes.dependencies,
+      principal(["transactions:categorize"]),
+      async ({ address }) => {
+        const edited = await call(address.port, "edit_transaction", {
+          transactionId: ids.transaction,
+          expectedUpdatedAt: "2026-09-27T00:00:00.123456Z",
+          changes: { category: "Software" },
+        });
+        expect(toolValue(edited).value?.transactionId).toBe(ids.transaction);
+        expect(
+          fakes.proposalRepository.categorizeTransaction,
+        ).toHaveBeenCalledWith(
+          ids.credential,
+          ids.transaction,
+          "2026-09-27T00:00:00.123456Z",
+          "Software",
+        );
+        expect(fakes.proposalRepository.updateDraft).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("returns a distinct revision conflict code for stale edits", async () => {
+    const fakes = createDependencies();
+    fakes.proposalRepository.updateDraft.mockRejectedValueOnce(
+      new ProposalTransactionConflictError(),
+    );
+    await withServer(fakes.dependencies, principal(), async ({ address }) => {
+      const response = await call(address.port, "edit_transaction", {
+        transactionId: ids.transaction,
+        expectedUpdatedAt: "2026-09-27T00:00:00.123456Z",
+        changes: { reference: "INV-43" },
+      });
+      expect(toolValue(response).value).toEqual({
+        code: "REVISION_CONFLICT",
+        message: "The transaction changed after it was read.",
+      });
+    });
+  });
+
+  it("stores existing-match suggestions without matching", async () => {
     const fakes = createDependencies();
     await withServer(fakes.dependencies, principal(), async ({ address }) => {
       const suggested = await call(address.port, "suggest_existing_match", {
@@ -637,15 +696,6 @@ describe("Folio MCP tools", () => {
         expect.objectContaining({ kind: "existing_match" }),
       );
       expect(fakes.bankRepository.reconcile).not.toHaveBeenCalled();
-
-      const status = await call(address.port, "get_submission_status", {
-        submissionId: ids.submission,
-      });
-      expect(toolValue(status).value?.outcome).toBe("awaiting_human_review");
-      expect(fakes.proposalRepository.getSubmissionStatus).toHaveBeenCalledWith(
-        ids.credential,
-        ids.submission,
-      );
     });
   });
 

@@ -18,6 +18,8 @@ import {
   ProposalAuthorizationError,
   ProposalDraftNotEditableError,
   ProposalIdempotencyConflictError,
+  ProposalTransactionConflictError,
+  ProposalTransactionNotFoundError,
   type ProposalRepository,
 } from "../database/proposal-repository";
 import { ArtifactUploadIdempotencyConflictError } from "../documents/service";
@@ -69,6 +71,8 @@ type McpPublicErrorCode =
   | "MATCH_CANDIDATE_NOT_ELIGIBLE"
   | "EVIDENCE_NOT_REVIEWABLE"
   | "DRAFT_NOT_EDITABLE"
+  | "REVISION_CONFLICT"
+  | "TRANSACTION_NOT_FOUND"
   | "REQUEST_FAILED";
 
 class McpToolError extends Error {
@@ -94,6 +98,16 @@ const safeError = (
     return {
       code: "DRAFT_NOT_EDITABLE",
       message: "The draft is no longer editable by this credential.",
+    };
+  if (error instanceof ProposalTransactionConflictError)
+    return {
+      code: "REVISION_CONFLICT",
+      message: "The transaction changed after it was read.",
+    };
+  if (error instanceof ProposalTransactionNotFoundError)
+    return {
+      code: "TRANSACTION_NOT_FOUND",
+      message: "The transaction was not found.",
     };
   if (
     error instanceof ProposalIdempotencyConflictError ||
@@ -269,6 +283,7 @@ const draftInput = z
 const editDraftInput = z
   .object({
     transactionId: z.string().uuid(),
+    expectedUpdatedAt: z.string().datetime({ precision: 6 }),
     changes: draftTransactionFieldsSchema
       .partial()
       .refine((changes) => Object.keys(changes).length > 0),
@@ -282,10 +297,6 @@ const suggestMatchInput = z
     bankTarget: directBankTargetInput,
     note: z.string().trim().max(2_000).nullable().optional(),
   })
-  .strict();
-
-const submissionStatusInput = z
-  .object({ submissionId: z.string().uuid() })
   .strict();
 
 const draftTransactionJsonSchema = jsonObject(
@@ -429,8 +440,7 @@ const registerToolsForPrincipal = (
     server.registerTool(
       "search_transactions",
       {
-        description:
-          "Search a bounded page of recorded transaction candidates.",
+        description: "Search a bounded page of transactions in any status.",
         inputSchema: fromJsonSchema<{
           search?: string;
           page?: number;
@@ -454,7 +464,7 @@ const registerToolsForPrincipal = (
             principal.actorUserId,
             {
               search: request.search,
-              filters: [{ field: "status", operator: "is", value: "recorded" }],
+              filters: [],
               sort: { key: "date", direction: "desc" },
               page: request.page,
               reportingTimezone: dependencies.config.reportingTimezone,
@@ -475,10 +485,12 @@ const registerToolsForPrincipal = (
               counterparty: row.counterparty,
               reference: row.reference,
               description: row.description,
+              category: row.category,
               documentCurrency: row.documentCurrency,
               documentAmount: row.documentAmount,
               settlementCurrency: row.settlementCurrency,
               settlementAmount: row.settlementAmount,
+              updatedAt: row.updatedAt,
             })),
           };
         }),
@@ -691,7 +703,7 @@ const registerToolsForPrincipal = (
     );
   }
 
-  if (hasScope(principal, "proposals:submit")) {
+  if (hasScope(principal, "transactions:draft")) {
     server.registerTool(
       "submit_draft_transaction",
       {
@@ -807,22 +819,33 @@ const registerToolsForPrincipal = (
           };
         }),
     );
+  }
 
+  if (
+    hasScope(principal, "transactions:draft") ||
+    hasScope(principal, "transactions:categorize")
+  ) {
     server.registerTool(
-      "edit_draft_transaction",
+      "edit_transaction",
       {
         description:
-          "Change fields on a still-draft transaction submitted by this credential. Omitted fields stay unchanged; this cannot record, attach evidence, or match a bank row.",
+          "Edit an own still-draft transaction, or change only the category of any transaction when authorized. The exact updatedAt token is required.",
         inputSchema: fromJsonSchema<{
           transactionId: string;
+          expectedUpdatedAt: string;
           changes: Record<string, unknown>;
         }>(
           jsonObject(
             {
               transactionId: { type: "string", format: "uuid" },
+              expectedUpdatedAt: {
+                type: "string",
+                pattern:
+                  "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$",
+              },
               changes: draftTransactionChangesJsonSchema,
             },
-            ["transactionId", "changes"],
+            ["transactionId", "expectedUpdatedAt", "changes"],
           ),
         ),
         annotations: {
@@ -835,14 +858,30 @@ const registerToolsForPrincipal = (
       async (input) =>
         runTool(async () => {
           const request = editDraftInput.parse(input);
+          if (
+            Object.keys(request.changes).length === 1 &&
+            "category" in request.changes &&
+            hasScope(principal, "transactions:categorize")
+          )
+            return dependencies.proposalRepository.categorizeTransaction(
+              principal.credentialId,
+              request.transactionId,
+              request.expectedUpdatedAt,
+              request.changes.category ?? null,
+            );
+          if (!hasScope(principal, "transactions:draft"))
+            throw new ProposalAuthorizationError();
           return dependencies.proposalRepository.updateDraft(
             principal.credentialId,
             request.transactionId,
+            request.expectedUpdatedAt,
             request.changes,
           );
         }),
     );
+  }
 
+  if (hasScope(principal, "bank_matches:suggest")) {
     server.registerTool(
       "suggest_existing_match",
       {
@@ -898,37 +937,6 @@ const registerToolsForPrincipal = (
         }),
     );
   }
-
-  if (hasScope(principal, "submissions:read")) {
-    server.registerTool(
-      "get_submission_status",
-      {
-        description:
-          "Read the outcome of one submission owned by this credential.",
-        inputSchema: fromJsonSchema<{ submissionId: string }>(
-          jsonObject({ submissionId: { type: "string", format: "uuid" } }, [
-            "submissionId",
-          ]),
-        ),
-        annotations: {
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
-      async (input) =>
-        runTool(async () => {
-          const request = submissionStatusInput.parse(input);
-          const status =
-            await dependencies.proposalRepository.getSubmissionStatus(
-              principal.credentialId,
-              request.submissionId,
-            );
-          return status ?? { found: false };
-        }),
-    );
-  }
 };
 
 const publicArtifact = (artifact: {
@@ -969,7 +977,7 @@ export interface McpToolDependencies {
   >;
   proposalRepository: Pick<
     ProposalRepository,
-    "submit" | "updateDraft" | "getSubmissionStatus"
+    "submit" | "updateDraft" | "categorizeTransaction"
   >;
   getCsvDuplicateWarnings?: (
     actorId: string,

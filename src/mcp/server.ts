@@ -5,19 +5,17 @@ import {
   type McpHttpHandler,
 } from "@modelcontextprotocol/server";
 
+import {
+  proposalCredentialScopeSchema,
+  type ProposalCredentialScope,
+} from "../domain/proposals";
+
 export const MCP_MAX_REQUEST_BODY_BYTES = 64 * 1024;
 export const MCP_AUTH_INFO_PRINCIPAL_KEY = "folioMcpPrincipal";
 
-export const MCP_SCOPES = [
-  "bank_rows:read",
-  "transactions:search",
-  "artifacts:read",
-  "artifacts:upload",
-  "proposals:submit",
-  "submissions:read",
-] as const;
+export const MCP_SCOPES = proposalCredentialScopeSchema.options;
 
-export type McpScope = (typeof MCP_SCOPES)[number];
+export type McpScope = ProposalCredentialScope;
 
 export type McpPrincipal = Readonly<{
   credentialId: string;

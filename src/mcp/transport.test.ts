@@ -9,7 +9,7 @@ const validPrincipal = {
   credentialId: "credential-test",
   actorUserId: "actor-test",
   defaultOwnerId: "owner-test",
-  scopes: ["proposals:submit"] as const,
+  scopes: ["transactions:draft"] as const,
 };
 
 type RunningMcpServer = Awaited<ReturnType<typeof startMcpServer>>;
@@ -292,7 +292,7 @@ describe("local MCP Streamable HTTP transport", () => {
             credentialId: "credential-test",
             actorUserId: "actor-test",
             defaultOwnerId: "owner-test",
-            scopes: ["proposals:submit"],
+            scopes: ["transactions:draft"],
           }),
         );
         expect(registerTools).toHaveBeenCalledTimes(1);

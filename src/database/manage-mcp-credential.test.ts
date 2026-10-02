@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
+  credentialScopeHelp,
   generateCredentialSecret,
   parseCredentialCommand,
 } from "./manage-mcp-credential";
@@ -12,6 +13,17 @@ const actorUserId = "22222222-2222-4222-8222-222222222222";
 const defaultOwnerId = "33333333-3333-4333-8333-333333333333";
 
 describe("MCP credential administration", () => {
+  it("lists the available scopes without requiring user IDs", () => {
+    expect(parseCredentialCommand(["scopes"])).toEqual({ action: "scopes" });
+    const help = credentialScopeHelp();
+    expect(help.split("\n")).toHaveLength(7);
+    expect(help).not.toContain("submissions:read");
+    expect(help).toContain("artifacts:read\tRead artifact metadata");
+    expect(help).toContain(
+      "transactions:draft\tCreate and edit this credential's drafts",
+    );
+  });
+
   it("generates distinct high-entropy bearer values and stores only their hashes", () => {
     const first = generateCredentialSecret();
     const second = generateCredentialSecret();
@@ -36,9 +48,9 @@ describe("MCP credential administration", () => {
         "--label",
         "Local proposal intake",
         "--scope",
-        "proposals:submit",
+        "transactions:*",
         "--scope",
-        "artifacts:upload",
+        "artifacts:*",
       ]),
     ).toEqual({
       action: "create",
@@ -46,7 +58,13 @@ describe("MCP credential administration", () => {
       actorUserId,
       defaultOwnerId,
       label: "Local proposal intake",
-      scopes: ["proposals:submit", "artifacts:upload"],
+      scopes: [
+        "transactions:search",
+        "transactions:draft",
+        "transactions:categorize",
+        "artifacts:read",
+        "artifacts:upload",
+      ],
     });
     expect(() =>
       parseCredentialCommand([
@@ -61,6 +79,36 @@ describe("MCP credential administration", () => {
         "Local proposal intake",
       ]),
     ).toThrow();
+    expect(() =>
+      parseCredentialCommand([
+        "create",
+        "--administrator-id",
+        administratorId,
+        "--actor-user-id",
+        actorUserId,
+        "--default-owner-id",
+        defaultOwnerId,
+        "--label",
+        "Local proposal intake",
+        "--scope",
+        "transactions:future",
+      ]),
+    ).toThrow("Unknown credential scope");
+    expect(() =>
+      parseCredentialCommand([
+        "create",
+        "--administrator-id",
+        administratorId,
+        "--actor-user-id",
+        actorUserId,
+        "--default-owner-id",
+        defaultOwnerId,
+        "--label",
+        "Local proposal intake",
+        "--scope",
+        "submissions:read",
+      ]),
+    ).toThrow("Unknown credential scope");
   });
 
   it("parses credential revocation by ID", () => {
