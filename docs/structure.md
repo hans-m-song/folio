@@ -27,6 +27,8 @@ docs/
 |-- banking-plan.md      approved bank-transaction and reconciliation contract
 |-- folio-schema.md      canonical M1/T08 tables, constraints, and deferred structures
 |-- structure.md         ownership and dependency boundaries
+|-- implementation-candidates.md  investigated boundaries, acceptance cases and approval gates
+|-- recurring-bills-plan.md       approved recurrence and independent document-status boundaries
 |-- ui-plan.md           approved directional information architecture and workflow
 `-- roadmap.md           stable milestones, gates, and progress
 
@@ -50,6 +52,23 @@ operations. Rejected-artifact persistence and exact-version storage operations
 are owned by `database` and `documents`, respectively.
 
 ## Ownership boundaries
+
+Recurring forecasts are isolated in `domain/recurring-bills.ts` and
+`database/recurring-bill-repository.ts`. `server/recurring-bill-operations.ts`
+validates inputs and resolves the session actor before reads or writes;
+`routes/transactions_.recurring.tsx` presents `/transactions/recurring` without
+nesting the transaction-list page. AppShell supplies its Transactions child item,
+and Overview loads active Pending/Due occurrence counts separately. A read-only
+preview operation uses the same rule matcher for description/cadence checks.
+`domain/recurring-description.ts` owns bounded RE2JS regex and literal matching.
+These operations never create or edit financial transactions. Migrations 0017/0018
+are prepared, not applied. Changing the date/cadence resets reminder links only.
+
+`domain/invoice-status.ts` derives invoice/credit-note status by transaction kind
+and available invoice-profile evidence. List, detail, SQL filters and Overview use
+that policy independently of financial state and the legacy general Evidence filter.
+The tax source-attribution table has its own sizing class; other tax tables retain
+their existing widths.
 
 | Module       | Owns                                                                                             | Must not own                      |
 | ------------ | ------------------------------------------------------------------------------------------------ | --------------------------------- |
@@ -97,9 +116,87 @@ invalid issues or the existing saved result, and leaves generic provider errors 
 the existing diagnostic path. No database migration was required; search, filters,
 user administration, and Stripe upload forms remain outside this migration.
 
+As of 30 September 2026, BILL-T70 adds `components/autocomplete.tsx` and its shared
+styling for fixed-choice single selection and enum multi-selection throughout the
+workspace. Named controls preserve underlying form values, required/disabled
+behavior, and native reset; existing creatable supplier/category/currency fields
+remain unchanged. Transaction, bank activity, bank import, and file-library query
+builders own URL state and auto-application. Their route and server schemas validate
+legacy scalar equality and bounded exact-membership arrays, while repositories apply
+parameterized membership predicates before pagination. No database migration is needed.
+
+As of 1 October 2026, BILL-T73 moves mixed-clause presentation and staged editing
+into `components/query-chip-builder.tsx`, with scoped chip-bar styling. Route
+adapters still own their schemas, URL state, default ordering, and debounced query
+application. The shared editor emits completed clauses only on blur, Enter, or
+explicit application; incomplete edits stay local. Fixed-choice autocomplete
+supports optional intrinsic input sizing for compact chip segments.
+
+BILL-T75 uses `domain/bulk-transactions.ts` for the bounded metadata-edit contract,
+`components/bulk-transaction-editor.tsx` for server preview and explicit commit,
+and the Transactions route for current-page selection. Repository methods validate
+exact revisions and commit changed rows atomically in deterministic lock order.
+Server operations enforce existing transaction-write permissions; no MCP bulk tool
+or financial-field mutation is included.
+
+`components/money-text.tsx` owns monetary display markup without formatting or
+calculation logic. It preserves existing text and strong/small semantics;
+`styles/app.css` owns right alignment with the application font, including matching
+table headers and left-aligned mobile field labels. Routes retain their existing
+formatters, inputs, and export flows. `components/money-copy.ts` owns comma removal
+for native-copy selections wholly inside one marked, non-editable monetary value.
+AppShell installs and cleans up its document-level listener; mixed selections,
+inputs, cut, exports and explicit Copy ID actions are not overridden.
+
+As of 2 October 2026, BILL-T68 isolates exact direct/Business allocation in
+`domain/tax-attribution.ts`. Tax source rows project owner IDs; versioned source
+fingerprints and frozen v2 snapshots preserve legacy reviews and exports. The tax
+route selects explicit active users from a narrow authorized option query. This
+does not change operational owners, exclusions or deductibility rules.
+
+BILL-T79's `domain/owner-funding.ts` owns exact cumulative recorded loan and
+principal-repayment totals by owner through the selected financial-year end.
+Tax operations calculate that summary from the full ledger alongside the selected
+year's source review, using one authorized transaction read. The tax route presents
+it separately from saved allocations; historical funding never expands the frozen
+tax source. `domain/cash-effect.ts` supplies the negative principal-repayment sign,
+while the owner-funding report branch keeps income and expense effects at zero.
+Migration 0016 adds repayment invariants and extends both bank matching safeguards;
+historical migrations remain unchanged.
+
+BILL-T33's `bank-repository.nextReconciliationTarget` owns filtered keyset queue
+selection and one-based page rank. The authorized server read and reconciliation
+route distinguish successful matching from subsequent navigation failure; normal
+match, Undo and unmatch actions retain their behavior.
+
+BILL-T77's `domain/invoice-types.ts` and `invoice-parser.ts` own normalized text and
+supplier-specific financial facts. `documents/invoice-extraction.ts` owns bounded
+local worker extraction; `DocumentService.readInvoicePdf` owns actor, pinned-object
+metadata, checksum and lifecycle checks. `server/invoice-operations.ts` returns
+suggestions and advisory duplicate counts only. `domain/pdf-invoice-fields.ts` and
+`components/invoice-suggestion-review.tsx` own explicit reviewed application to five
+document fields. Route upload orchestration confirms and reuses evidence without
+automatic approval or transaction saves; Stripe suggestions remain review-only.
+
 `src/components/form-devtools.tsx` owns the development-only TanStack Form Devtools
 plugin. The root route loads it lazily behind `import.meta.env.DEV` and `ClientOnly`;
 production does not render or bundle the Devtools UI.
+
+`src/domain/proposals.ts` defines the concrete MCP scopes, creation-time wildcard
+expansion, and one-time credential secret generation. `src/database/proposal-repository.ts`
+owns credential persistence and revision-checked MCP transaction changes;
+`src/mcp/tools.ts` exposes only the tools allowed by each credential.
+`src/server/mcp-credential-operations.ts` authorizes administrator credential
+management, while `src/routes/admin.tokens.tsx` presents list/create/revoke UI.
+`src/domain/reports.ts` owns structured transaction warnings and category totals;
+`src/routes/reports.tsx` renders warning links and the preparation breakdown.
+`src/domain/tax-source-review.ts` fingerprints the FY cash ledger and imported
+bank-row review state; `tax-adjustments.ts`, `tax-partners.ts`, and
+`tax-workbook.ts` calculate explicit adjustments, exact partner allocations,
+and the export snapshot. `src/server/tax-operations.ts` authorizes the review
+and export flows, `src/database/tax-review-repository.ts` persists append-only
+versions, and `src/routes/reports_.tax.tsx` presents the FY2025–26 worksheet
+at `/reports/tax` as a non-nested sibling of Reports.
 
 ## Banking boundaries
 

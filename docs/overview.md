@@ -18,6 +18,22 @@ domain description; the name does not imply a general ledger or accounting syste
 
 ## Confirmed boundaries
 
+- Recurring bills are separate monthly/annual forecasts with Upcoming/Pending/Due
+  states, a Transactions child page and an in-app Overview attention count.
+  A matching recorded supplier expense satisfies an occurrence without an invoice;
+  forecasts never enter cash, tax or partner allocations. Pattern suggestions
+  require explicit confirmation. Responsibility is not financial ownership.
+  Pending is within the inclusive late/grace window; Due is after it. Attention
+  counts missing occurrences rather than schedules. Before saving, a read-only
+  preview separates case-insensitive description matching from date-window alignment.
+  Configurable early/late windows default to three days; date/cadence edits rebuild
+  reminders without changing financial records. Existing Contains rules remain
+  literal; optional Regex uses a bounded linear-time engine.
+- Invoice/credit-note status is independent of financial state and recurrence.
+  Supplier expenses and credits require available invoice-profile evidence to
+  display attached; other kinds do not trigger this document warning by default.
+  This status does not establish tax deductibility. General Evidence remains separate.
+
 - Manual expense entry and file upload are the first ingestion path.
 - PostgreSQL is authoritative for structured data and workflow state.
 - The initial model has users, transactions, and source artifacts. BILL-T08 adds
@@ -54,8 +70,8 @@ domain description; the name does not imply a general ledger or accounting syste
   stored display filename.
 - Manual entry keeps common invoice fields visible and places payment, tax, and
   advanced fields behind progressive disclosure. PDF filenames matching
-  `supplier-YYYY-MM-DD-reference.pdf` suggest values only for blank supplier,
-  invoice-date, and reference fields; every suggestion remains editable.
+  `supplier-YYYY-MM-DD[-reference].pdf` suggest supplier and invoice date, plus
+  reference when present; every suggestion remains editable.
 - Supplier and operational-category fields remain free text but suggest eligible
   prior values. Document currency defaults to AUD with AUD and USD promoted; a
   non-AUD document reveals its effective settlement fields.
@@ -87,9 +103,40 @@ domain description; the name does not imply a general ledger or accounting syste
   registry or whole-transaction blur parse is used. Cross-field and accounting rules
   remain submit-time validation. SSR render-to-hydration regression coverage verifies
   invalid money guidance and correction.
-- Owner contributions and owner loans are explicit non-tax funding kinds. They are
+- Owner contributions, owner loans and principal repayments are explicit non-tax
+  funding kinds. They are
   excluded from income, expense, and GST effects; a complete settled AUD funding
   record contributes only to the cash effect.
+- A separate owner funding table shows cumulative recorded loans advanced,
+  principal repaid, loan balance and other contributions through the selected
+  financial-year end. It includes owners irrespective of tax profit-sharing
+  percentages, exposes incomplete/unassigned/negative balances, and remains
+  separate from frozen tax reviews. Repayments require an explicit lender and
+  principal-only amount; contributions and transfers are not inferred to be loans
+  or repayments. This is a records-based summary, not confirmation of a legal debt.
+- The FY2025–26 partnership tax worksheet derives a row-level cash preparation
+  ledger, separates expected exclusions from missing facts, and blocks review
+  while imported bank rows are unresolved or in-period drafts remain. A reviewer
+  enters reasoned income/deduction adjustments and agreed partner percentages
+  totaling 100%; Folio stores each reviewed version as an append-only snapshot
+  and exports CSV or JSON. A changed source fingerprint marks a saved version
+  historical. This is a reviewed partnership net-result worksheet, not tax
+  payable, a certified return, or direct lodgement. The reviewer must confirm
+  all relevant source files were imported; Folio cannot prove that independently.
+  Stripe cash preparation currently dates imported rows by their creation
+  timestamp, not funds availability; income-tax timing remains a reviewer or
+  accountant decision.
+- Reports has Financial summary and Tax preparation child destinations in desktop and
+  mobile navigation. The source-row table leads with a readable transaction
+  summary and retains the transaction reference as secondary provenance.
+- Standalone monetary displays and matching table headers are right-aligned with
+  the existing application font. Currency labels, signs, colours, and precision
+  remain unchanged. Inputs, exports, counts, percentages, and calculations do not
+  use the display-only money wrapper. Normal copy within one marked monetary
+  value removes grouping commas from the selected text, preserving currency,
+  sign and decimals. Mixed/prose/editable selections, cut and exports retain
+  native or existing behavior; unavailable/failed clipboard writes fall back
+  to native copying. Real-browser clipboard acceptance remains pending.
 - Imported bank rows are planned as immutable cash-movement evidence separate from
   Folio transactions. They affect no accounting or tax summary until explicitly used
   to create or reconcile a transaction. A transaction cannot be marked claimable
@@ -138,6 +185,22 @@ trusted actor ID to repository and document operations. The browser supplies no 
 identity or authorization state. Email is a matching and display-only attribute;
 transaction ownership remains a separate responsibility field. Workspace request
 sequence guards discard stale load responses.
+
+Expired protected server-function sessions return HTTP 401; authenticated users
+without the required permission receive HTTP 403. Protected page navigation with
+no active session redirects to login with a validated same-origin return path.
+Unexpected session lookup failures remain errors rather than redirects.
+
+MCP credentials have concrete, administrator-selected scopes. Credential creation
+expands `*` or a known-resource wildcard such as `transactions:*` into the scopes
+known at creation time; future scopes are not granted automatically.
+Administrators can list credential metadata,
+create a token with a one-time plaintext reveal, and revoke it from Administration
+→ Access tokens. The token hash is never returned to the browser. MCP transaction
+search includes all statuses. An MCP credential can edit all fields of its own
+still-draft transactions with an exact updated-at token, and a separate scope
+permits category-only edits to any transaction. Neither action approves evidence,
+records a draft, or matches a bank row.
 
 `FOLIO_DATABASE_SCHEMA` selects a validated PostgreSQL schema and
 `FOLIO_S3_KEY_PREFIX` selects a validated application-owned S3 prefix. Neither value
@@ -263,7 +326,8 @@ the runtime role intentionally has no list or delete permission.
   be confirmed without committing credentials or account identifiers.
 - Category vocabulary, export columns, and accountant workflow require
   representative synthetic examples and user review.
-- The sole-trader business is not registered for GST as of 23 September 2026. M1 therefore
+- The operator clarified that the business is a partnership and is not yet
+  registered for GST as of 29 September 2026. M1 therefore
   defaults GST credits to not registered and zero, while retaining explicit fields
   so the treatment can change from an accountant-confirmed effective date.
 - Whether the accountant eventually needs interactive access is undecided.

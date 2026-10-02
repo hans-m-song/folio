@@ -366,23 +366,30 @@ outcome, reloading the bank transaction reveals whether it committed.
 
 ### Matched transaction protection
 
-Reset/unmatch is required before changing a matched transaction field that affects
-status or signed cash effect. Description, reference, category, and evidence may remain
-editable. Server and database invariants protect status, kind, settlement amount,
-currency, date, source system, and voiding.
+Reset/unmatch is required before an edit makes the transaction ineligible or changes
+its exact signed AUD cash effect. Description, reference, category, evidence, document
+facts, settlement date, and same-direction eligible classification remain editable.
+The transaction must remain manual, recorded, settled, and denominated in AUD for its
+settlement; voiding still requires unmatching.
 
 The canonical signed effect follows current manual cash semantics:
 
 ```text
 sale, supplier_credit, owner_contribution, owner_loan  positive
-supplier_expense, processing_fee, sale_refund         negative
+supplier_expense, processing_fee, sale_refund, owner_loan_repayment  negative
 transfer, adjustment, dispute                         ineligible in version one
 ```
 
-The database uses a focused trigger to reject updates to protected transaction fields
-while a bank match exists. Repository checks provide actionable errors; the trigger is
-the authoritative invariant for concurrent and future write paths. Reset removes the
-match before a protected transaction edit or void.
+Migration 0015 revalidates the edited transaction against the immutable matched bank
+amount instead of rejecting every identity-field change. Repository checks provide
+an actionable `BANK_MATCH_EDIT_CONFLICT` without changing the match. Bank-row locks
+precede the transaction lock; the trigger also protects direct database writes.
+
+Migration 0016 extends both match eligibility and matched-edit validation to
+owner-loan principal repayments. Their cash effect is negative with no tax expense.
+Creating a repayment from an outgoing bank row leaves its lender unset for explicit
+selection, rather than assuming that the editor is the recipient.
+Reset removes the match before an incompatible edit or void.
 
 ## Permissions
 

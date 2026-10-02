@@ -1,5 +1,421 @@
 # Folio standalone decisions
 
+## 2026-10-03 — Verified commits and recurrence acceptance
+
+- The operator accepted the BILL-T85 visual result and requested commits after
+  verification from now on. Do not commit failed or unverified changes.
+- BILL-T86 authorizes bounded disposable PostgreSQL checks for recurrence links,
+  owner repayment constraints and reconciliation queue ordering, without live data.
+- A new isolated PostgreSQL container accepted all 18 migrations in folio_t28_verify.
+  This does not establish the migration state of any operator database.
+- The working tree spans earlier feature slices; the operator approved committing
+  all verified application changes, split into features where practical.
+  docker-compose.yml and local agent/config directories remain excluded from review
+  and staging because their potential sensitive contents have not been authorized.
+- Both PostgreSQL files pass sequentially: 16 synthetic cases. Recurrence links,
+  stale revisions and cadence resets preserve transactions; repayment constraints
+  and negative matching, and queue ordering/wrap/page selection are exercised.
+  The isolated container and data volume were removed. Full suite remains 1,086
+  passed/one skipped; build/TypeScript, source lint and changed-file formatting pass.
+  No live database acceptance or storage compatibility claim follows from these
+  checks. Six feature commits record the verified application work: b273be1,
+  8010974, 8c63be2, 8ab15b3, 69d6bbf and 62fc5e2. Intermediate commits share
+  dependencies; test/build results describe the final combined application tree.
+
+## 2026-10-02 — Recurrence presentation and historical estimates
+
+- BILL-T85 keeps the existing preview column order while allocating most width to
+  Description. Recurrence calendar dates use DD Mon YYYY in UTC for presentation;
+  machine-readable dates remain ISO. Source links use scoped application styling.
+- Show scheduled unresolved Pending/Due occurrences plus only the next scheduled
+  Upcoming. Missing history uses bounded oldest-first pages; full attention counts
+  are independent of paging. Completed and off-cadence linked associations remain
+  accessible in details for review/unlinking, not as additional forecasts.
+- Estimates derive from unambiguous on-cadence recorded document amounts, including
+  pre-anchor history and excluding unusable amounts/future dates. Min/max preserve
+  decimal precision; displayed averages round directly to cents with BigInt, avoiding
+  double rounding. Persisted expectedAmount remains for compatibility but is no
+  longer user-facing. No financial records, schema, queries or dependencies changed.
+- Terminal null cursors are authoritative; workspace refresh clears page caches even
+  with unchanged schedule revision. Trusted server context supplies estimate cutoffs.
+- Full synthetic suite passes 1,086 tests, one skipped; independent focused review
+  passes 98 tests and source audit/scoped lint/format and final sequential production
+  build/TypeScript pass. Fixture helpers use explicit domain interfaces to avoid
+  literal inference errors; no suppression casts were added. Visual/live PostgreSQL
+  acceptance was not exercised in this slice.
+
+## 2026-10-02 — Historical cadence preview boundary
+
+- BILL-T84 extends preview backward through monthly/annual cadence, preserving
+  the original calendar anchor's day and leap/month-end clamping. Active reminders
+  still begin at the first expected date; historical preview is analysis only.
+- Counterparty autocomplete reuses existing actor-authorised entry suggestions and
+  permits custom text. Track recurring bill uses the Edit transaction action style.
+- Independent review caught stale pre-anchor link dates rendering as reminders.
+  A defensive display guard excludes only those dates; later ineligible links stay
+  visible for review/unlinking. Normal cadence edits already clear schedule links.
+- Final synthetic suite passes 1,071 tests with one skipped across 101 files;
+  independent focused and closure checks, lint/format and production build/TypeScript
+  pass. No financial records, new SQL,
+  migrations, dependencies or live data were changed for this slice.
+
+## 2026-10-02 — Reminder rules and grace terminology
+
+- The operator permits reminder history loss on editing date/cadence; financial
+  records remain protected. The earlier immutable-cadence proposal is discarded.
+- Approved before-save live regex/date preview and configurable directional early/
+  late windows. Preserve literal Contains rules; add case-insensitive Regex mode.
+  Pinned RE2JS 2.8.6 supplies linear-time matching without executing native user regex.
+- Terminology is Upcoming before date, Pending during inclusive grace window, Due
+  afterward. Separate counts refer to missing occurrences, not schedules. Notifications
+  remain in-app only. Prepare0018; no migration application or live verification.
+- Full-history counts use calendar arithmetic, not expanded forecast rows. Preview
+  respects directional windows and displays an eligible expected date when the
+  nearest calendar date is outside an asymmetric window. Cached matchers include
+  mode/pattern identity so editing a reused object cannot retain a stale expression.
+- Stable full synthetic suite passes 1,062 tests, one skipped across 101 files;
+  independent review and focused closure tests pass. Scoped lint/format/whitespace
+  gates and sequential production build/TypeScript pass; visual and actual PostgreSQL
+  acceptance remain separately gated. No financial transaction was changed.
+
+## 2026-10-02 — Recurring bills implementation authorisation
+
+- T81/T82/T83 implementation is approved in the existing dirty tree. Recurrence has
+  two visible states, Upcoming/Pending, and a recorded transaction alone completes
+  an occurrence. A missing invoice is an independent kind-aware document status.
+  Supplier expenses expect invoices, supplier credits expect credit notes, other
+  kinds do not default to invoice warnings. Provider/source evidence remains separate.
+- In-app notification only, evaluated on load/refresh. Forecasts never contribute to
+  ledger/tax/cash/partner totals. Pattern suggestions require explicit activation;
+  ambiguous matches require association. Original calendar anchors preserve prior
+  missing occurrences, month-end and leap-day behavior. Pausing is a separate action.
+- T82 prioritises Transaction, not Target (the operator corrected their initial
+  wording), in the source attribution table only; headers fit single lines and small
+  screens retain horizontal scrolling. No financial calculations are changed.
+- Migration 0017 preparation, exact optimistic revisions and unique occurrence
+  associations are in scope; applying/verifying against real PostgreSQL is not.
+  No secrets/live records, services, browser/E2E, commits, deployment or new worktree.
+- Review corrected early recorded bills to advance immediately and prevented paused
+  duplicates from competing for automatic matches. Explicit links remain reserved
+  and stale links remain visible/unlinkable. An opaque artifact ID is not proof of
+  invoice profile/availability; invoice status requires available PDF metadata.
+- PostgreSQL constraint guidance shaped additive foreign keys, unique association
+  identity, exact numeric estimates and short revision-locked writes. The project
+  remains local PostgreSQL, not Supabase. Real database enforcement is unverified.
+- Cadence edits exposed a history-loss risk. Immutable calendar anchor/frequency
+  after creation was proposed to the operator; no decision or restriction is inferred.
+- Stable synthetic checkpoint passes 1,030 tests with one skipped across 101 files;
+  sequential production build/TypeScript and scoped ESLint passed. T82/T83 are
+  code-complete; T81 remains open for the cadence-edit decision. Migration 0017
+  remains unapplied. Source table browser acceptance is still pending.
+
+## 2026-10-02 — Owner funding separation and report Period width
+
+- BILL-T79 keeps recorded funding separate from frozen direct/Business/final tax
+  allocations. The cumulative panel uses the full ledger through financial-year
+  end from the existing authorized read, including earlier years and every funding
+  owner regardless of partner percentage. Missing facts and negative balances warn;
+  recorded funding is not a certification of legal debt or source completeness.
+- Explicit owner-loan principal repayments are cash out with zero income/expense
+  effect, positive principal and an explicit lender. Supplied settlement amounts
+  must be positive; null remains valid for incomplete records. Existing loan and
+  contribution behavior is preserved. Contributions and transfers are not inferred
+  to be loans or repayments. Interest remains a separate expense transaction.
+- Additive migration 0016 preserves signed amount/direction bank-match safeguards.
+  PostgreSQL constraint guidance shaped explicit nullable checks; exact integer
+  arithmetic preserves cumulative amounts. The project remains local PostgreSQL,
+  not a Supabase deployment. No migration was applied or actual trigger execution
+  verified. MCP repayment drafting remains outside this approved UI-focused slice.
+- BILL-T80 widens only the report Period field with responsive bounds and preserves
+  labels, GET submission and Apply. Actual-browser visual fit remains unverified.
+- Final stable suite: 965 passed, one skipped across 95 files. Sequential production
+  build/TypeScript, scoped lint/formatting, whitespace checks, independent focused
+  verification and read-only audit passed. No staging, commit, live records,
+  services, deployment or new worktree. Existing migrations 0013–0015 are preserved.
+
+## 2026-10-02 — User attribution, next-row actions and invoice suggestions
+
+- BILL-T68 implements direct owner effects plus the same-percentage Business pool,
+  signed exact allocations and frozen v2 snapshots without changing tax exclusions
+  or ledger owners. Legacy v1 fingerprints, calculations and exports are preserved;
+  unknown model versions reject. Synthetic refunds/credits and owner-stale exports pass.
+- BILL-T33 uses an authorized keyset/rank read and explicit success-only next actions.
+  Root review closed an implicit-selection refresh edge case by keying freshness to
+  validated URL fields. Normal actions, Undo, unmatch and upload retries are preserved.
+- BILL-T77 separates invoice facts from payment facts, uses pinned checksum-verified
+  reads and bounded local PDF.js extraction, and applies only five reviewed document
+  fields. Unknown/ambiguous content falls back to human review; Stripe is read-only.
+  Confirmation never substitutes for evidence approval or transaction saving.
+- Production checks caught Nitro rewriting import.meta.resolve and omitting dynamic
+  dependencies. The resolver now anchors to the absolute Node entry and converts to
+  a file URL. Build tracing explicitly stages legacy display/worker and native canvas
+  via resolved file paths. Isolated built-code extraction passed from copied output,
+  without runtime/auth imports or workspace dependency fallback. The published Nitro
+  archive matches the lockfile and supports traceInclude; upstream source differs.
+- Final stable suite: 943 passed, one skipped across 94 files. Sequential build/type,
+  scoped lint/formatting, independent focused checks and read-only audit passed.
+  PostgreSQL query execution, actual invoices and operator browser review remain
+  unverified. PDF guidance shaped local bounds/privacy; PostgreSQL guidance shaped
+  exact allocation and queue ordering; documentation guidance preserves verified gates.
+- Existing dirty-tree work and prior migrations remain intact. No commit, staging,
+  new worktree, live migration/write, storage probe/change or deployment. BILL-T78
+  remains a separately authorized follow-up; no external tasks were created.
+
+## 2026-10-02 — Candidate implementation authorization
+
+- The operator authorized implementation of BILL-T68, BILL-T33 and BILL-T77 in
+  the current working tree with synthetic tests and no commits. Separate worktrees,
+  migrations, live-data access, provider tests/configuration and deployment are not
+  included. Existing tracked and untracked edits remain protected.
+- Implementation and verification checklists are recorded in the candidate plan;
+  ownership separates tax, reconciliation and new invoice modules while main owns
+  shared interface/dependency integration and durable documentation.
+
+## 2026-10-01 — Candidate scope approval
+
+- The operator approved the three initial scopes in the candidate-plan report:
+  BILL-T68 direct owner allocation plus Business percentages, with linked
+  adjustments following source attribution and unlinked adjustments using Business;
+  BILL-T33 explicit successful-match/create advance across the active filtered queue
+  with one wrap; BILL-T77 supplier suggestions with Stripe review-only initially.
+  Per-transaction allocation overrides and imported Stripe evidence linking remain
+  outside this initial scope.
+- Approval is recorded in the plan, roadmap and handoff. Implementation authorization
+  and baseline selection remain open. Git inspection still shows only the main
+  worktree with substantial tracked and untracked changes; no commit, worktree,
+  production implementation or provider test was performed at this checkpoint.
+- BILL-T78 disposable provider tests, migrations, live data/configuration and
+  deployment retain their separate approval gates.
+
+## 2026-10-01 — Candidate implementation-plan investigation
+
+- The operator replaced CommBank statement parsing as a near-term candidate with
+  supplier invoice parsing and authorized local PDF inspection without external
+  uploads or recording personal identifiers. All 26 supplied supplier invoices
+  have extractable text and are unencrypted: ten Workspace, nine Supabase and seven
+  Stripe. Two CBA statement PDFs were excluded. Nine representative files were
+  rendered and their privacy-masked financial regions inspected across 15 pages;
+  originals remained unchanged. Temporary readers/renders are outside the repository.
+- Inspected invoice facts require distinct total/paid/due fields, multi-page and
+  repeated-summary handling, and currency confirmation for unqualified `$` in
+  Supabase text. Stripe invoices include processing fees and sometimes Billing
+  usage; zero due is not a zero expense. Current imported Stripe fees already affect
+  reports and existing evidence rules exclude invoice links to Stripe records.
+  Initial Stripe review-only extraction is proposed, not yet approved or implemented.
+- The operator confirmed Business amounts use the existing agreed partner
+  percentages. Direct/shared signed effects must partition totals without double
+  counting. Actual-user identities and source ownership need frozen new-model
+  snapshots and owner-aware fingerprints while retaining exact legacy v1 comparisons.
+- `docs/implementation-candidates.md` now specifies source evidence, contracts,
+  ownership, synthetic acceptance cases, deliverable slices and approval gates for
+  BILL-T68, BILL-T33, BILL-T77 and BILL-T78. T30 remains deferred with its original ID.
+  The PDF guidance informed local privacy-masked inspection, PostgreSQL guidance
+  informed exact arithmetic and snapshot/locking boundaries, and documentation
+  guidance kept confirmed facts separate from proposed defaults.
+- Next-row planning uses an authorized keyset selection read and the existing
+  descending date/ID queue order, with page rank computed against the displayed
+  filter and a bounded concurrency retry. Reconciliation writes, normal actions and
+  shared form implementation remain protected. Traversal/wrap confirmation is pending.
+- Storage confirmation, recovery, imports/proposals and reads depend on real version
+  IDs. Proposed unversioned mode must preserve old object locators, enforce signed
+  create-only PUTs and checksums, register every issued URL's expiry atomically with
+  pending-state checks, and fence deletion until outstanding PUT URLs expire.
+  SeaweedFS is the first documentation-based probe candidate, not locally verified;
+  Garage's exact required capabilities remain unverified. No provider was selected.
+- Only the main worktree exists; dirty tracked and untracked production files require
+  an approved baseline before parallel work. No production code, application
+  dependency, migration, live record, provider/configuration, commit or worktree was
+  changed by this investigation. Disposable storage tests and implementation require
+  separate approval. TaskView tools were unavailable, so no external tasks were created.
+- Independent source audit and focused re-review passed for scope approval after
+  clarifying one-based queue pages and the existing 10,100-row cap, documentAmount's
+  invoiceTotal-only mapping and reviewed paid-only totals, content/filename date
+  separation, and upload/deletion fencing. No provider/production test was run.
+  Three operator scope choices, baseline approval and disposable-test approval
+  remain pending; investigation completion is not implementation approval.
+
+## 2026-10-01 — Percentage Business expenses and parallel-work candidates (BILL-T68)
+
+- Operator clarified the initial model: each partner receives directly attributed
+  transactions plus a percentage allocation of Business expenses. Custom per-cost
+  splits and direct reassignment of individual Business costs are deferred. The
+  proposed percentage source is the agreed partner shares; separate Business-cost
+  shares remain unconfirmed. No allocation code or live ownership changed.
+- Current code/backlog inspection identified tax-independent candidate boundaries:
+  explicit match/create-and-next (BILL-T33), document storage/versioning transition
+  with preservation checks, and parser-only CommBank PDF support (BILL-T30) after
+  its supported layout is confirmed. Full dark appearance and audit history have
+  shared styling or operation/persistence overlap and are weaker full-feature pairings.
+- Current document confirmation explicitly rejects missing immutable version IDs;
+  downloads and reads also require them. Unversioned support needs lifecycle and
+  legacy-object compatibility work, not merely switching a container image.
+- Git inspection found only the main worktree and broadly uncommitted recent code,
+  including untracked tax modules. A new HEAD-based worktree would not contain those
+  changes. A shared checkpoint or reviewed tracked/untracked patch baseline needs
+  approval before parallel implementation. No worktree, commit, test environment,
+  migration, object-store change or extra feature implementation was created.
+
+## 2026-10-01 — Business-attribution requirement (BILL-T68)
+
+- Operator requested Business as an allocation option, giving system-owned costs
+  as an example, with partner attribution chosen during review. This requirement
+  extends the pending plan; no implementation or live records changed.
+- Source inspection confirms User has no system-account marker and transaction
+  owner is a user reference. Proposed review targets are Business (shared) or an
+  explicitly selected partner, separate from operational ownership. Non-selected
+  system accounts, other non-matching owners and unassigned rows default shared;
+  no system identity inference by names/roles or fake user record is proposed.
+- Proposed review overrides remove directly assigned costs from the percentage
+  pool, preserving source/reviewed totals and avoiding double counting. Linked
+  adjustments follow final reviewed attribution; unlinked adjustments remain shared.
+  Save overrides in the versioned review snapshot, leaving ledger owners unchanged.
+- One target per transaction is the proposed minimal scope; custom multi-partner
+  splits are unconfirmed, as are the full adjustment/shared-pool plan and
+  implementation authorization. No database migration or test run was performed.
+
+## 2026-10-01 — User-attribution plan checkpoint (BILL-T68)
+
+- Source inspection confirms the tax partner contract still stores generic labels
+  and percentages; tax ledger rows omit owner IDs. New manual/reconciliation rows
+  default owner to the actor. Ownership is operational responsibility, not proof
+  of the agreed partner allocation; no live ownership records were inspected.
+- Reviewed results are append-only JSONB with extensible object keys. Proposed new
+  versions freeze selected user IDs/labels, source ownership, percentages and exact
+  direct/shared/final amounts, while legacy generic-label versions retain their
+  original calculations. No record rewrite or schema migration was performed.
+  Adding owner IDs to the source hash requires a new fingerprint version; legacy
+  comparisons must retain their exact v1 owner-less shape/version/key order so an
+  upgrade alone does not stale old reviews. Actual ownership edits continue to
+  stale them through the existing updatedAt source revision.
+- Proposed adjustment rule: linked adjustments follow matching selected owners;
+  unlinked/non-matching-owner adjustments remain in the shared pool. All other
+  non-matching/unassigned tax effects also use the shared pool, with review totals
+  visible. Owner funding contributes no tax income/expense effect merely from its
+  cash movement. These rules and implementation authorization await confirmation.
+- PostgreSQL review guidance informed the exact-numeric and append-only compatibility
+  checks. The source investigation made no tax allocation or database changes.
+
+## 2026-10-01 — Monetary alignment decision (BILL-T76)
+
+- Operator approved right-aligned monetary displays with the existing regular
+  application font, not the preview's monospace proposal. Formatting precision,
+  signs, currencies, inputs, and exports remain unchanged.
+- Shared MoneyText presentation preserves strings and strong/small semantics.
+  Numeric alignment uses tabular figures without font-family/size overrides.
+  Overview and tax-card span selectors were narrowed to their direct labels to
+  preserve nested value colours. Table selectors override banking cell alignment;
+  mobile pseudo-labels explicitly remain left-aligned. Unused inline support was
+  removed; compound financial detail remains unmarked and proposal prose unchanged.
+- Stable full-suite verification passed 826 tests, one skipped across 86 files,
+  using maxWorkers=4 without a concurrent build; independent verification passed
+  153 focused tests and TypeScript. Scoped lint, formatting, and source audit
+  passed. An earlier run during final edits/concurrent build had stale header
+  assertions and timeout failures; these did not recur against stable source.
+  No timeout/config changes were made. Final stable-snapshot production build and
+  TypeScript passed. Application visual review is pending; no deployment, live
+  data/database access, browser/E2E test, commit, or worktree deletion occurred.
+- Browser normal-copy events can replace clipboard text, verified against the
+  [MDN copy-event documentation](https://developer.mozilla.org/en-US/docs/Web/API/Element/copy_event)
+  on 1 October 2026. The operator approved the follow-up, limited to selections
+  within one monetary display, removing grouping commas only. AppShell now owns a
+  document-level listener lifecycle; the helper preserves native behavior for
+  non-monetary/mixed/editable selections and unavailable or failed clipboard writes.
+  Focused worker verification passed 23 tests, TypeScript, scoped lint and formatting.
+  Those gates preceded independent review; synthetic copy events do not verify
+  the OS clipboard.
+- Independent synthetic review found an endpoint-only containment edge case with
+  nested monetary markers. Current MoneyText accepts string children, but the copy
+  helper must conservatively reject malformed/nested markers as multiple-value
+  copying. A minimal guard and synthetic regression close the edge case without
+  expanding scope. Independent verification passed 28 focused tests, scoped lint
+  and formatting. Final stable full suite passed 837 tests, one skipped across 87
+  files with maxWorkers=4 and no concurrent build; sequential production
+  build/TypeScript, scoped lint, formatting and whitespace checks passed. No live
+  records, database/migration, OS clipboard/browser E2E, deployment, commit or
+  worktree deletion occurred. Final read-only source audit found no unexpected
+  copy scope or tax-attribution implementation. Rebuilt-app visual/copy acceptance
+  remains pending.
+
+## 2026-10-01 — Bulk category options, compact preview, and presentation follow-ups
+
+- Operational category discovery now includes all non-void transaction sources and
+  kinds, keeping trimmed distinct nonblank values, deterministic ordering, and the
+  limit of 200. Supplier-specific category history is unchanged. Built-in expense
+  suggestions merge with saved categories; exact deduplication preserves case variants.
+- Bulk preview cards became a semantic five-column table with compact two-line
+  context, full description text in the DOM/title, untruncated change values,
+  bounded internal scrolling, and sticky headers. Mutation/selection semantics are
+  unchanged. Verification passed: 816 tests, one skipped; build/TypeScript, scoped
+  lint, formatting, and independent review (111 repository/route tests).
+- An approved standalone table-and-cards money-formatting mock-up uses synthetic
+  amounts and matching font sizes, comparing proportional/left-aligned values to
+  monospace/right-aligned values. It was rendered and visually inspected; production
+  typography remains unchanged pending review. Rendering used a fresh isolated
+  profile and did not access Folio or the personal browser profile.
+- For BILL-T68, the operator selected direct allocation of owner-linked income and
+  expenses plus percentage allocation of the remaining pool. Implementation is not
+  started; exclusions, tax adjustments, and saved-version compatibility need a plan.
+
+## 2026-10-01 — Bulk editor alignment and header selection (BILL-T75 follow-up)
+
+- The Field picker now has a visible associated label. Field, owner, and creatable
+  controls use the same scoped label-to-input gap; global form styling is unchanged.
+- The table header now selects or clears all visible eligible rows, shows partial
+  selection as mixed, and disables when loading, applying, or no eligible rows exist.
+  Void rows remain excluded; viewer controls remain hidden. Filling a partial
+  selection preserves previously captured revision tokens.
+- Verification passed: 54 route tests and the full suite of 813 tests, one skipped;
+  TypeScript, scoped lint, formatting, production build, and independent review passed.
+  Rebuilt-UI visual
+  acceptance remains pending; no backend, migration, or live-data change was made.
+
+## 2026-10-01 — Bounded metadata bulk edits (BILL-T75)
+
+- Approved fields are counterparty, operational category, and owner; the earlier
+  tax-classification mention was withdrawn. One nonempty field/value action applies
+  to explicitly selected rows on the current page, bounded to 50 unique IDs.
+- Preview is read-only. Commit reparses the allowlisted payload, locks transaction
+  rows in ID order, validates every exact revision before writing, and skips no-ops.
+  An active target owner is share-locked. Changed rows receive monotonic audit
+  timestamps; financial identity, evidence, matching, and partner shares are untouched.
+- Existing transaction-write permissions govern the server operations. Missing,
+  void, stale, or invalid-owner selections reject the batch. No bulk MCP tool,
+  migration, deployment, or live-data access is included.
+- UI controls are searchable; previews are tied to the exact selection and change.
+  Apply failures invalidate the preview and clear/reload selection. Parent busy
+  state clears even when navigation unmounts the editor during a pending commit.
+- Final code gates passed: 811 tests, one skipped; TypeScript, scoped lint,
+  formatting, production build, and independent review (170 focused tests and
+  TypeScript). Operator visual review remains pending.
+
+## 2026-10-01 — Query-chip presentation polish (BILL-T74)
+
+- Increased chip and label padding; sort direction is a separate decorative span,
+  centred alongside its label. Action icons use centred inline-flex alignment.
+- Clear filters and Clear sorts are left-aligned standard secondary buttons.
+  Query semantics, disabled states, and accessible labels are unchanged.
+- Fixed the existing-chip editing class separator outside the conditional string
+  so formatting preserves it; a regression test covers editing a saved sort chip.
+- Verification passed: 75 focused tests, TypeScript, scoped lint, formatting,
+  production build, and independent review. Browser visual acceptance is pending.
+
+## 2026-10-01 — Compact query-builder design (BILL-T73)
+
+- The operator approved a shared mixed filter/sort chip bar in Transactions,
+  Bank activity, Import history, and File library, replacing stretched row controls.
+- Completed edits apply on blur or Enter; incomplete edits stay local. String
+  fields default to contains and enum fields to searchable membership.
+- Existing URL schemas, AND filter semantics, and sort priority remain the
+  contract. This task does not authorize database changes or live-data testing.
+- The implemented shared control rejects incomplete or route-invalid commits,
+  preserves legacy scalar enum operators, prevents duplicate sorts, and cancels
+  stale edits after URL/history changes. Default sort resets assign unique IDs.
+- Fixed-choice popup sizing no longer imposes a 24rem minimum; compact chip inputs
+  opt into intrinsic sizing. No native select controls were reintroduced.
+- Final code gates passed: 782 tests, one skipped; TypeScript, scoped ESLint,
+  formatting, production build, and independent review. Visual acceptance is
+  pending; no deployment or database migration was performed.
+
 ## 2026-09-19 — FOLIO-EXT-02 extraction
 
 - The repository is a standalone Folio application at its root. It has no pnpm
@@ -1113,3 +1529,350 @@
   typecheck, lint, and diff checks passed on 26 September 2026. Live migration,
   Codex-to-Folio connection, and browser E2E are deferred, so this is not a
   deployed or operator-verified milestone.
+
+## 2026-09-26 — MCP web-listener integration
+
+- The user approved replacing the separate MCP process with `/mcp` on Folio's
+  existing web listener, gated by `FOLIO_MCP_ENABLED=true` (default off).
+  Disabled requests return 404 without constructing the MCP runtime.
+- The route accepts only the configured Folio Host and Origin, verifies bearer
+  credentials on each request, and does not use browser cookies. Existing
+  credential generation, hash persistence, scopes, and revocation are unchanged.
+- Sharing the web listener removes the former independent loopback bind. If
+  enabled on a publicly routed deployment, the endpoint is network-reachable
+  despite its bearer requirement; production enablement requires an explicit
+  proxy/remote-access decision. No live Codex or database test has established
+  rollout readiness.
+
+## 2026-09-26 — MCP credential setup discovery
+
+- The user approved a `pnpm mcp:credential` wrapper for the existing explicit
+  create/revoke command, a read-only `scopes` action, and a generic Copy ID
+  control in Admin → Users. Scope discovery does not open a database connection.
+- Credential creation still requires explicit administrator, dedicated actor,
+  default owner, label, and scopes; it generates a token only on `create` and
+  shows it once. No live credential was issued during verification.
+
+## 2026-09-26 — Database CLI failure diagnostics
+
+- The user encountered a generic credential-create failure with distinct actor
+  and requested proper error logging for credential and migration commands.
+- Both commands now report operation, stage, safe error code, and constrained
+  guidance. Migration failures identify the migration ID when applicable and
+  preserve rollback. Raw database messages, SQL parameters, connection
+  strings, user records, and credential values are not logged.
+- A synthetic migration failure at migration 0011 confirmed stage/code output,
+  rollback, and redaction. The actual local failure remains unidentified until
+  the operator retries the command; no live database was inspected.
+
+## 2026-09-26 — Participant-specific MCP credential diagnostics
+
+- The operator retried with a distinct actor and received `USER_INELIGIBLE`.
+  Repository checks now distinguish the administrator, actor, and owner, with
+  fixed reasons for missing, inactive, wrong-role, or non-distinct users.
+  These failures occur before credential insertion and contain no user IDs or
+  personal fields in CLI output.
+- Synthetic repository and formatter tests passed. No live users or database
+  were inspected, so the operator's exact failing participant remains unknown
+  until they retry with the updated command.
+
+## 2026-09-26 — Local MCP connection and operator workflow skill
+
+- An authenticated call to the exact local `/mcp` route returned `pong`.
+  A synthetic `initialize` and `tools/list` exchange returned the ping tool.
+  The operator reports successful Folio tool discovery in a fresh Codex CLI
+  session, while the resumed session remained failed even after a fork. The
+  latter is session-specific evidence, not a diagnosed Codex root cause.
+- A repo-local `folio-mcp` skill now teaches Codex how and why to use the
+  scoped tools to stage files, manual drafts, and match suggestions for human
+  review. It deliberately omits server-maintenance steps and preserves the
+  no-auto-approval, no-Stripe-row-draft, and no-original-file-retrieval
+  boundaries. No real file or transaction was submitted in this checkpoint.
+
+## 2026-09-27 — Composable queries and Sources navigation
+
+- The operator confirmed Transactions as the filter-builder pattern for Banking
+  Activity, Bank Import History, and Sources File Library, with ordered sort
+  clauses in all four tables. The four Sources tabs also appear as sidebar
+  children; in-page tabs remain.
+- Filter clauses use field-specific operators and AND semantics. Ordered sort
+  clauses are editable and reorderable. Server queries apply them before
+  pagination with a stable ID tie-breaker; URL state retains the query across
+  navigation, and query changes reset the page to one. Existing header/mobile
+  sort controls remain available as single-field shortcuts.
+- Synthetic verification passed 602 tests (one skipped), typecheck, lint,
+  scoped formatting, production build, and diff check. No populated-browser
+  or live-database review was run. These changes remain uncommitted pending
+  operator verification.
+
+## 2026-09-27 — Structured operation logging refinement
+
+- The operator kept the `folio_access` operation name but requested only
+  unusual outcomes to be logged. Its successful runtime-availability checks
+  are now silent; failures still carry a log/UI correlation reference.
+- Remaining Folio operation and client-render-failure events include the
+  incoming HTTP method and pathname, excluding query parameters. Routine
+  success records omit correlation IDs. Health checks emit no Folio event,
+  including when `/health` fails into the root error boundary; unlogged health
+  failures do not return an unresolvable reference.
+- Synthetic verification passed 608 tests (one skipped), typecheck, lint,
+  scoped formatting, production build, and independent read-only review.
+  No live HTTP or populated-browser check was run. Changes remain uncommitted
+  pending operator verification.
+
+## 2026-09-27 — Mixed query builders, Overview navigation, MCP diagnostics
+
+- The operator confirmed one mixed filter/sort clause list on Transactions,
+  Banking Activity, Bank Import History, and File Library. Sort priority is
+  the top-to-bottom occurrence of sort rows; filters still combine with AND.
+  Each route preserves mixed order in URL state and translates it to the
+  existing server query contract. Synthetic tests cover Apply, page reset,
+  row movement, pagination, and URL history restoration.
+- Reports is now a child of Overview in desktop and mobile navigation, without
+  changing `/reports`. Structured Folio events omit request method/path when
+  the incoming pathname is `/_serverFn` or under it; ordinary route pathnames
+  retain those fields without query parameters.
+- The local Folio `/mcp` endpoint returned HTTP 401 without a credential on
+  27 September 2026, consistent with an enabled, reachable auth boundary.
+  No authenticated call, bearer token, Codex configuration, or Codex log was
+  inspected. The cause of the reported Codex failure remains unknown.
+- Verification passed: 620 synthetic tests (one skipped), typecheck, lint,
+  scoped formatting, production build, diff check, and independent review.
+  Browser E2E remained deferred. Changes are uncommitted pending operator
+  verification.
+
+## 2026-09-27 — Live query and draft evidence affordances
+
+- Mixed query builders now apply valid edits after 300 ms and replace the URL
+  entry; this avoids a browser-history entry for every keystroke. Incomplete
+  filter rows remain local while the valid clauses apply.
+- The existing draft-promotion action attaches an approved proposed PDF.
+  The UI now says so explicitly and exposes per-field filename suggestions
+  without treating the proposed file as already attached. Invoice total is
+  not inferred from a filename.
+- The operator requested future MCP edits of its own draft transactions
+  without revision tokens, plus in-place draft editing in Reconcile. Neither
+  is implemented. Omitting revision checks allows last-writer-wins conflicts
+  between MCP and human draft edits and does not alter evidence approval.
+- Focused route tests (94), two draft-editor affordance tests, typecheck,
+  lint, and production build passed. Rendered acceptance is pending; existing
+  React-Aria field-interaction tests remain unreliable in isolation.
+
+## 2026-09-27 — Inline draft editor and credential-bound MCP edits
+
+- The proposed approved PDF is now checked but locked in the evidence list;
+  it is a proposed selection for recording, not an attached draft artifact.
+  The dedicated Remove proposed PDF action remains the way to exclude it.
+- Reconcile embeds the existing transaction editor instead of creating a
+  second save/evidence workflow. Recording is still separate from bank-row
+  matching. The operator's selected row stays visible while editing.
+- MCP edits are patch-based and scoped to drafts created by the same
+  credential. The current transaction owner and evidence links are preserved.
+  No revision token is required by operator choice; last-writer-wins can
+  overwrite another draft edit, so the tool is not marked replay-idempotent.
+- Focused synthetic tests, TypeScript, ESLint, and production build passed.
+  Browser and live-database verification remain pending; existing React-Aria
+  interaction tests still fail in isolation.
+
+## 2026-09-27 — Draft-only suggestions and permanent deletion
+
+- Reconcile draft proposals display only while their linked transaction is a
+  draft, even when the bank row is resolved. Existing-match proposals remain
+  visible until their bank row resolves, with a warning if stale. Promoted drafts
+  then appear only through the ordinary candidate workflow.
+- Human-only draft deletion removes the manual draft and its MCP submission
+  in one transaction, but retains uploaded artifacts. Deletion also removes
+  submission status and idempotency history; replaying the original MCP
+  submission can create a new draft, as accepted by the operator.
+- The app role needs DELETE on transactions and MCP submissions; the migrator
+  reapplies these grants on its next run. The unresolved-only queue uses the
+  existing bank-state predicate and unresolved count for server-side pages.
+- 133 focused synthetic tests across nine files and the queue interaction
+  test passed, as did typecheck, lint, scoped formatting, build, and diff
+  check. Nine pre-existing React-Aria form-interaction tests still fail at
+  `getMetaValue`; live database and browser acceptance are pending.
+
+## 2026-09-27 — Reconcile search parser regression
+
+- The installed TanStack Router decodes `unresolved=1` to numeric `1`.
+  Reconcile accepted boolean `true` and string `"1"`, but not the number, so
+  selecting a queue row cleared the unresolved filter. Row links now write
+  `unresolved=true` and the parser also accepts numeric `1` for old URLs.
+  Synthetic tests exercise the router parser and row-link behavior. Operator
+  re-verification is pending.
+
+## 2026-09-28 — Descriptive category effects in Reports
+
+- Reports groups eligible recorded AUD income and expense effects by report
+  period and saved free-text transaction category; custom categories are
+  preserved, while missing categories use a transaction-kind-specific
+  Uncategorised label. This is a preparation view, not tax classification.
+- Stripe sales may create two category contributions: gross sale income and
+  an uncategorised processing-fee expense. Category monetary effects reconcile
+  to existing period totals; category contribution counts therefore need not
+  equal period transaction counts. Owner funding has no income or expense
+  effect and does not appear in category rows.
+- CSV keeps the existing columns and adds category and row_type. Custom
+  category labels are formula-neutralised. Fifteen focused synthetic tests,
+  TypeScript, targeted ESLint, targeted source formatting, production build,
+  and diff check passed. Operator review is pending; no commit was made.
+
+## 2026-09-28 — Credential scopes, token administration, warnings, and sessions
+
+- MCP `proposals:submit` combined draft and bank-match authority. New concrete
+  scopes separate `transactions:draft`, `bank_matches:suggest`, and
+  `transactions:categorize`. Migration 0013 preserves existing submit-token
+  authority by replacing it with the first two scopes. New credential `*` and
+  known-resource wildcard patterns expand to current concrete scopes at creation, not
+  future scopes. The migration has not been applied to a live database.
+- `edit_transaction` requires the exact prior microsecond `updatedAt`. Own
+  drafts allow existing field patches; `transactions:categorize` allows only
+  category changes on any transaction. This immediately changes report
+  classification without an append-only revision history; that audit history
+  remains a separate deferred boundary.
+- Administrators now have Access tokens UI for metadata listing, one-time
+  secret display on creation, and confirmed revocation. Reports is top-level
+  navigation and structured warning records link to transactions with compact
+  descriptions and reasons. PDF reference suffixes are optional.
+- Typed unauthenticated server-function failures request HTTP 401, permission
+  denials 403, and protected page navigation redirects expired sessions to
+  login with a validated return path. An in-process transport assertion of
+  the serialized HTTP response was not run.
+- Focused cross-slice tests passed (133). Full suite: 655 passed, 19 existing
+  React Aria form-interaction failures, one skipped. TypeScript, ESLint, and
+  production build passed. Browser and live-database acceptance remain open.
+
+## 2026-09-29 — FY2025–26 reviewed partnership tax worksheet
+
+- The operator clarified the business is a partnership, is not yet GST
+  registered, and wants Folio to retain a reviewed net result plus exports.
+  Partner shares are entered as percentages totaling 100%; Folio account users
+  are not assumed to be legal partners. The worksheet is limited to FY2025–26
+  so later GST-registration policy cannot be inferred from this decision.
+- A row-level exact-AUD cash ledger reuses report effects and separates
+  included transactions, expected exclusions, missing cash facts, and other
+  financial years. Imported bank review state, unknown-year drafts, and
+  missing facts gate human review. A separate CSV exports the unreviewed
+  source ledger even when review is blocked.
+- Explicit reasoned adjustments and exact partner allocation produce an
+  append-only reviewed snapshot in migration 0014. Optional adjustment links
+  must identify a selected-year source transaction. Source and bank-row
+  versions form a fingerprint; changes mark the saved review historical and
+  reviewed CSV/JSON export rejects stale snapshots. Review and export checks
+  are not atomic with source edits; concurrent edits can create an immediately
+  stale version, detectable on the next load/export.
+- The reviewed result is not tax payable or an ATO-lodged return. Candidate
+  expenses are not assumed deductible, no GST credit is inferred, and Stripe
+  income-tax timing still needs operator/accountant confirmation because the
+  source projection uses Stripe creation timestamps rather than availability.
+- Seventy focused synthetic tests across 11 files, lint, production build
+  (including TypeScript), diff check, and a read-only
+  independent audit were run. The audit found and prompted fixes for undated
+  drafts, signed refund/credit bases, and reporting-timezone date display.
+  No live PostgreSQL migration, populated financial data, or browser E2E was run.
+  Operator verification and check-in remain pending.
+
+## 2026-09-29 — Reports tax-worksheet navigation fix
+
+- The generated `/reports/tax` route was nested under `/reports`, whose page
+  did not render a child outlet, so the worksheet could not appear through its
+  link. The route now uses the established non-nested `reports_.tax.tsx`
+  convention while retaining the same URL. The Reports link is styled as a
+  primary action. Generated route metadata confirms the root parent; eight
+  focused UI tests and the production build passed. Operator visual verification
+  remains pending; no commit was made.
+
+## 2026-09-29 — Tax-preparation navigation and source-row identity
+
+- The operator selected `Tax preparation` as the Reports child label. Reports
+  now groups Preparation and Tax preparation in both desktop and mobile
+  navigation; the Reports-page action link was removed. The active child is
+  exact-path selected while Reports remains the group location.
+- FY cash-ledger rows now carry saved counterparty and category alongside kind,
+  description, reference, and source. The worksheet renders a styled primary
+  transaction link and muted provenance/detail line, so Stripe IDs are no
+  longer the primary label. Monetary effects and review gates are unchanged.
+- Forty-eight focused synthetic tests across six files, production build with
+  TypeScript, ESLint, and diff whitespace check passed. No populated browser
+  review was run. Operator verification and check-in remain pending.
+
+## 2026-09-30 — Tax presentation and MCP status-tool removal
+
+- The operator confirmed Financial summary / Tax preparation navigation, source
+  net display, per-partner reviewed income/deductions/net by agreed percentages,
+  date-ordered source rows, and form-layout corrections. BILL-T66 implements
+  those changes and retains exact saved calculations and export precision.
+- Ordinary report amounts now display two decimals; non-zero sub-cent precision
+  remains visible. Partner component allocations reconcile to each existing net
+  share and to the reviewed totals under fractional remainders.
+- The operator confirmed future actual-user partner identities. BILL-T68 records
+  the deferred requirement; current generic labels and historical snapshots are
+  unchanged.
+- BILL-T67 removes `get_submission_status` and its repository helper. New scope
+  issuance and wildcard expansion omit `submissions:read`, while existing
+  credentials with that legacy scope remain authenticated. The operator skill
+  describes idempotent retry and transaction search after a lost response.
+- The full synthetic suite passed 725 tests with one skipped; production build,
+  TypeScript, focused lint, and whitespace checks passed. Docker visual acceptance
+  and scoped check-in remain pending. No live records, migration, or browser E2E
+  were used.
+
+### 30 September 2026 — Compatible matched edits (BILL-T69)
+
+- Migration 0007's blanket financial-identity guard rejected harmless settlement-date
+  and same-direction classification corrections. Migration 0015 now revalidates
+  eligibility and exact signed AUD amount instead; historical migrations are unchanged.
+- Bank matches remain intact for compatible edits. Incompatible edits and voiding
+  require explicit unmatch and produce actionable `BANK_MATCH_EDIT_CONFLICT` guidance.
+  Existing bank-before-transaction locks and manual-edit revision checks remain.
+- The synthetic suite passed 739 tests with one skipped; eight dedicated disposable
+  PostgreSQL reconciliation tests passed. Only the test schema was migrated. Live
+  migration, operator verification, application Docker rebuild, and commit remain pending.
+- Independent review found no production defect; its suggested direct UI error-sanitizer
+  assertion was added and passed. Test PostgreSQL was stopped, preserving test volumes.
+
+### 30 September 2026 — Autocomplete polish (BILL-T72)
+
+- Menus open on focus, grow beyond narrow triggers within viewport bounds, and
+  wrap labels without horizontal scrolling. Multi-select chips share a bordered
+  Group with the query input; React Aria measures that full group for popup sizing.
+- All four table builders default new text fields to contains, retaining saved
+  operators and numeric/date/enum defaults. Add controls moved below clause rows.
+- Earlier manual-form/PDF failures were missing pointer-event support in jsdom.
+  Common DOM test setup provides absent pointer/scroll/CSS APIs, and focused
+  validation tests dismiss open suggestions before querying accessible summaries.
+  All 50 manual-form tests and 773 synthetic tests pass; one test is skipped.
+  Production build, typecheck, focused lint, formatting and whitespace checks pass.
+- No real-browser geometry verification, live changes or migration. Operator
+  visual acceptance remains pending; bulk actions remain deferred.
+
+### 30 September 2026 — Complete counterparty suggestions (BILL-T71)
+
+- Counterparty suggestions previously excluded funding, processing-fee and imported
+  transaction counterparties because they required manual supplier kinds. The
+  user approved all non-void transaction counterparties, including drafts.
+- Removed only the counterparty source/kind predicates; supplier/category queries,
+  authorization, normalization, stable ordering and the 200-item bound remain.
+- 54 repository and 33 workflow tests passed, as did typecheck and focused lint.
+  Extra manual-form tests failed 13 of 49 existing dropdown/PDF interactions;
+  no form code changed. No live data or migration. Bulk actions remain deferred.
+
+### 30 September 2026 — Searchable selection and enum membership (BILL-T70)
+
+- Operator confirmed app-wide autocomplete replacement. All former native select
+  dropdowns now use the shared fixed-choice component; existing creatable fields
+  retain custom values. Named fields preserve underlying submission values and
+  required/disabled/reset behavior.
+- Enum filters default to contains any of and also support contains none of, using
+  searchable multi-selection with removable chips. Values within a row use exact OR
+  membership; separate rows remain AND. Legacy scalar bookmarks remain valid.
+- Database membership is parameterized and applied before pagination, including
+  file-library linkage. Existing pagination and stable sort behavior are retained.
+  No database migration is required. Bulk apply-field/value actions remain a proposal.
+- Independent review identified a required-field bypass from nonempty query text.
+  Selected-key validation now rejects unmatched keyboard submissions; unspecified
+  external validity stays undefined so it cannot override React Aria validation.
+- The full synthetic suite passed 768 tests with one skipped; TypeScript, focused
+  lint, formatting, whitespace checks, and production build passed. No live records,
+  schema migration, browser E2E, Docker app rebuild, or commit were used. Operator
+  visual acceptance remains pending.

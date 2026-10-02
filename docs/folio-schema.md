@@ -39,6 +39,30 @@ Financial effects are derived with explicit names; there is no ambiguous generic
 signed `amount`. Stripe import columns retain the source signs exactly so an import
 can be reconciled to Stripe.
 
+## Recurring forecasts — migrations 0017/0018 prepared on 2 October 2026
+
+`recurring_bill_schedules` stores a label, counterparty, optional description
+match, document currency, nullable non-negative `numeric(19,4)` estimate,
+monthly/annual frequency, calendar-anchor `date`, optional responsible user,
+active flag and actor/timestamp audit fields. Responsibility does not change
+transaction ownership. Schedules can be paused, not deleted by the application.
+Migration 0018 adds `description_match_mode` (`contains`/`regex`, default `contains`)
+and integer `days_early`/`days_late` (each 0–365, default 3). Existing rules retain
+literal matching. Regex syntax is validated by the application, not executed in SQL.
+
+`recurring_bill_links` stores explicit associations with a composite primary key
+on `(schedule_id, expected_date)` and a unique transaction ID. Foreign keys restrict
+deletion of schedules, transactions and audit users. Automatic unambiguous matching
+is read-only; explicit associations use exact schedule revisions and short locked
+transactions. Stored links are rechecked against current recorded status and
+eligibility. These tables have no financial effect and do not relax ledger constraints.
+Changing a schedule's anchor or frequency deletes that schedule's reminder links
+inside the same revision-checked transaction; linked financial records are unchanged.
+
+Migration registration and application-role grants are prepared; health checks
+require both tables and registered migrations through 0018. No migration has been applied or checked
+against a running PostgreSQL instance in this implementation slice.
+
 ## `folio.users`
 
 | Column           | Type          | Constraint                             |
@@ -129,24 +153,24 @@ uploads become `abandoned`; available objects are never overwritten in place.
 
 ### Identity and workflow
 
-| Column               | Type          | Constraint                                                                                                                                                 |
-| -------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`                 | `uuid`        | primary key                                                                                                                                                |
-| `owner_id`           | `uuid`        | nullable reference to `users`                                                                                                                              |
-| `created_by_id`      | `uuid`        | required reference to `users`                                                                                                                              |
-| `updated_by_id`      | `uuid`        | required reference to `users`                                                                                                                              |
-| `source_artifact_id` | `uuid`        | nullable reference to `source_artifacts`                                                                                                                   |
-| `source_system`      | `text`        | `manual` or `stripe`                                                                                                                                       |
-| `kind`               | `text`        | `sale`, `supplier_expense`, `processing_fee`, `sale_refund`, `supplier_credit`, `dispute`, `transfer`, `owner_contribution`, `owner_loan`, or `adjustment` |
-| `reference`          | `text`        | nullable; invoice/reference or Stripe balance transaction ID                                                                                               |
-| `counterparty`       | `text`        | nullable                                                                                                                                                   |
-| `description`        | `text`        | nullable                                                                                                                                                   |
-| `status`             | `text`        | `draft`, `recorded`, or `void`                                                                                                                             |
-| `category`           | `text`        | nullable free text                                                                                                                                         |
-| `notes`              | `text`        | nullable                                                                                                                                                   |
-| `metadata`           | `jsonb`       | required; default empty object                                                                                                                             |
-| `created_at`         | `timestamptz` | required; server generated                                                                                                                                 |
-| `updated_at`         | `timestamptz` | required; server generated                                                                                                                                 |
+| Column               | Type          | Constraint                                                                                                                                                                         |
+| -------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                 | `uuid`        | primary key                                                                                                                                                                        |
+| `owner_id`           | `uuid`        | nullable reference to `users`                                                                                                                                                      |
+| `created_by_id`      | `uuid`        | required reference to `users`                                                                                                                                                      |
+| `updated_by_id`      | `uuid`        | required reference to `users`                                                                                                                                                      |
+| `source_artifact_id` | `uuid`        | nullable reference to `source_artifacts`                                                                                                                                           |
+| `source_system`      | `text`        | `manual` or `stripe`                                                                                                                                                               |
+| `kind`               | `text`        | `sale`, `supplier_expense`, `processing_fee`, `sale_refund`, `supplier_credit`, `dispute`, `transfer`, `owner_contribution`, `owner_loan`, `owner_loan_repayment`, or `adjustment` |
+| `reference`          | `text`        | nullable; invoice/reference or Stripe balance transaction ID                                                                                                                       |
+| `counterparty`       | `text`        | nullable                                                                                                                                                                           |
+| `description`        | `text`        | nullable                                                                                                                                                                           |
+| `status`             | `text`        | `draft`, `recorded`, or `void`                                                                                                                                                     |
+| `category`           | `text`        | nullable free text                                                                                                                                                                 |
+| `notes`              | `text`        | nullable                                                                                                                                                                           |
+| `metadata`           | `jsonb`       | required; default empty object                                                                                                                                                     |
+| `created_at`         | `timestamptz` | required; server generated                                                                                                                                                         |
+| `updated_at`         | `timestamptz` | required; server generated                                                                                                                                                         |
 
 `owner_id` remains nullable at the database level because imported Stripe activity
 may be unassigned. Manual transaction saves require a non-null owner in the manual
@@ -162,18 +186,19 @@ categories remain preserved separately. Stripe payouts are `transfer` and exclud
 from income and expense totals. Unknown provider categories become `adjustment`, are
 shown for reconciliation, and remain excluded from tax totals until classified.
 
-| Kind                 | Reporting treatment                                                                                                   |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `sale`               | gross income; any embedded processing fee remains a separate expense effect                                           |
-| `supplier_expense`   | expense supported by an available PDF invoice when claimable                                                          |
-| `processing_fee`     | standalone provider fee expense                                                                                       |
-| `sale_refund`        | reversal of sale income                                                                                               |
-| `supplier_credit`    | reversal of supplier expense                                                                                          |
-| `dispute`            | explicit chargeback activity; effects derived from source values                                                      |
-| `transfer`           | movement between accounts; neither income nor expense                                                                 |
-| `owner_contribution` | non-repayable owner funding; no income, expense, or GST effect; settled AUD value contributes positive cash only      |
-| `owner_loan`         | owner funds lent to the business; no income, expense, or GST effect; settled AUD value contributes positive cash only |
-| `adjustment`         | unresolved provider activity; excluded from tax totals                                                                |
+| Kind                   | Reporting treatment                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `sale`                 | gross income; any embedded processing fee remains a separate expense effect                                                    |
+| `supplier_expense`     | expense supported by an available PDF invoice when claimable                                                                   |
+| `processing_fee`       | standalone provider fee expense                                                                                                |
+| `sale_refund`          | reversal of sale income                                                                                                        |
+| `supplier_credit`      | reversal of supplier expense                                                                                                   |
+| `dispute`              | explicit chargeback activity; effects derived from source values                                                               |
+| `transfer`             | movement between accounts; neither income nor expense                                                                          |
+| `owner_contribution`   | non-repayable owner funding; no income, expense, or GST effect; settled AUD value contributes positive cash only               |
+| `owner_loan`           | owner funds lent to the business; no income, expense, or GST effect; settled AUD value contributes positive cash only          |
+| `owner_loan_repayment` | principal returned to the selected lender; no income, expense, or GST effect; settled AUD value contributes negative cash only |
+| `adjustment`           | unresolved provider activity; excluded from tax totals                                                                         |
 
 ### Dates and positive magnitudes
 
@@ -199,6 +224,20 @@ table.
 document marked `gst_included`, the UI may suggest one-eleventh as source-document
 tax; foreign tax is never inferred. Owner funding requires `no_tax`, zero or absent
 document tax, a non-claimable GST state, and zero claimable GST.
+
+Migration 0016 adds owner-loan principal repayments with an explicit non-null owner
+and a positive, non-null document amount. Amounts remain positive magnitudes;
+the transaction kind supplies the negative cash direction. Interest is not part of
+this principal-only type. A supplied repayment settlement amount must also be
+positive; a missing amount remains incomplete rather than a settled repayment.
+Existing contributions are not automatically reclassified
+as loans, and arbitrary transfers are not inferred to be repayments.
+
+The current-records owner funding view accumulates loans and principal repayments
+from all recorded years through the selected financial-year end, using reporting
+timezone periods. Other contributions remain separate. It is not a frozen tax
+snapshot or proof of a legal debt; missing facts, unassigned funding and negative
+recorded balances require review, and unrecorded history cannot be detected.
 
 ### Australian GST treatment
 
@@ -261,9 +300,10 @@ total and reported as warnings. Transfers, drafts, voids, and unresolved adjustm
 remain visible for reconciliation but outside income and expense totals. These rules
 are neutral preparation conventions, not an accountant-approved tax policy.
 
-Owner contributions and owner loans are excluded from activity income/expense and
-GST totals. On the cash basis, a complete settled AUD owner-funding row contributes
-positive cash with zero income and expense; pending or foreign rows are warned and
+Owner contributions, owner loans and principal repayments are excluded from activity
+income/expense and GST totals. On the cash basis, complete settled AUD contributions
+and loans contribute positive cash; principal repayments contribute negative cash.
+All three have zero income and expense; pending or foreign rows are warned and
 excluded. Settlement state itself is derived: all three settlement fields are
 required for `settled`, otherwise the row is `pending`.
 

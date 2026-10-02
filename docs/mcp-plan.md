@@ -2,11 +2,13 @@
 
 Status: implemented for synthetic functional verification, 26 September 2026;
 local operator rollout and live PostgreSQL migration verification remain.
-Artifact review, durable CSV intake, scoped loopback MCP tools, proposal
+Artifact review, durable CSV intake, scoped MCP tools, proposal
 persistence, and Reconcile suggestions are integrated. The synthetic suite
-passed on 26 September 2026 (559 tests passed, one skipped); typecheck and
-lint passed. No browser E2E, live PostgreSQL, or real Codex-to-Folio smoke test
-was run, as requested.
+passed on 26 September 2026 (578 tests passed, one skipped); typecheck and
+lint passed. No browser E2E, live PostgreSQL, or artifact-upload/draft-review
+smoke test was run. An operator later confirmed an authenticated `folio_ping`
+response and tool discovery in a fresh Codex CLI session. A resumed session
+remained failed after restart and fork; its failure cause is unknown.
 The user rejected a separate proposal inbox and first-class AI/MCP navigation.
 The existing Reconcile suggestions area should surface draft transactions and
 suggested matches for the selected bank row. A short note can explain a
@@ -74,8 +76,9 @@ must not be silently promoted or matched by an MCP call.
    the transaction, reviews it, and performs the ordinary match action.
    Stale bank revisions, an already matched transaction, or a mismatched AUD
    cash effect prevent matching.
-6. The user can leave a draft unrecorded or void it. Neither a rejected/voided
-   draft nor an unused match suggestion changes a bank row or report totals.
+6. The user can leave a draft unrecorded or permanently delete it. Neither
+   an unrecorded draft nor an unused match suggestion changes a bank row or
+   report totals. Uploaded artifacts remain after draft deletion.
 
 Standalone transaction drafts may appear in Transactions and use its normal
 draft-to-recorded workflow. They do not appear in Reconcile without an
@@ -126,7 +129,7 @@ Banking / Reconcile
 │                           │ │ Suggested draft · Supplier expense       │ │
 │                           │ │ USD 35.19 · AUD 49.90 settlement         │ │
 │                           │ │ Note: Check invoice PDF and tax details. │ │
-│                           │ │ [Review draft]                            │ │
+│                           │ │ [Edit draft here]                         │ │
 │                           │ └──────────────────────────────────────────┘ │
 │                           │                                              │
 │                           │ Recorded transaction candidates              │
@@ -136,9 +139,12 @@ Banking / Reconcile
 └───────────────────────────┴──────────────────────────────────────────────┘
 ```
 
-`Review draft` opens the existing editor and retains a return path to the
-selected bank row. The existing draft editor can provide its normal void
-action. After recording, the ordinary candidate and match controls become available.
+`Edit draft here` opens the existing transaction workflow inside Reconcile
+while retaining the selected bank row. Both full and inline editors offer
+confirmed permanent draft deletion; uploaded artifacts remain, while the draft
+and its MCP submission (including status and idempotency key) are removed.
+The void action remains for recorded transactions. After recording, the
+ordinary candidate and match controls become available.
 The source row is never auto-matched by recording the draft.
 
 ### Reconcile — narrow screen
@@ -153,7 +159,7 @@ Suggested drafts and matches
   Suggested draft · Supplier expense
   USD 35.19 · AUD 49.90 settlement
   Note: Check invoice PDF and tax details.
-  [Review draft]
+  [Edit draft here]
 
 Recorded transaction candidates
   [Candidate] [Review transaction]
@@ -202,13 +208,17 @@ these item-level rules without changing the approval boundary.
 
 ## Local transport and authority
 
-The first transport is loopback-only stateless Streamable HTTP with a
+The first transport is stateless Streamable HTTP at `/mcp` on Folio's existing
+web listener, disabled unless `FOLIO_MCP_ENABLED=true`. It uses a
 proposal-scoped bearer credential. The endpoint keeps no per-client session;
 drafts, suggestion links, and idempotency state live in PostgreSQL. It does
 not connect callers directly to PostgreSQL or reuse browser cookies. Reject
 unexpected `Host` and `Origin` values, authenticate every request, avoid
-logging credentials or full financial payloads, and do not route the endpoint
-through the public proxy by default. A loopback bind alone is not authority.
+logging credentials or full financial payloads. In production, enabling the
+flag exposes `/mcp` wherever the web listener and proxy expose Folio; the
+feature flag is not a network isolation control. Keep it disabled there until
+proxy routing and remote-access policy are reviewed. Local development binds
+the web server to `127.0.0.1`.
 
 The credential is issued/revoked through a local administrator operation,
 shown once, stored hashed server-side, and supplied to Codex outside the
@@ -221,17 +231,65 @@ claiming compatibility ([transport specification](https://modelcontextprotocol.i
 
 ### Local operator setup (not yet smoke-tested)
 
-Apply migrations 0010–0012, provision an active dedicated MCP actor distinct
-from the permitted default owner and administrator, then issue a restricted
-credential with `src/database/manage-mcp-credential.ts`. The command displays
-the bearer token once; keep it outside the repository. Start the endpoint with
-`pnpm mcp:start`; it binds `127.0.0.1:4765/mcp` and requires the local Folio
-database and artifact storage configuration. Codex must run on the same host
-to reach that loopback address. A user-level Codex configuration can use:
+Apply migrations 0010–0012 and provision an active dedicated MCP actor
+distinct from the administrator and default owner. Admin → Users provides a
+Copy ID action for each user. List available scopes with
+`pnpm mcp:credential scopes`, then issue a restricted credential:
+
+`pnpm migrate` reports which migrations were committed or that the database
+is current. On failure, it reports the stage, migration ID when applicable,
+and a safe error code without printing SQL parameters or connection details.
+Credential creation reports the same kind of safe diagnostic; `code=42P01`
+indicates a required table is missing. An eligibility code such as
+`ACTOR_NOT_FOUND`, `ACTOR_INACTIVE`, or `ADMINISTRATOR_WRONG_ROLE` identifies
+the failing participant without printing their ID or other personal details.
+`NOT_FOUND` can also mean the CLI points at a different Folio database than
+the browser session; compare those configurations privately.
+
+```sh
+pnpm mcp:credential create \
+  --administrator-id <administrator-uuid> \
+  --actor-user-id <dedicated-actor-uuid> \
+  --default-owner-id <owner-uuid> \
+  --label "Local Codex" \
+  --scope artifacts:read \
+  --scope artifacts:upload \
+  --scope transactions:draft \
+  --scope bank_matches:suggest
+```
+
+Add the remaining read scopes only when those tools are needed. The
+administrator may also be the default owner, but the actor must be different
+from both. The command displays the bearer token once; keep it outside the
+repository. To revoke it later, use `pnpm mcp:credential revoke
+--administrator-id <administrator-uuid> --credential-id <credential-uuid>`.
+At issuance, `*` expands to every current concrete scope and a known resource
+wildcard such as `artifacts:*` expands only to that resource's current scopes.
+Unknown resource patterns are rejected, and stored credentials contain only
+the expanded concrete scopes, so later scopes are never granted implicitly.
+The retired `submissions:read` scope is accepted on existing credentials but
+cannot be issued through the CLI or token-management page and is excluded from
+wildcard expansion. It no longer exposes a tool. If a submission response is
+lost, retry the same idempotency key with the same payload to recover its linked
+ID, then use `search_transactions` to inspect the transaction status.
+Set
+`FOLIO_MCP_ENABLED=true` in the Folio server process and start Folio normally
+(`pnpm dev` locally). The endpoint is then
+`http://127.0.0.1:43230/mcp` on the local web listener. The flag does not
+issue, rotate, or revoke credentials; disabling it returns 404. Codex must
+reach the configured Folio origin.
+
+MCP requests that return HTTP errors are logged as `folio.mcp_request` with
+method, path, status, and duration, without credentials or request bodies.
+Set `FOLIO_MCP_LOG_SUCCESS=true` in the Folio server process temporarily to
+also log successful MCP requests while diagnosing startup. Restart Folio after
+changing the flag.
+
+A user-level Codex configuration can use:
 
 ```toml
 [mcp_servers.folio]
-url = "http://127.0.0.1:4765/mcp"
+url = "http://127.0.0.1:43230/mcp"
 bearer_token_env_var = "FOLIO_MCP_TOKEN"
 ```
 
@@ -241,7 +299,9 @@ never put the token value in this file or project configuration. Codex's
 [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
 document the Streamable HTTP URL and bearer-token setting. This is a setup
 recipe, not a verified live connection: migration execution, credential
-issuance, Codex discovery, and an upload/draft smoke test are deferred.
+the full upload/draft review smoke test is deferred. An operator confirmed
+authenticated `folio_ping` and fresh Codex CLI discovery; the previously
+resumed CLI session still failed for an undetermined session-specific reason.
 
 ## Artifact access and upload
 
@@ -331,19 +391,28 @@ remain provenance for their own import workflows, not invoice evidence.
 | Tool                        | Permitted effect                                                     |
 | --------------------------- | -------------------------------------------------------------------- |
 | `list_unresolved_bank_rows` | Bounded source facts and revision tokens                             |
-| `search_transactions`       | Bounded recorded candidate search                                    |
+| `search_transactions`       | Bounded all-status search with category and exact revision token     |
 | `list_artifacts`            | Bounded metadata across artifact profiles and states                 |
 | `begin_artifact_upload`     | Create an upload intent for one of the three supported profiles      |
 | `confirm_artifact_upload`   | Verify the uploaded version and queue a supported profile for review |
 | `submit_draft_transaction`  | Create one manual draft only                                         |
+| `edit_transaction`          | Revision-checked own-draft edit or separately scoped category edit   |
 | `suggest_existing_match`    | Store one existing-match suggestion only                             |
-| `get_submission_status`     | Read one own submission outcome and linked ID                        |
 
 No tool can record, approve, match, classify, delete, run raw SQL, or
 read arbitrary transactions. Artifact upload cannot import bank rows or
 record transactions without a separate human-reviewed workflow. A match
 suggestion is a recommendation to use
 the existing Folio match action, not an MCP-created reconciliation.
+The edit tool requires the exact `updatedAt` token returned by search. With
+`transactions:draft`, it accepts a non-empty field patch for a still-draft
+manual transaction created by that credential, preserves omitted fields and
+the human-selected owner, and cannot change status or evidence links. With
+`transactions:categorize`, a category-only patch may update any transaction,
+including Stripe and recorded rows, and changes only category, updater, and
+revision timestamp. Match suggestions require the separate
+`bank_matches:suggest` scope. Revision conflicts are distinct from validation
+and authorization failures.
 
 ## Verification gates
 
