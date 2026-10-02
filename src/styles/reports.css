@@ -15,6 +15,12 @@
 .report-filters label {
   min-width: 12rem;
 }
+.report-filters .report-filter--period {
+  flex: 0 1 20rem;
+  width: 20rem;
+  min-width: 0;
+  max-width: 100%;
+}
 .report-warnings {
   margin: 1rem 0;
   padding: 0.75rem;
@@ -23,12 +29,42 @@
   background: #fffaf0;
 }
 .report-warnings li {
+  display: grid;
+  gap: 0.35rem;
+  padding-block: 0.4rem;
   overflow-wrap: anywhere;
+}
+.report-warning__identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.report-warning__link {
+  flex: 0 0 auto;
+  font-weight: 650;
+}
+.report-warning__description {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.report-warning__reason {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.report-warning__reason {
+  color: #53637e;
 }
 .reports-page caption {
   padding: 0.75rem 0;
   text-align: left;
   font-weight: 700;
+}
+.report-category-table th[scope="row"] {
+  max-width: 20rem;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 .report-chart {
   display: flex;
@@ -65,4 +101,244 @@
 }
 .report-chart-outflow {
   background: #efa3a6;
+}
+.tax-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+.tax-summary-grid > div {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.85rem;
+  border: 1px solid #d9e1ea;
+  border-radius: 0.6rem;
+}
+.tax-summary-grid > div > span {
+  color: #53637e;
+}
+.tax-summary-grid strong {
+  font-size: 1.1rem;
+}
+.tax-transaction-summary {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 13rem;
+  max-width: 32rem;
+  overflow-wrap: anywhere;
+}
+.tax-transaction-link,
+.tax-transaction-link:visited {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+.tax-transaction-link:hover,
+.tax-transaction-link:focus-visible {
+  text-decoration: underline;
+}
+.tax-transaction-meta,
+.tax-transaction-description {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+.tax-source-table th:nth-child(n + 4),
+.tax-source-table td:nth-child(n + 4),
+.tax-partner-table th:nth-child(n + 2),
+.tax-partner-table td:nth-child(n + 2) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.tax-partner-attribution-table {
+  min-width: 72rem;
+}
+.tax-attribution-detail-table {
+  min-width: 48rem;
+  margin: 1rem 0;
+}
+.tax-source-attribution-table {
+  width: 100%;
+  min-width: 78rem;
+  table-layout: fixed;
+}
+.tax-source-attribution-table th:first-child,
+.tax-source-attribution-table td:first-child {
+  text-align: left;
+}
+.tax-source-attribution-table th:nth-child(2),
+.tax-source-attribution-table td:nth-child(2) {
+  width: 9rem;
+}
+.tax-source-attribution-table th:nth-child(2) {
+  white-space: nowrap;
+}
+.tax-source-attribution-table td:nth-child(2) {
+  overflow-wrap: anywhere;
+}
+.tax-source-attribution-table th:nth-child(n + 3),
+.tax-source-attribution-table td:nth-child(n + 3) {
+  width: 11rem;
+}
+.tax-source-attribution-table th:nth-child(n + 3),
+.tax-source-attribution-table td:nth-child(n + 3) {
+  white-space: nowrap;
+}
+.tax-source-attribution-table .tax-transaction-summary {
+  min-width: 0;
+  max-width: none;
+}
+.tax-attribution-detail-table th:nth-child(2),
+.tax-attribution-detail-table td:nth-child(2) {
+  text-align: left;
+}
+.tax-source-table td:first-child {
+  white-space: nowrap;
+}
+.tax-ready,
+.tax-blockers {
+  padding: 0.8rem;
+  border-radius: 0.5rem;
+}
+.tax-ready {
+  background: #eaf7f0;
+}
+.tax-blockers {
+  background: #fff2e7;
+}
+.tax-export-actions {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+.tax-entry {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid #d9e1ea;
+  border-radius: 0.6rem;
+}
+.tax-adjustment-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: end;
+  gap: 0.75rem;
+}
+.tax-adjustment-fields > label {
+  min-width: 0;
+}
+.tax-adjustment-fields input,
+.tax-adjustment-fields select,
+.tax-partner-row input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.tax-entry-remove {
+  justify-self: start;
+}
+.tax-entry label,
+.tax-partner-row label,
+.tax-review-note {
+  display: grid;
+  gap: 0.35rem;
+}
+.tax-partner-row {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(8rem, 12rem) max-content;
+  align-items: end;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+.tax-partner-identity {
+  display: grid;
+  gap: 0.35rem;
+}
+.tax-partner-identity .folio-autocomplete {
+  max-width: 100%;
+}
+.tax-partner-identity > span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+.tax-partner-identity > strong {
+  display: flex;
+  align-items: center;
+  min-height: 2.7rem;
+}
+.tax-business-preview {
+  display: grid;
+  gap: 0.35rem;
+  margin: 1rem 0;
+  padding: 0.85rem;
+  border: 1px solid #d9e1ea;
+  border-radius: 0.6rem;
+  background: #f5f8fc;
+}
+.tax-business-preview > span {
+  color: #53637e;
+}
+.tax-business-owner-table {
+  min-width: 38rem;
+}
+.tax-owner-funding-table {
+  min-width: 58rem;
+}
+.tax-owner-funding-table th:not(:first-child),
+.tax-owner-funding-table td:not(:first-child),
+.tax-owner-funding-detail-table th.money-column,
+.tax-owner-funding-detail-table td.money-column {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.tax-owner-funding-detail-table {
+  min-width: 68rem;
+}
+.tax-owner-funding-detail-table td:first-child {
+  white-space: nowrap;
+}
+.tax-review-note,
+.tax-attestation {
+  display: block;
+  margin: 1rem 0;
+}
+.tax-review-note textarea {
+  display: block;
+  width: 100%;
+  min-height: 5rem;
+}
+.tax-attestation {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  line-height: 1.5;
+}
+.tax-attestation input[type="checkbox"] {
+  flex: 0 0 1rem;
+  width: 1rem;
+  height: 1rem;
+  min-height: 0;
+  margin: 0.1rem 0 0;
+  padding: 0;
+}
+@media (max-width: 900px) {
+  .tax-adjustment-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 540px) {
+  .tax-adjustment-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tax-partner-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .tax-partner-row > button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
 }

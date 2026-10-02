@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { manualCashEffectAud } from "./cash-effect";
+import { manualCashEffectAud, manualCashEffectAudMinor } from "./cash-effect";
 import type { TransactionRecord } from "./types";
 import { rankBankMatchCandidate } from "./bank-transactions";
 
@@ -23,6 +23,7 @@ describe("manual signed-AUD cash effect", () => {
     ["supplier_credit", "10.2500"],
     ["owner_contribution", "10.2500"],
     ["owner_loan", "10.2500"],
+    ["owner_loan_repayment", "-10.2500"],
     ["supplier_expense", "-10.2500"],
     ["processing_fee", "-10.2500"],
     ["sale_refund", "-10.2500"],
@@ -42,6 +43,32 @@ describe("manual signed-AUD cash effect", () => {
     { settlementAmount: null },
   ])("excludes an ineligible projection %#", (overrides) => {
     expect(manualCashEffectAud(transaction(overrides))).toBeNull();
+  });
+
+  it("rejects non-positive repayment magnitudes without changing legacy zero projections", () => {
+    expect(
+      manualCashEffectAudMinor(
+        transaction({ kind: "owner_loan_repayment", settlementAmount: "0" }),
+      ),
+    ).toBeNull();
+    expect(
+      manualCashEffectAudMinor(
+        transaction({
+          kind: "owner_loan_repayment",
+          settlementAmount: "-1.0000",
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      manualCashEffectAudMinor(
+        transaction({ kind: "owner_loan", settlementAmount: "0" }),
+      ),
+    ).toBe(0n);
+    expect(
+      manualCashEffectAudMinor(
+        transaction({ kind: "supplier_expense", settlementAmount: "0" }),
+      ),
+    ).toBe(0n);
   });
 });
 

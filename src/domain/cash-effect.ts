@@ -12,6 +12,7 @@ const negativeKinds = new Set<TransactionRecord["kind"]>([
   "supplier_expense",
   "processing_fee",
   "sale_refund",
+  "owner_loan_repayment",
 ]);
 
 export type ManualCashEffectInput = Pick<
@@ -37,6 +38,8 @@ export const manualCashEffectAudMinor = (
     return null;
 
   const magnitude = parseDecimal(transaction.settlementAmount);
+  if (transaction.kind === "owner_loan_repayment" && magnitude <= 0n)
+    return null;
   if (positiveKinds.has(transaction.kind)) return magnitude;
   if (negativeKinds.has(transaction.kind)) return -magnitude;
   return null;

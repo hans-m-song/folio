@@ -1,6 +1,9 @@
+import { AutocompleteSelect } from "../components/autocomplete";
+import { MoneyText } from "../components/money-text";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
+import { formatMoneyAmount } from "../domain/money";
 import { getReport } from "../server/operations";
 import "../styles/reports.css";
 
@@ -91,7 +94,7 @@ function ReportsPage() {
   return (
     <main className="reports-page">
       <header>
-        <h1>Reports</h1>
+        <h1>Financial summary</h1>
         <p>
           Preparation views of recorded transactions; not an account balance or
           tax lodgement.
@@ -115,18 +118,26 @@ function ReportsPage() {
         <form className="report-filters" method="get" action="/reports">
           <label>
             Basis
-            <select name="basis" defaultValue={search.basis}>
+            <AutocompleteSelect
+              aria-label="Basis"
+              name="basis"
+              defaultValue={search.basis}
+            >
               <option value="cash">Cash</option>
               <option value="activity">Activity</option>
-            </select>
+            </AutocompleteSelect>
           </label>
-          <label>
+          <label className="report-filter--period">
             Period
-            <select name="period" defaultValue={search.period}>
+            <AutocompleteSelect
+              aria-label="Period"
+              name="period"
+              defaultValue={search.period}
+            >
               <option value="month">Calendar month</option>
               <option value="bas_quarter">BAS quarter (informational)</option>
               <option value="financial_year">Australian financial year</option>
-            </select>
+            </AutocompleteSelect>
           </label>
           <button type="submit">Apply</button>
         </form>
@@ -135,10 +146,31 @@ function ReportsPage() {
         </p>
         {report?.warnings.length ? (
           <details className="report-warnings">
-            <summary>{report.warnings.length} source warnings</summary>
+            <summary>
+              {report.warnings.length} source warning
+              {report.warnings.length === 1 ? "" : "s"}
+            </summary>
             <ul>
-              {report.warnings.map((warning, index) => (
-                <li key={`${index}-${warning}`}>{warning}</li>
+              {report.warnings.map((warning) => (
+                <li key={warning.transactionId}>
+                  <div className="report-warning__identity">
+                    <a
+                      className="report-warning__link"
+                      aria-label={`View transaction ${warning.reference ?? warning.transactionId}`}
+                      href={`/transactions/${encodeURIComponent(warning.transactionId)}`}
+                    >
+                      {warning.reference ?? warning.transactionId}
+                    </a>
+                    {warning.description ? (
+                      <span className="report-warning__description">
+                        — {warning.description}
+                      </span>
+                    ) : null}
+                  </div>
+                  <span className="report-warning__reason">
+                    {warning.reason}
+                  </span>
+                </li>
               ))}
             </ul>
           </details>
@@ -150,9 +182,15 @@ function ReportsPage() {
               <thead>
                 <tr>
                   <th scope="col">Period</th>
-                  <th scope="col">Income effect</th>
-                  <th scope="col">Expense effect</th>
-                  <th scope="col">Cash effect</th>
+                  <th scope="col" className="money-column">
+                    Income effect
+                  </th>
+                  <th scope="col" className="money-column">
+                    Expense effect
+                  </th>
+                  <th scope="col" className="money-column">
+                    Cash effect
+                  </th>
                   <th scope="col">Included rows</th>
                 </tr>
               </thead>
@@ -160,9 +198,21 @@ function ReportsPage() {
                 {report.lines.map((line) => (
                   <tr key={line.period}>
                     <td>{line.period}</td>
-                    <td>{line.incomeEffectAud}</td>
-                    <td>{line.expenseEffectAud}</td>
-                    <td>{line.cashEffectAud}</td>
+                    <td className="money-column">
+                      <MoneyText>
+                        {formatMoneyAmount(line.incomeEffectAud)}
+                      </MoneyText>
+                    </td>
+                    <td className="money-column">
+                      <MoneyText>
+                        {formatMoneyAmount(line.expenseEffectAud)}
+                      </MoneyText>
+                    </td>
+                    <td className="money-column">
+                      <MoneyText>
+                        {formatMoneyAmount(line.cashEffectAud)}
+                      </MoneyText>
+                    </td>
                     <td>{line.includedCount}</td>
                   </tr>
                 ))}
@@ -171,6 +221,55 @@ function ReportsPage() {
           </div>
         ) : (
           <p>No included transactions for this view.</p>
+        )}
+      </section>
+      <section aria-labelledby="category-breakdown-heading">
+        <h2 id="category-breakdown-heading">Category breakdown</h2>
+        <p>
+          Recorded AUD income and expense effects by saved category. These are
+          preparation figures, not deductible amounts. A Stripe sale with a
+          processing fee contributes to both its sale and fee categories.
+        </p>
+        {report?.categoryLines.length ? (
+          <div className="table-scroll">
+            <table className="report-category-table">
+              <caption>Category effects by period (AUD)</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Period</th>
+                  <th scope="col">Category</th>
+                  <th scope="col" className="money-column">
+                    Income effect
+                  </th>
+                  <th scope="col" className="money-column">
+                    Expense effect
+                  </th>
+                  <th scope="col">Contributing rows</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.categoryLines.map((line) => (
+                  <tr key={`${line.period}:${line.category}`}>
+                    <td>{line.period}</td>
+                    <th scope="row">{line.category}</th>
+                    <td className="money-column">
+                      <MoneyText>
+                        {formatMoneyAmount(line.incomeEffectAud)}
+                      </MoneyText>
+                    </td>
+                    <td className="money-column">
+                      <MoneyText>
+                        {formatMoneyAmount(line.expenseEffectAud)}
+                      </MoneyText>
+                    </td>
+                    <td>{line.includedCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p>No included income or expense effects for this view.</p>
         )}
       </section>
       <section aria-labelledby="movement-heading">
@@ -212,9 +311,15 @@ function ReportsPage() {
               <thead>
                 <tr>
                   <th scope="col">Period</th>
-                  <th scope="col">Inflow</th>
-                  <th scope="col">Outflow</th>
-                  <th scope="col">Net movement</th>
+                  <th scope="col" className="money-column">
+                    Inflow
+                  </th>
+                  <th scope="col" className="money-column">
+                    Outflow
+                  </th>
+                  <th scope="col" className="money-column">
+                    Net movement
+                  </th>
                   <th scope="col">Included rows</th>
                 </tr>
               </thead>
@@ -222,9 +327,19 @@ function ReportsPage() {
                 {lines.map((line) => (
                   <tr key={line.period}>
                     <td>{line.period}</td>
-                    <td>{line.inflowAud}</td>
-                    <td>{line.outflowAud}</td>
-                    <td>{line.netMovementAud}</td>
+                    <td className="money-column">
+                      <MoneyText>{formatMoneyAmount(line.inflowAud)}</MoneyText>
+                    </td>
+                    <td className="money-column">
+                      <MoneyText>
+                        {formatMoneyAmount(line.outflowAud)}
+                      </MoneyText>
+                    </td>
+                    <td className="money-column">
+                      <MoneyText>
+                        {formatMoneyAmount(line.netMovementAud)}
+                      </MoneyText>
+                    </td>
                     <td>{line.includedCount}</td>
                   </tr>
                 ))}

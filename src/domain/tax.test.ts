@@ -41,6 +41,9 @@ describe("document tax suggestions", () => {
     expect(defaultTaxTreatmentForTransaction("AUD", "owner_loan")).toBe(
       "no_tax",
     );
+    expect(
+      defaultTaxTreatmentForTransaction("AUD", "owner_loan_repayment"),
+    ).toBe("no_tax");
     expect(defaultTaxTreatmentForTransaction("USD", "supplier_expense")).toBe(
       "foreign_tax_included",
     );
