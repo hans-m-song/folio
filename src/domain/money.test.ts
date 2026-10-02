@@ -4,6 +4,7 @@ import {
   equalsAtCurrencyPrecision,
   formatAudDecimal,
   formatDecimal,
+  formatMoneyAmount,
   parseDecimal,
   sumDecimals,
 } from "./money";
@@ -29,5 +30,15 @@ describe("fixed precision money", () => {
       "-$100,000,000,000,000.5000",
     );
     expect(formatAudDecimal("1.00")).toBe("+$1.00");
+  });
+
+  it("displays cents without hiding meaningful sub-cent precision", () => {
+    expect(formatMoneyAmount("719.9000")).toBe("719.90");
+    expect(formatMoneyAmount("-11.9000")).toBe("-11.90");
+    expect(formatMoneyAmount("0.0000")).toBe("0.00");
+    expect(formatMoneyAmount("9007199254740993.1234")).toBe(
+      "9,007,199,254,740,993.1234",
+    );
+    expect(formatMoneyAmount("1.0010")).toBe("1.001");
   });
 });

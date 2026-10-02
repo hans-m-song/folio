@@ -9,6 +9,7 @@ export default defineConfig({
   },
   test: {
     name: "folio",
+    setupFiles: ["./src/test/dom-setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     exclude: ["src/**/*.postgres.test.ts"],
     environment: "node",

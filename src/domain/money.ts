@@ -40,6 +40,13 @@ export function formatAudDecimal(value: string): string {
   return `${negative ? "-" : "+"}$${grouped}${fraction === undefined ? "" : `.${fraction}`}`;
 }
 
+export const formatMoneyAmount = (value: string): string => {
+  const canonical = formatDecimal(parseDecimal(value));
+  const [whole, fraction] = canonical.split(".");
+  const grouped = whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${grouped}.${fraction!.replace(/0+$/, "").padEnd(2, "0")}`;
+};
+
 export function sumDecimals(values: readonly string[]): string {
   return formatDecimal(
     values.reduce((sum, value) => sum + parseDecimal(value), 0n),
