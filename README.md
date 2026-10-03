@@ -4,21 +4,20 @@ Folio is a private transaction-preparation workspace. It stores original evidenc
 
 ## Local Docker deployment
 
-The default Compose stack is a local-only deployment with Folio, PostgreSQL, a
-versioned MinIO bucket, and a loopback-bound proxy. It uses fixed synthetic
-credentials and is **not suitable for public exposure**.
+The Compose stack runs Folio, PostgreSQL and a versioned MinIO bucket behind the
+existing Traefik on the external `services_public` Docker network. Tailscale Serve
+forwards tailnet port 80 to Traefik at `127.0.0.1:18080`. This deployment is
+**not suitable for public exposure**.
 
 ```sh
 docker compose up --build --detach
 ```
 
-Open `http://127.0.0.1:43230` and sign in with the local password
-`folio-local-password-123`. If port 43230 is already in use, choose another
-loopback port for both Compose and the browser:
-
-```sh
-FOLIO_LOCAL_PORT=43231 docker compose up --build --detach
-```
+Open `http://folio.lamarr.axatol.xyz` and sign in with the configured local password.
+The hostname must resolve to the tailnet address. No Folio-specific published port
+or Caddy container is required. Compose sets the application and public S3 origins
+to this exact HTTP hostname; production local-password authentication remains
+disabled.
 
 The application and migration job share the `folio:local` runtime image. Its
 default command starts the server; the migration job instead runs bundled Node
@@ -33,15 +32,17 @@ docker compose run --rm --no-deps folio-migrate node src/database/migrate.mjs
 The image contains SQL migrations and bundled database tools, not the development
 dependency tree or TypeScript runner. The bucket
 initialization job creates `folio-local-artifacts` with versioning. Browser
-uploads and downloads use presigned URLs on the same local origin; MinIO and
-PostgreSQL have no host-published ports. `docker compose down` stops the stack
+uploads and downloads use presigned URLs on the same hostname. Traefik routes
+`/folio-local-artifacts/` to MinIO before the application route, preserving the
+signed Host, path and query. Only Folio and MinIO join the shared proxy network;
+PostgreSQL remains on the stack network. `docker compose down` stops the stack
 without deleting its named data volumes. Removing those volumes destroys the
 local database and stored artifacts.
 
 Local password login creates the same expiring, revocable server session used by
 the application permission checks. It is rejected in production mode. Google
 OIDC remains the production authentication path, but this Compose file is not a
-production deployment recipe. Do not reuse its credentials, expose its proxy,
+production deployment recipe. Do not reuse development credentials, expose its proxy,
 or treat its local data as backed up.
 
 ## Local AWS profile

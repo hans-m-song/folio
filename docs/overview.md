@@ -44,8 +44,9 @@ domain description; the name does not imply a general ledger or accounting syste
   than restricting access to a transaction or document.
 - Local Compose stores original documents in a versioned MinIO bucket; production
   requires a private, encrypted, versioned S3 bucket.
-- The first runnable deployment is loopback-only and Docker-based, with fixed
-  synthetic credentials that must not be used for public exposure.
+- The Docker deployment uses existing Traefik and Tailscale Serve at
+  `http://folio.lamarr.axatol.xyz`, with no application host-published port.
+  Development credentials must not be used for public exposure.
 - Fixed-password local login and Google Workspace OIDC login both issue server-side
   sessions with named-permission enforcement. Local login is disabled in production.
   Public exposure remains blocked pending BILL-T09B, BILL-T10, and live verification.
@@ -218,6 +219,11 @@ origin `https://folio.buildsight.com.au` and callback
 `buildsight.com.au` hosted-domain claim, verified email, and validated issuer,
 audience, expiry, subject, and ID-token signature. The stable subject is bound only
 to an existing eligible Folio user; unknown users are not auto-provisioned.
+
+Non-production local-password mode also accepts the exact origin
+`http://folio.lamarr.axatol.xyz` for the tailnet deployment. Arbitrary hosts,
+subdomains, explicit ports and URL suffixes are rejected. Google-mode origins and
+the production prohibition on local-password mode are unchanged.
 
 Login attempts are single-use rows in `auth_attempts`, keyed by a SHA-256 state hash
 and retaining nonce, PKCE verifier, return path, and expiry. Sessions are revocable,

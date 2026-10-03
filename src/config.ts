@@ -41,16 +41,20 @@ const authConfigSchema = z
         });
       }
       const origin = new URL(value.FOLIO_ORIGIN);
-      if (
-        origin.protocol !== "http:" ||
-        origin.hostname !== "127.0.0.1" ||
-        !origin.port ||
-        origin.origin !== value.FOLIO_ORIGIN
-      ) {
+      const isExactLoopbackOrigin =
+        origin.protocol === "http:" &&
+        origin.hostname === "127.0.0.1" &&
+        Boolean(origin.port) &&
+        origin.origin === value.FOLIO_ORIGIN;
+      const isApprovedHostnameOrigin =
+        value.FOLIO_ORIGIN === "http://folio.lamarr.axatol.xyz" &&
+        origin.origin === value.FOLIO_ORIGIN;
+      if (!isExactLoopbackOrigin && !isApprovedHostnameOrigin) {
         context.addIssue({
           code: "custom",
           path: ["FOLIO_ORIGIN"],
-          message: "Local authentication requires an exact loopback origin",
+          message:
+            "Local authentication requires an exact loopback origin or the approved Folio hostname origin",
         });
       }
       if (!value.FOLIO_LOCAL_PASSWORD) {

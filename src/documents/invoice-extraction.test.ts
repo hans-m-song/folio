@@ -113,9 +113,9 @@ describe("bounded local invoice PDF extraction", () => {
     ).resolves.toEqual({ status: "unsupported", reason: "input_too_large" });
   });
 
-  it("returns a safe failure when the Node server entry cannot resolve PDF.js", async () => {
+  it("returns a safe failure when the Node server entry is absent", async () => {
     const serverEntry = process.argv[1];
-    process.argv[1] = "/__folio_missing_invoice_server__/index.mjs";
+    process.argv[1] = "";
     try {
       await expect(
         extractInvoicePdf(pdfWithPages(["Google Workspace Invoice"])),

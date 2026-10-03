@@ -1,5 +1,31 @@
 # Handoff
 
+## Traefik hostname verified — 2026-10-03
+
+- BILL-T88 approved: http://folio.lamarr.axatol.xyz through existing Tailscale Serve
+  port 80 to shared Traefik on localhost:18080. Do not edit/restart external services.
+- Main owns Compose/Caddy removal/docs/integration; worker owns config exact-origin
+  policy/tests. Retain developer loopback support and production Google restrictions.
+- Compose uses external services_public for Folio/MinIO, explicit routers/network,
+  artifact priority 200 above app 100, preserving Host/path/query. No direct app port.
+- Existing environment files remain unread. Browser/internal S3 overrides are set
+  directly in Compose and reused by migration/local seed. SQL/providers unchanged.
+- Verify with disposable isolated services/file-provider proxy (no Docker labels
+  visible to shared Traefik), synthetic credentials/objects only. Commit after gates.
+- Implementation complete; build/TypeScript, scoped lint/format, 27 auth/config
+  tests and isolated signed URL/login/cookie/Origin checks pass. Proxy fixtures:
+  /Volumes/Data/tmp/folio-bill-t88.teWIxu. Verification image folio:bill-t88-verify.
+- MinIO pull unavailable (Quay 401; Docker Hub denied). A synthetic SigV4/checksum
+  backend verifies routing, not real MinIO behavior. All disposable containers,
+  database data volume and network removed; external services never changed.
+- Full suite passes 1,086 tests with one skipped after the approved deterministic
+  absent-server-entry PDF test correction. Production extraction is unchanged.
+  Commit includes routing/auth/docs and this test correction; no deployment.
+- Partial Compose staging candidate at temporary compose-staged.yml preserves
+  HEAD inline settings while adding only routing/origin changes; existing env_file,
+  health interval and PostgreSQL publication edits remain unstaged. Staged Compose
+  validates with no environment resolution. Never stage the whole Compose file.
+
 ## Shared migration image verified and committed — 2026-10-03
 
 - BILL-T87 approved: one minimal runtime image, default server command and separate

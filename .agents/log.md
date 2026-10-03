@@ -1,5 +1,23 @@
 # Folio standalone decisions
 
+## 2026-10-03 — Tailnet hostname and existing Traefik
+
+- BILL-T88 uses http://folio.lamarr.axatol.xyz on default port 80; existing
+  Tailscale Serve forwards to shared Traefik at localhost:18080. Neither external
+  service was changed. Folio and MinIO join services_public, app priority 100 and
+  artifact prefix priority 200, explicit backend ports and preserved Host.
+- Caddy and direct application publication are removed. Exact hostname permitted
+  only for non-production local-password mode; loopback development and Google
+  production restrictions remain intact. Browser/public S3 origins match.
+- Image build/TypeScript, scoped lint/format and 27 auth/config tests pass. Isolated
+  Traefik with synthetic SigV4 backend passes signed PUT/versioned GET/inline,
+  checksum/metadata, tampering, route priority and hostname auth/cookie/Origin checks.
+  This is not real MinIO verification: registries blocked the configured image.
+- The operator approved a test-only absent-entry correction for a resolver-dependent
+  PDF test premise. Full suite now passes 1,086 tests with one skipped; production
+  extraction is unchanged. Disposable containers/data/network removed. Commit only
+  this routing scope and correction, preserving unrelated local Compose changes.
+
 ## 2026-10-03 — Shared runtime image and alternate migration command
 
 - BILL-T87 uses one minimal runtime image for application and migration job.

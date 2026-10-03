@@ -1,5 +1,33 @@
 # Folio delivery roadmap
 
+## BILL-T88 — Existing Traefik and tailnet hostname
+
+Status: complete on 3 October 2026; verification gates pass.
+
+- [x] Confirm http://folio.lamarr.axatol.xyz, served on port 80 by existing Tailscale.
+- [x] Keep external Traefik/Tailscale unchanged and use services_public network.
+- [x] Allow only the approved hostname in non-production local authentication.
+- [x] Replace Caddy with application and artifact Traefik routes preserving signed URLs.
+- [x] Verify config/auth regressions, isolated routing and synthetic signed uploads/downloads.
+- [x] Verify build/type/lint/format and commit only this scope.
+
+Keep production Google authentication, SQL, sessions, actual records and storage
+provider unchanged. Never resolve/read existing environment files; override browser
+origins in Compose. Preserve unrelated pre-existing Compose changes. Disposable
+proxy verification must not register routers with the running shared Traefik.
+
+Production image build/TypeScript, scoped lint/format and 27 auth/config tests pass.
+An isolated Traefik verifies actual application presigning against a synthetic
+SigV4/checksum backend: PUT, versioned download/inline GET, query tampering,
+artifact priority, hostname login/cookies/redirects and rejected Origin requests.
+Real MinIO verification is unavailable: the configured Quay tag returns 401 and
+the Docker Hub tag cannot be pulled. No storage-provider change is included.
+The full synthetic suite passes 1,086 tests with one skipped. The approved test-only
+correction uses an absent server entry rather than assuming a nonexistent path
+cannot resolve PDF.js under Vitest. Production extraction is unchanged.
+Disposable containers, synthetic database volume and network have been removed.
+Verification image folio:bill-t88-verify and bounded temporary fixtures are retained.
+
 ## BILL-T87 — Shared runtime image with migration command
 
 Status: complete on 3 October 2026; verification and scoped commit gates pass.

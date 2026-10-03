@@ -86,6 +86,13 @@ describe("Folio authentication configuration", () => {
     expect(() => loadAuthConfig({ ...auth, NODE_ENV: "production" })).toThrow(
       "exact production Folio origin",
     );
+    expect(() =>
+      loadAuthConfig({
+        ...auth,
+        NODE_ENV: "production",
+        FOLIO_ORIGIN: "http://folio.lamarr.axatol.xyz",
+      }),
+    ).toThrow("exact production Folio origin");
     expect(
       loadAuthConfig({
         ...auth,
@@ -112,12 +119,39 @@ describe("Folio authentication configuration", () => {
       sessionCookieName: "folio_dev_session",
     });
     expect(
+      loadAuthConfig({
+        ...local,
+        FOLIO_ORIGIN: "http://folio.lamarr.axatol.xyz",
+      }),
+    ).toMatchObject({
+      authMode: "local",
+      origin: "http://folio.lamarr.axatol.xyz",
+      callbackUrl: "http://folio.lamarr.axatol.xyz/auth/callback",
+    });
+    expect(
       loadAuthConfig({ ...local, FOLIO_ORIGIN: "http://127.0.0.1:43231" })
         .origin,
     ).toBe("http://127.0.0.1:43231");
     expect(() =>
       loadAuthConfig({ ...local, FOLIO_ORIGIN: "http://localhost:43230" }),
     ).toThrow("exact loopback origin");
+    for (const FOLIO_ORIGIN of [
+      "http://example.com",
+      "http://sub.folio.lamarr.axatol.xyz",
+      "http://folio.lamarr.axatol.xyz:43230",
+      "https://folio.lamarr.axatol.xyz",
+      "http://user:pass@folio.lamarr.axatol.xyz",
+      "http://folio.lamarr.axatol.xyz/path",
+      "http://folio.lamarr.axatol.xyz?query=1",
+      "http://folio.lamarr.axatol.xyz#fragment",
+      "http://folio.lamarr.axatol.xyz/",
+      "http://FOLIO.lamarr.axatol.xyz",
+      "http://folio.lamarr.axatol.xyz:80",
+    ]) {
+      expect(() => loadAuthConfig({ ...local, FOLIO_ORIGIN })).toThrow(
+        "approved Folio hostname origin",
+      );
+    }
     expect(() =>
       loadAuthConfig({ ...local, FOLIO_LOCAL_PASSWORD: undefined }),
     ).toThrow("requires a password");

@@ -221,10 +221,11 @@ only and never embeds related transaction identifiers.
 ## Deployment structure
 
 ```text
-local-only Docker Compose
-|-- proxy: loopback-bound HTTP entrypoint
-|   |-- Folio: standard Node server
-|   `-- MinIO: versioned artifact bucket on the same browser origin
+tailnet HTTP :80 -> Tailscale Serve -> existing Traefik (localhost:18080)
+|-- services_public external Docker network
+|   |-- Folio: hostname route, priority 100, standard Node server :3000
+|   `-- MinIO: artifact path route, priority 200, same browser origin :9000
+Docker Compose private stack network
 |-- postgres: private persistent volume
 |-- migrate/seed: one-shot schema and synthetic local administrator setup
 `-- minio-init: one-shot bucket and versioning setup
