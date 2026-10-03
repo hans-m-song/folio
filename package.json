@@ -6,6 +6,7 @@
   "scripts": {
     "build": "vite build && tsc --noEmit",
     "backup": "sh ops/backup.sh",
+    "build:database": "node ops/build-database-tools.mjs",
     "dev": "vite dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -54,6 +55,7 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.2",
+    "esbuild": "0.28.2",
     "eslint": "9.39.4",
     "eslint-config-prettier": "10.1.8",
     "globals": "17.4.0",

@@ -20,7 +20,18 @@ loopback port for both Compose and the browser:
 FOLIO_LOCAL_PORT=43231 docker compose up --build --detach
 ```
 
-The migration job creates an idempotent synthetic administrator. The bucket
+The application and migration job share the `folio:local` runtime image. Its
+default command starts the server; the migration job instead runs bundled Node
+entrypoints, then exits. It creates an idempotent synthetic administrator after
+successful migrations. To run migrations without local-user seeding, override
+the command while PostgreSQL is running:
+
+```sh
+docker compose run --rm --no-deps folio-migrate node src/database/migrate.mjs
+```
+
+The image contains SQL migrations and bundled database tools, not the development
+dependency tree or TypeScript runner. The bucket
 initialization job creates `folio-local-artifacts` with versioning. Browser
 uploads and downloads use presigned URLs on the same local origin; MinIO and
 PostgreSQL have no host-published ports. `docker compose down` stops the stack

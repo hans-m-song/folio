@@ -1,13 +1,17 @@
 .git
 .gitignore
 .agents
+.codex
 .env
 .env.*
 .envrc
 .envrc.*
 .aws
+.gcp
+.oci
 .config
 .ssh
+secrets.yaml
 node_modules
 .nitro
 .output

@@ -1,5 +1,23 @@
 # Folio standalone decisions
 
+## 2026-10-03 — Shared runtime image and alternate migration command
+
+- BILL-T87 uses one minimal runtime image for application and migration job.
+  Default server command stays unchanged; Compose overrides the command to run
+  bundled migration then existing local-user seed and exit. SQL/auth remain intact.
+- Preserve src/database and migrations relative layout; esbuild 0.28.2 bundles pg
+  and zod for Node 24 ESM with a createRequire banner. Optional pg-native remains
+  external; standard pg mode needs no native module. Explicit build inputs prevent
+  copying broad local context into build layers. Runtime has no pnpm/tsx/full deps.
+- Production image build/TypeScript, full 1,086-pass/one-skipped synthetic suite,
+  scoped lint/format and independent source review pass. Disposable image checks
+  verify all 18 migrations, no-op repeat, rollback on missing role, safe auth
+  failure, seed idempotence/production rejection and default-server HTTP 307.
+- Same Docker inspect metric: runtime image 91,124,347 bytes, prior app 90,995,398;
+  additional data 128,949 bytes. This metric is not Docker Desktop disk usage.
+- Disposable containers/data/network removed. Existing images and live services
+  remain unchanged. Preserve unrelated Compose changes through partial staging.
+
 ## 2026-10-03 — Verified commits and recurrence acceptance
 
 - The operator accepted the BILL-T85 visual result and requested commits after

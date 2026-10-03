@@ -1,5 +1,29 @@
 # Handoff
 
+## Shared migration image verified and committed — 2026-10-03
+
+- BILL-T87 approved: one minimal runtime image, default server command and separate
+  bundled migration command. Existing Compose local-seed sequence must be preserved.
+- Worker owns Dockerfile/package/lock and bundler; main owns Compose/docs/gates.
+- Compose credential inspection is now authorized for relevant compatibility only;
+  do not print values. Pre-existing Compose changes remain outside this commit.
+- Verify against new disposable PostgreSQL only, including repeated/failing runs.
+  Preserve SQL/auth and live services. Commit after verification.
+- Packaging complete: shared runtime target/image, default server unchanged,
+  bundled migrate/seed .mjs commands, SQL included. Explicit build inputs replace
+  broad COPY; local configuration directories excluded. esbuild pinned 0.28.2.
+- Image build/TypeScript, 1,086 synthetic tests (one skipped), lint/format and
+  independent source review pass. Image migration applies 18 SQL files; repeat
+  no-op, permission failure rollback, credential failure exit 1, seed idempotence
+  and production-mode rejection pass. Default server HTTP 307; non-root/no pnpm/tsx.
+- Docker inspect reports only 128,949 additional bytes over previous application
+  image. Verification tag folio:bill-t87-verify retained. All disposable containers,
+  synthetic data and network removed; no live deployment or old-image removal.
+- Commit includes only the four shared-image/command Compose hunks, not its six
+  pre-existing unrelated hunks. Next: operator rebuild/deploy when ready; retained
+  old images can be removed separately after acceptance. Invoice review/storage
+  transition remain separately scoped.
+
 ## Disposable verification and feature commits complete — 2026-10-03
 
 - The operator accepted BILL-T85 visuals, approved disposable PostgreSQL checks,

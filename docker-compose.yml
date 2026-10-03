@@ -1,8 +1,10 @@
 services:
   folio:
-    build:
+    image: folio:local
+    build: &folio-build
       context: .
       dockerfile: Dockerfile
+      target: runtime
     restart: unless-stopped
     expose:
       - "3000"
@@ -45,16 +47,14 @@ services:
       retries: 6
 
   folio-migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: tools
+    image: folio:local
+    build: *folio-build
     restart: "no"
     command:
       [
         "/bin/sh",
         "-ec",
-        "pnpm migrate && pnpm exec tsx src/database/seed-local-user.ts",
+        "node src/database/migrate.mjs && node src/database/seed-local-user.mjs",
       ]
     environment:
       NODE_ENV: development

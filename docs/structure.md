@@ -236,7 +236,14 @@ production architecture, not implemented by this Compose file
 ```
 
 Database migrations run as an explicit one-shot Compose job rather than implicitly
-on every application start. Documents upload directly from the browser after the
+on every application start. The application and migration job share the same
+`folio:local` image and runtime build target. `ops/build-database-tools.mjs` bundles
+the migration and existing local-user seed commands with their Node dependencies;
+the runtime includes these under `src/database/` and SQL under `migrations/`, so
+the migration runner retains its existing relative file lookup. The default server
+command is unchanged. No pnpm, tsx or build dependency tree is copied into runtime.
+
+Documents upload directly from the browser after the
 server issues a narrowly scoped presigned request. Local Compose uses a fixed
 synthetic-password login that creates ordinary server sessions; Google client
 credentials remain process-environment inputs for production and do not enter

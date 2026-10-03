@@ -1,5 +1,32 @@
 # Folio delivery roadmap
 
+## BILL-T87 — Shared runtime image with migration command
+
+Status: complete on 3 October 2026; verification and scoped commit gates pass.
+
+- [x] Confirm one image, with a separate migration command that runs and exits.
+- [x] Inspect relevant Compose configuration without printing credentials.
+- [x] Bundle migration and existing local-user seed entrypoints for Node runtime.
+- [x] Share the minimal runtime image between application and migration services.
+- [x] Verify image build, migration/repeat/failure behavior using disposable PostgreSQL.
+- [x] Verify server build, tests and scoped lint/format.
+- [x] Commit verified changes, excluding unrelated Compose edits.
+
+Preserve local seed sequencing, migration SQL and default server command. No live
+services, source records, schema changes or storage-provider changes. Compose
+contains pre-existing unrelated edits; preserve them and commit only this slice.
+The runtime image built successfully, including production build/TypeScript. All
+18 migrations apply; repeat runs are no-ops. Missing-role failure exits 1 and rolls
+back the new schema; bad credentials exit 1 with a sanitized error. Local seeding
+is idempotent and rejected in production mode. The default server responds HTTP
+307; runtime runs non-root without pnpm, tsx or /app/node_modules. Full synthetic
+suite: 1,086 passed, one skipped. Scoped lint/format and independent source review
+pass. Compose image/build identity validates without resolving environment files.
+Using the same Docker inspect metric, the new image is 91,124,347 bytes versus
+90,995,398 for the prior application image: 128,949 bytes of additional image data.
+Disposable containers, synthetic data volume and network were removed. Verification
+image retained as folio:bill-t87-verify; existing images/live services unchanged.
+
 ## BILL-T86 — Disposable PostgreSQL verification and commit
 
 Status: complete on 3 October 2026. The operator approved all verified application
