@@ -1000,12 +1000,13 @@ describe("bank reconciliation actions", () => {
   });
 
   it("confirms a new invoice PDF once and reuses it with the same transaction ID on retry", async () => {
+    const checksumSha256 = "Bxb5Jkyf4Z9ddFUnYQfz3cwdNJf2PWBomnNViuihv14=";
     const user = userEvent.setup();
     const artifactId = "44444444-4444-4444-8444-444444444444";
     const uploadUrl = "https://storage.example.test/upload";
-    const digest = new Uint8Array(32).buffer;
-    vi.spyOn(crypto.subtle, "digest").mockResolvedValue(digest);
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const getRandomValues = crypto.getRandomValues.bind(crypto);
+    vi.stubGlobal("crypto", { getRandomValues });
     vi.stubGlobal("fetch", fetchMock);
     mocks.startArtifactUpload.mockResolvedValue({
       artifact: { id: artifactId },
@@ -1017,8 +1018,9 @@ describe("bank reconciliation actions", () => {
       .mockResolvedValueOnce({ status: "applied", revision: "4" });
     Object.defineProperty(File.prototype, "arrayBuffer", {
       configurable: true,
-      value: async () => new Uint8Array([1, 2, 3]).buffer,
+      value: async () => new TextEncoder().encode("%PDF-1.7\n").buffer,
     });
+    expect(crypto.subtle).toBeUndefined();
     render(<ReconcilePage />);
 
     await user.click(
@@ -1043,6 +1045,7 @@ describe("bank reconciliation actions", () => {
         artifactProfile: "manual_invoice_pdf_v1",
         filename: "invoice.pdf",
         mediaType: "application/pdf",
+        checksumSha256,
       }),
     });
     expect(mocks.confirmArtifactUpload).toHaveBeenCalledWith({
@@ -1054,6 +1057,7 @@ describe("bank reconciliation actions", () => {
       expect.objectContaining({
         method: "PUT",
         headers: expect.objectContaining({
+          "x-amz-checksum-sha256": checksumSha256,
           "x-amz-meta-folio-artifact-id": artifactId,
         }),
       }),
@@ -1071,6 +1075,9 @@ describe("bank reconciliation actions", () => {
       mocks.createAndMatchBankTransaction.mock.calls[0][0];
     const retrySubmission =
       mocks.createAndMatchBankTransaction.mock.calls[1][0];
+    expect(firstSubmission.data.transactionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     expect(retrySubmission.data.transactionId).toBe(
       firstSubmission.data.transactionId,
     );

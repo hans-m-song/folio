@@ -1,4 +1,5 @@
 import { AutocompleteSelect } from "../components/autocomplete";
+import { sha256FileBase64, randomUuid } from "../browser/crypto";
 import {
   createFileRoute,
   useNavigate,
@@ -188,17 +189,6 @@ const reconciliationNavigationContext = (search: ReconcileSearch) =>
     page: search.page ?? 1,
   });
 
-const sha256Base64 = async (file: File): Promise<string> => {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    await file.arrayBuffer(),
-  );
-  let binary = "";
-  for (const byte of new Uint8Array(digest))
-    binary += String.fromCharCode(byte);
-  return btoa(binary);
-};
-
 interface BankSourceReview {
   postedDate: string;
   movementAud: string;
@@ -381,7 +371,7 @@ function BankReconcilePage() {
   const [submissionError, setSubmissionError] = useState("");
   const [createdBankMatch, setCreatedBankMatch] =
     useState<CreatedBankMatch | null>(null);
-  const [transactionId, setTransactionId] = useState(() => crypto.randomUUID());
+  const [transactionId, setTransactionId] = useState(() => randomUuid());
   const uploadIntents = useRef(new Map<string, InvoiceUploadIntent>());
   const evidenceFileRef = useRef<File | null>(null);
   const inFlight = useRef(false);
@@ -435,7 +425,7 @@ function BankReconcilePage() {
     setSubmissionStatus("");
     setSubmissionError("");
     setCreatedBankMatch(null);
-    setTransactionId(crypto.randomUUID());
+    setTransactionId(randomUuid());
   }, [selected?.id]);
 
   const openDraftEditor = async (id: string) => {
@@ -552,7 +542,7 @@ function BankReconcilePage() {
 
     assertRequestIsCurrent();
     setRequestStatus("Validating the selected invoice PDF…");
-    const checksumSha256 = await sha256Base64(file);
+    const checksumSha256 = await sha256FileBase64(file);
     onChecksum?.(checksumSha256);
     assertRequestIsCurrent();
     let intent = uploadIntents.current.get(checksumSha256);
@@ -1020,7 +1010,7 @@ function BankReconcilePage() {
         );
       }
       uploadIntents.current.clear();
-      setTransactionId(crypto.randomUUID());
+      setTransactionId(randomUuid());
       setCreateAndNext(false);
       if (
         shouldAdvance &&

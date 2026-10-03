@@ -1,5 +1,27 @@
 # Folio delivery roadmap
 
+## BILL-T89 — HTTP browser crypto compatibility
+
+Status: complete on 3 October 2026; verification gates pass.
+
+- [x] Confirm keeping the HTTP hostname on port 80.
+- [x] Add shared SHA-256 fallback and secure UUID generation for HTTP browsers.
+- [x] Route all browser upload checksums and UUID calls through shared helpers.
+- [x] Verify native/fallback behavior, upload regressions and production build.
+- [x] Commit verified scope; preserve unrelated local Compose settings.
+
+Keep S3 checksum validation, upload confirmation, authentication and routing unchanged.
+Use a pinned hash implementation, not handwritten cryptography. UUID fallback must
+use secure getRandomValues, never Math.random. Previous proxy checks did not exercise
+browser secure-context restrictions; regression checks must cover missing APIs.
+
+Production build/TypeScript, scoped lint/format and independent source audit pass.
+Full synthetic suite: 1,095 passed, one skipped. Seven helper tests cover native and
+fallback hashes, offset byte views, UUID version/variant and missing secure RNG.
+Mocked UI tests cover checksum creation/headers/confirmation for Stripe, bank CSV,
+PDF and reconciliation without subtle; reconciliation also omits native randomUUID.
+No live deployment or real file ingestion was performed.
+
 ## BILL-T88 — Existing Traefik and tailnet hostname
 
 Status: complete on 3 October 2026; verification gates pass.

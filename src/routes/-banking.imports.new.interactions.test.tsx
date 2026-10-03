@@ -230,6 +230,52 @@ describe("CommBank batch import interaction", () => {
     expect(mocks.startArtifactUpload).toHaveBeenCalledOnce();
   });
 
+  it("uploads and previews a CommBank CSV when SubtleCrypto is unavailable", async () => {
+    const checksumSha256 = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=";
+    const artifactId = "33333333-3333-4333-8333-333333333333";
+    const uploadUrl = "http://127.0.0.1/upload";
+    const file = makeFile("bank.csv", [97, 98, 99]);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("crypto", {});
+    vi.stubGlobal("fetch", fetchMock);
+    expect(crypto.subtle).toBeUndefined();
+    const user = userEvent.setup();
+    render(<NewBankImportPage />);
+
+    await user.upload(screen.getByLabelText(/CSV files/), file);
+    await uploadAndPreview(user);
+
+    expect(mocks.startArtifactUpload).toHaveBeenCalledWith({
+      data: {
+        ownerId: null,
+        artifactProfile: "commbank_transaction_history_csv_v1",
+        filename: "bank.csv",
+        mediaType: "text/csv",
+        byteSize: 3,
+        checksumSha256,
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      uploadUrl,
+      expect.objectContaining({
+        method: "PUT",
+        body: file,
+        headers: expect.objectContaining({
+          "content-type": "text/csv",
+          "x-amz-checksum-sha256": checksumSha256,
+          "x-amz-meta-folio-artifact-id": artifactId,
+        }),
+      }),
+    );
+    expect(mocks.confirmArtifactUpload).toHaveBeenCalledWith({
+      data: { id: artifactId },
+    });
+    expect(mocks.previewBankCsv).toHaveBeenCalledWith({
+      data: { artifactId },
+    });
+    expect(screen.getByText("Example movement")).toBeTruthy();
+  });
+
   it("keeps reviewed rows unimported until the single batch confirmation action", async () => {
     const user = userEvent.setup();
     render(<NewBankImportPage />);

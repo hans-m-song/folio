@@ -1,4 +1,5 @@
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { sha256Base64 } from "../browser/crypto";
 
 import { SourceTabs } from "../components/import-profile-tabs";
 import type { loadTransactionWorkflowSession } from "./-transaction-workflow";
@@ -69,11 +70,7 @@ const checksumSha256 = async (file: File): Promise<string> => {
   if (!hasPdfHeader(bytes))
     throw new Error("The selected file does not have a PDF header.");
 
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  let binary = "";
-  for (const byte of new Uint8Array(digest))
-    binary += String.fromCharCode(byte);
-  return btoa(binary);
+  return sha256Base64(bytes);
 };
 
 const putPdfWithProgress = (

@@ -10,6 +10,7 @@ independently verified on 23 September 2026
 folio/
 |-- src/
 |   |-- auth/            server-only OIDC, claims, sessions, and cookie helpers
+|   |-- browser/         browser-compatible upload checksums and secure UUIDs
 |   |-- domain/          transaction rules, money, periods, reports, Stripe CSV, and planned bank activity
 |   |-- components/      reusable UI controls and the managed manual transaction form
 |   |-- database/        schema, migrations, repositories, users, auth, and abandonment
@@ -52,6 +53,12 @@ operations. Rejected-artifact persistence and exact-version storage operations
 are owned by `database` and `documents`, respectively.
 
 ## Ownership boundaries
+
+`browser/crypto.ts` centralizes upload SHA-256/base64 and client-generated UUIDs.
+HTTP hostname clients use compatible hashing and secure random bytes when native
+secure-context APIs are absent. Routes retain their file validation and upload
+state; server authentication and storage checksum verification do not depend on
+this module.
 
 Recurring forecasts are isolated in `domain/recurring-bills.ts` and
 `database/recurring-bill-repository.ts`. `server/recurring-bill-operations.ts`

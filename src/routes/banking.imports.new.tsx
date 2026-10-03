@@ -1,4 +1,5 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
+import { sha256FileBase64 } from "../browser/crypto";
 import { useEffect, useRef, useState } from "react";
 
 import { SourceTabs } from "../components/import-profile-tabs";
@@ -25,17 +26,6 @@ export const Route = createFileRoute("/banking/imports/new")({
     throw redirect({ to: "/imports/commbank" });
   },
 });
-
-const sha256Base64 = async (file: File): Promise<string> => {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    await file.arrayBuffer(),
-  );
-  let binary = "";
-  for (const byte of new Uint8Array(digest))
-    binary += String.fromCharCode(byte);
-  return btoa(binary);
-};
 
 export type BankImportDecision = "pending" | "accepted" | "rejected";
 
@@ -426,7 +416,7 @@ export function NewBankImportPage({
     const prepared = await Promise.all(
       files.map(async (file) => {
         try {
-          return { file, checksumSha256: await sha256Base64(file) };
+          return { file, checksumSha256: await sha256FileBase64(file) };
         } catch {
           return { file, checksumSha256: null };
         }
@@ -518,7 +508,7 @@ export function NewBankImportPage({
     let checksumSha256 = item.checksumSha256;
     if (!checksumSha256) {
       try {
-        checksumSha256 = await sha256Base64(file);
+        checksumSha256 = await sha256FileBase64(file);
       } catch {
         updateItem(id, (current) => ({
           ...current,

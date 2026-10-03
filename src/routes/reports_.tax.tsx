@@ -1,4 +1,5 @@
 import { AutocompleteSelect } from "../components/autocomplete";
+import { randomUuid } from "../browser/crypto";
 import { MoneyText } from "../components/money-text";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
@@ -1146,7 +1147,7 @@ function TaxWorksheetPage() {
             setAdjustments([
               ...adjustments,
               {
-                id: crypto.randomUUID(),
+                id: randomUuid(),
                 transactionId: "",
                 direction: "increase_income",
                 amountAud: "",

@@ -1,4 +1,5 @@
 import { useRouter } from "@tanstack/react-router";
+import { sha256FileBase64 } from "../browser/crypto";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { getCurrentSession } from "../auth/session-server";
@@ -101,17 +102,6 @@ export const deleteDraftConfirmation = (
   id: string,
 ): string =>
   `Permanently delete draft ${reference ?? id} and its suggestion? This cannot be undone. Uploaded files will remain in the file library.`;
-
-const sha256Base64 = async (file: File): Promise<string> => {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    await file.arrayBuffer(),
-  );
-  let binary = "";
-  for (const byte of new Uint8Array(digest))
-    binary += String.fromCharCode(byte);
-  return btoa(binary);
-};
 
 export const loadManualTransactionRouteData = async (
   transactionId?: string,
@@ -356,7 +346,7 @@ export const ManualTransactionRoute = ({
       detail: "Validating PDF evidence…",
       artifactId: null,
     });
-    const checksumSha256 = await sha256Base64(file);
+    const checksumSha256 = await sha256FileBase64(file);
     setWorkflow({
       stage: "uploading",
       detail: "Uploading PDF evidence…",
@@ -1380,7 +1370,7 @@ export const StripeImportRoute = ({
     let confirmationAttempted = false;
     let uploadConfirmed = false;
     try {
-      const checksumSha256 = await sha256Base64(item.file);
+      const checksumSha256 = await sha256FileBase64(item.file);
       const started = await startArtifactUpload({
         data: {
           ownerId: null,

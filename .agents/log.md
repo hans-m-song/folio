@@ -1,5 +1,26 @@
 # Folio standalone decisions
 
+## 2026-10-03 — HTTP browser compatibility regression
+
+- BILL-T88 proxy checks used Node/curl and did not exercise browser secure-context
+  restrictions. The operator reported upload failure at crypto.subtle.digest after
+  moving from loopback to the HTTP hostname. Browser call sites also use randomUUID,
+  which has the same secure-context restriction.
+- BILL-T89 explicitly retains HTTP port 80. Shared checksum/UUID helpers must
+  preserve SHA-256 base64 storage validation and secure randomness; no auth, proxy
+  or server validation changes. Add regression coverage for absent browser APIs and
+  commit only after verification. HTTPS remains separate, not silently enabled.
+- The shared browser helper uses native SHA-256 when available and pinned
+  @noble/hashes 2.4.0 otherwise. Native failures propagate. UUID fallback uses secure
+  getRandomValues with version/variant bits; missing randomness raises an error.
+- Independent source audit finds no compatibility defect; all browser call sites
+  use the helper and server authentication/storage remain unchanged. Seven helper
+  tests and 93 mocked UI tests pass, including exact checksum/header confirmation
+  and previews without subtle, and reconciliation without native randomUUID.
+  Production build/TypeScript passes. No live data or deployment was touched.
+- Final synthetic suite passes 1,095 tests with one skipped; scoped lint/format
+  passes. Verification simulates missing browser APIs, not a live-browser upload.
+
 ## 2026-10-03 — Tailnet hostname and existing Traefik
 
 - BILL-T88 uses http://folio.lamarr.axatol.xyz on default port 80; existing

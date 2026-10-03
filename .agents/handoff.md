@@ -1,5 +1,22 @@
 # Handoff
 
+## HTTP browser crypto compatibility verified — 2026-10-03
+
+- BILL-T89 approved: retain http://folio.lamarr.axatol.xyz on port 80. HTTP hostname
+  browsers omit crypto.subtle and randomUUID; upload checksum calls fail before PUT.
+- Worker owns src/browser/crypto.ts/tests and pinned @noble/hashes dependency/lock.
+  Main owns browser consumers/docs; preserve server/auth/S3 validation/routing.
+- Verify missing-API SHA-256 and secure UUID fallback, all upload consumers and build,
+  then commit. Never substitute Math.random or bypass checksum validation.
+- Existing unrelated Compose changes/private config remain outside this scope.
+- Shared helper and all five consumers are implemented. @noble/hashes 2.4.0 pinned;
+  native errors propagate, fallback checksums preserve base64 and UUIDs preserve
+  secure RNG/version/variant. Server authentication/storage checks are unchanged.
+- Final suite passes 1,095 tests with one skipped; production build/TypeScript,
+  scoped lint/format and independent source audit pass. Missing-API mocked UI
+  regressions cover Stripe/bank/PDF/reconciliation. No real browser or live file
+  ingestion was performed. Commit verified scope; operator rebuild/retry is next.
+
 ## Traefik hostname verified — 2026-10-03
 
 - BILL-T88 approved: http://folio.lamarr.axatol.xyz through existing Tailscale Serve

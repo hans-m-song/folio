@@ -623,6 +623,59 @@ describe("transaction workflow route safety", () => {
     expect(operations.startArtifactUpload).toHaveBeenCalledOnce();
   });
 
+  it("uploads and previews Stripe CSV when SubtleCrypto is unavailable", async () => {
+    const checksumSha256 = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=";
+    const artifactId = "44444444-4444-4444-8444-444444444444";
+    const uploadUrl = "https://uploads.example.test/stripe.csv";
+    const file = new File(["abc"], "stripe.csv", { type: "text/csv" });
+    Object.defineProperty(file, "arrayBuffer", {
+      configurable: true,
+      value: async () => new Uint8Array([97, 98, 99]).buffer,
+    });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("crypto", {});
+    vi.stubGlobal("fetch", fetchMock);
+    expect(crypto.subtle).toBeUndefined();
+    render(
+      createElement(StripeImportRoute, {
+        session: { authenticated: true, user: { id: "actor" } as never },
+      }),
+    );
+
+    addStripeFiles([file], true);
+
+    await screen.findByRole("heading", { name: "Review stripe.csv" });
+    expect(operations.startArtifactUpload).toHaveBeenCalledWith({
+      data: {
+        ownerId: null,
+        artifactProfile: "stripe_balance_itemised_csv_v1",
+        filename: "stripe.csv",
+        mediaType: "text/csv",
+        byteSize: 3,
+        checksumSha256,
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      uploadUrl,
+      expect.objectContaining({
+        method: "PUT",
+        body: file,
+        headers: expect.objectContaining({
+          "content-type": "text/csv",
+          "x-amz-checksum-sha256": checksumSha256,
+          "x-amz-meta-folio-artifact-id": artifactId,
+        }),
+      }),
+    );
+    expect(operations.confirmArtifactUpload).toHaveBeenCalledWith({
+      data: { id: artifactId },
+    });
+    expect(operations.previewStripeCsv).toHaveBeenCalledWith({
+      data: { artifactId, page: 1 },
+    });
+    expect(screen.getByText("txn_1")).toBeTruthy();
+  });
+
   it("previews before admission and closing the preview creates no transactions", async () => {
     render(
       createElement(StripeImportRoute, {

@@ -174,10 +174,13 @@ describe("bulk invoice PDF upload", () => {
   });
 
   it("uploads files independently, reports progress, and retries only a failed file", async () => {
-    const first = new File(["%PDF-first"], "first.pdf", {
+    const checksumSha256 = "Bxb5Jkyf4Z9ddFUnYQfz3cwdNJf2PWBomnNViuihv14=";
+    vi.stubGlobal("crypto", {});
+    expect(crypto.subtle).toBeUndefined();
+    const first = new File(["%PDF-1.7\n"], "first.pdf", {
       type: "application/pdf",
     });
-    const second = new File(["%PDF-second"], "second.pdf", {
+    const second = new File(["%PDF-1.7\n"], "second.pdf", {
       type: "application/pdf",
     });
     render(
@@ -199,9 +202,12 @@ describe("bulk invoice PDF upload", () => {
         filename: "first.pdf",
         mediaType: "application/pdf",
         byteSize: first.size,
-        checksumSha256: expect.any(String),
+        checksumSha256,
       },
     });
+    expect(firstRequest.headers.get("x-amz-checksum-sha256")).toBe(
+      checksumSha256,
+    );
     firstRequest.progress(first.size / 2, first.size);
     await screen.findByText("50%");
     firstRequest.finish(503);

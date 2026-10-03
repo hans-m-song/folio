@@ -19,6 +19,12 @@ or Caddy container is required. Compose sets the application and public S3 origi
 to this exact HTTP hostname; production local-password authentication remains
 disabled.
 
+HTTP hostname browsers do not expose native Web Crypto hashing or UUID generation.
+Folio uses compatible SHA-256 hashing and secure `getRandomValues` UUID generation
+when those APIs are absent. Upload checksums remain mandatory. These fallbacks do
+not provide HTTPS transport protection or make this deployment suitable for public
+exposure.
+
 The application and migration job share the `folio:local` runtime image. Its
 default command starts the server; the migration job instead runs bundled Node
 entrypoints, then exits. It creates an idempotent synthetic administrator after
