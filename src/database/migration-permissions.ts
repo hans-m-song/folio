@@ -50,9 +50,6 @@ export const applyRuntimePermissions = async (
   const appRole = quoteIdentifier(config.databaseAppRole);
   const migrationRole = quoteIdentifier(config.databaseMigrationRole);
 
-  await database.query(`REVOKE CREATE ON SCHEMA ${schema} FROM PUBLIC`);
-  await database.query(`REVOKE CREATE ON SCHEMA ${schema} FROM ${appRole}`);
-  await database.query(`GRANT USAGE ON SCHEMA ${schema} TO ${appRole}`);
   await database.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema} FROM ${appRole}`,
   );

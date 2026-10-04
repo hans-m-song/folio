@@ -22,7 +22,8 @@ describe("database setup sources", () => {
     expect(setupSql.match(/\bCREATE ROLE\b/g)).toHaveLength(2);
     expect(setupSql).toContain("CREATE ROLE folio_app");
     expect(setupSql).toContain("CREATE ROLE folio_admin");
-    expect(setupSql).toContain("CREATE SCHEMA folio AUTHORIZATION folio_admin");
+    expect(setupSql).toContain("CREATE SCHEMA folio;");
+    expect(setupSql).not.toContain("CREATE SCHEMA folio AUTHORIZATION");
     expect(setupSql).toContain("PASSWORD :'folio_app_password'");
     expect(setupSql).toContain("PASSWORD :'folio_admin_password'");
     expect(setupSql).not.toMatch(
@@ -30,7 +31,6 @@ describe("database setup sources", () => {
     );
     expect(setupSql).not.toContain("FOLIO_DATABASE_SCHEMA");
     expect(setupSql).not.toContain("FOLIO_DATABASE_TRANSFER_OWNERSHIP");
-    expect(setupSql.split("\n")).toHaveLength(47);
     expect(shell.split("\n").length).toBeLessThanOrEqual(30);
   });
 
@@ -50,7 +50,7 @@ describe("database setup sources", () => {
       "\\getenv folio_app_password FOLIO_DATABASE_APP_PASSWORD",
     );
     expect(setupSql).toContain(
-      "\\getenv folio_admin_password FOLIO_DATABASE_MIGRATION_PASSWORD",
+      "\\getenv folio_admin_password FOLIO_DATABASE_ADMIN_PASSWORD",
     );
     expect(shell).not.toMatch(/--set(?:=|\s+).*(?:app|migration).*password/i);
     expect(shell).not.toMatch(
@@ -75,6 +75,16 @@ describe("database setup sources", () => {
     expect(setupSql).toContain("GRANT USAGE, SELECT ON SEQUENCES TO folio_app");
     expect(setupSql).toContain("GRANT EXECUTE ON FUNCTIONS TO folio_app");
     expect(setupSql).toContain("REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC");
+    expect(setupSql).toContain(
+      "GRANT USAGE, CREATE ON SCHEMA folio TO folio_admin",
+    );
+    expect(setupSql).toContain(
+      "GRANT folio_admin TO SESSION_USER WITH SET TRUE",
+    );
+    expect(setupSql).toContain("SET LOCAL ROLE folio_admin");
+    expect(setupSql).toContain("RESET ROLE");
+    expect(setupSql).toContain("REVOKE folio_admin FROM SESSION_USER");
+    expect(setupSql).not.toContain("GRANTED BY");
   });
 
   it("supports the optional manual administrator wrapper with connection fallbacks", async () => {
@@ -91,7 +101,7 @@ describe("database setup sources", () => {
     expect(shell).toContain("/opt/folio/setup-database.sql");
     expect(shell).toContain("--no-psqlrc");
     expect(shell).toContain("FOLIO_DATABASE_APP_PASSWORD");
-    expect(shell).toContain("FOLIO_DATABASE_MIGRATION_PASSWORD");
+    expect(shell).toContain("FOLIO_DATABASE_ADMIN_PASSWORD");
     expect(shell).not.toContain("--username)");
   });
 
@@ -115,7 +125,7 @@ describe("database setup sources", () => {
     const { upgradeSql } = await readSetupSources();
 
     expect(upgradeSql).toContain(
-      "\\getenv folio_upgrade_password FOLIO_DATABASE_MIGRATION_PASSWORD",
+      "\\getenv folio_upgrade_password FOLIO_DATABASE_ADMIN_PASSWORD",
     );
     expect(upgradeSql).toContain(
       "ALTER ROLE folio_migrate RENAME TO folio_admin",

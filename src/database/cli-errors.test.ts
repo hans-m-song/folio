@@ -65,16 +65,24 @@ describe("database CLI errors", () => {
       code: "42501",
       message: "unexpected administrator name and connection details",
     });
-    const schemaFailure = formatDatabaseCliFailure(
+    const usageFailure = formatDatabaseCliFailure(
       "migrate",
       "schema_check",
-      new MigrationPreconditionError("schema_owner_mismatch"),
+      new MigrationPreconditionError("schema_usage_missing"),
     );
+    const createFailure = formatDatabaseCliFailure(
+      "migrate",
+      "schema_check",
+      new MigrationPreconditionError("schema_create_missing"),
+    );
+    const schemaFailure = [usageFailure, createFailure].join(" ");
 
     expect(roleFailure).toContain("code=42501");
     expect(roleFailure).toContain("role lacks permission");
-    expect(schemaFailure).toContain("code=MIGRATION_SCHEMA_OWNER");
-    expect(schemaFailure).toContain("must own the schema");
+    expect(usageFailure).toContain("code=MIGRATION_SCHEMA_USAGE");
+    expect(usageFailure).toContain("requires USAGE on the schema");
+    expect(createFailure).toContain("code=MIGRATION_SCHEMA_CREATE");
+    expect(createFailure).toContain("requires CREATE on the schema");
     expect(`${roleFailure}\n${schemaFailure}`).not.toContain("postgres");
     expect(`${roleFailure}\n${schemaFailure}`).not.toContain("private");
   });

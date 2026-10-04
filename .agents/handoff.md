@@ -1,5 +1,23 @@
 # Handoff
 
+## Privilege-based migration schema access verified — 2026-10-04
+
+- BILL-T93 user confirmed administrator-owned schema, migration USAGE/CREATE,
+  migration-owned objects and no migration-runner schema ACL mutations.
+- Setup/runner and regression tests are implemented; the user's password input
+  rename to FOLIO_DATABASE_ADMIN_PASSWORD is preserved across optional tools/docs.
+- Full suite: 1,120 passed, one skipped; typecheck, lint, scoped formatting and
+  migration bundle build pass. PostgreSQL 17 non-superuser, bootstrap superuser
+  and alternate-superuser setup pass.
+- Audit found asymmetric membership-grantor cleanup for alternate superusers;
+  fixed with paired implicit GRANT/REVOKE. All 18 bundled migrations apply and
+  repeat as a no-op; schema ownership remains administrative, runtime DDL and
+  role assumption are denied, and future table/sequence/function ACLs hold.
+- No live database or secret reads. Preserve unrelated local Compose/config
+  changes. Verification is complete; keep setup manual and fresh-only. The legacy
+  upgrade remains separate and retains its existing schema-ownership behavior.
+- All synthetic database test resources were removed after verification.
+
 ## Manual administrator setup verified — 2026-10-04
 
 - BILL-T92 confirmed: no automatic application-role/schema provisioning from

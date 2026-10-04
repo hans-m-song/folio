@@ -43,7 +43,7 @@ describe("migration runtime permissions", () => {
     ]);
   });
 
-  it("keeps schema usage, sequence access, and future table defaults narrow", async () => {
+  it("does not mutate schema ACLs and keeps sequence access and future table defaults narrow", async () => {
     const query = vi.fn(async (_statement: string) => ({
       rows: [],
       rowCount: 0,
@@ -52,15 +52,11 @@ describe("migration runtime permissions", () => {
     await applyRuntimePermissions({ query }, config);
 
     const statements = query.mock.calls.map(([statement]) => String(statement));
-    expect(statements).toContain(
-      'REVOKE CREATE ON SCHEMA "folio_test" FROM PUBLIC',
-    );
-    expect(statements).toContain(
-      'REVOKE CREATE ON SCHEMA "folio_test" FROM "folio_app"',
-    );
-    expect(statements).toContain(
-      'GRANT USAGE ON SCHEMA "folio_test" TO "folio_app"',
-    );
+    expect(
+      statements.some((statement) =>
+        /\b(?:GRANT|REVOKE)\b.*\bON SCHEMA\b/i.test(statement),
+      ),
+    ).toBe(false);
     expect(statements).toContain(
       'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "folio_test" FROM "folio_app"',
     );

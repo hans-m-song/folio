@@ -48,9 +48,13 @@ const migrationPreconditionMessages = {
     code: "MIGRATION_SCHEMA",
     message: "Create the configured schema before running migrations.",
   },
-  schema_owner_mismatch: {
-    code: "MIGRATION_SCHEMA_OWNER",
-    message: "The configured migration role must own the schema.",
+  schema_usage_missing: {
+    code: "MIGRATION_SCHEMA_USAGE",
+    message: "The configured migration role requires USAGE on the schema.",
+  },
+  schema_create_missing: {
+    code: "MIGRATION_SCHEMA_CREATE",
+    message: "The configured migration role requires CREATE on the schema.",
   },
 } as const;
 

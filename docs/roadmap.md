@@ -1,5 +1,26 @@
 # Folio delivery roadmap
 
+## BILL-T93 — Privilege-based migration schema access
+
+Status: complete on 4 October 2026; verification gates passed.
+
+- [x] Confirm administrator-owned schema with migration USAGE/CREATE access.
+- [x] Adjust fresh setup and migration preconditions/schema ACL boundary.
+- [x] Verify non-superuser provisioning, migrations and runtime restrictions.
+- [x] Update operator documentation and verify the scoped commit contents.
+
+Keep schema permissions under manual administrator control and object ownership
+with the migration role. Preserve the operator's password-input rename to
+FOLIO_DATABASE_ADMIN_PASSWORD and unrelated local Compose settings. Verification
+is limited to synthetic disposable PostgreSQL; no live database or secret reads.
+
+Full suite: 1,120 passed, one skipped; TypeScript, lint, scoped formatting and
+migration bundle build pass. PostgreSQL 17 verifies non-superuser CREATEROLE,
+bootstrap superuser and alternate-superuser setup; temporary role access is
+removed in all cases. All 18 migrations apply and repeat as a no-op; app DDL,
+role assumption and migration schema ownership operations are denied. Future
+table/sequence/function defaults hold. Audit-identified grantor cleanup was fixed.
+
 ## BILL-T92 — Manual administrator provisioning only
 
 Status: complete on 4 October 2026; verification gates passed.

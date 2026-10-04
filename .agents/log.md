@@ -1,5 +1,31 @@
 # Folio standalone decisions
 
+## 2026-10-04 — Schema ownership is not a migration prerequisite
+
+- BILL-T93 separates namespace administration from migration object ownership.
+  Fresh setup leaves folio owned by the provisioning administrator and grants
+  folio_admin USAGE/CREATE. The runner checks those privileges, retains object
+  ownership checks and table-specific runtime grants, and no longer mutates
+  schema ACLs. The optional legacy upgrade still retains schema ownership.
+- Default ACLs are configured while temporarily assuming folio_admin. Audit
+  caught mismatched grantor selection between implicit GRANT and explicit-grantor
+  REVOKE for alternate superusers; cleanup now uses symmetric implicit commands.
+- PostgreSQL 17 non-superuser provisioning with CREATEROLE and only database
+  CREATE passes. All 18 bundled migrations apply, then repeat as a no-op. Schema
+  ownership remains the provisioner's; app DDL/role assumption and migration
+  schema ALTER/DROP are denied. The provisioning login loses temporary SET access;
+  PostgreSQL's automatic ADMIN-only creator memberships remain.
+- Future tables are app-readable without writes; sequences permit USAGE/SELECT
+  without UPDATE; functions permit app execution without PUBLIC execution.
+  A non-owner database REVOKE emits a warning but effective app database CREATE
+  remains false in this fresh fixture. This warning is documented, not hidden.
+- Preserve the user's FOLIO_DATABASE_ADMIN_PASSWORD rename throughout optional
+  setup/upgrade tools and docs. No live database, credential-file or environment
+  value reads. Full suite: 1,120 passed, one skipped; TypeScript, lint, scoped
+  formatting and migration bundle build pass. Bootstrap and alternate-superuser
+  setup checks also pass with no remaining temporary membership grant.
+- All task-created database containers and network were removed after verification.
+
 ## 2026-10-04 — Administrator provisioning is manual
 
 - BILL-T92 removes the Folio setup-script mounts from PostgreSQL initialization.

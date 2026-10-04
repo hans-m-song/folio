@@ -50,7 +50,8 @@ without deleting its named data volumes. Removing those volumes destroys the
 local database and stored artifacts.
 
 Database provisioning is an administrator-only operation, separate from migrations.
-The migration role owns the Folio schema and objects; the runtime role receives
+The provisioning administrator owns the schema; the migration role has schema
+USAGE/CREATE and owns migration-created objects. The runtime role receives
 table-specific CRUD permissions and cannot assume the migration role. See
 [database setup](docs/database-setup.md) before configuring a new database or
 upgrading ownership on an existing one. Migration credentials belong in the

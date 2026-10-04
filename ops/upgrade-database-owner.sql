@@ -2,7 +2,7 @@
 \set ECHO none
 \set VERBOSITY terse
 \set SHOW_CONTEXT never
-\getenv folio_upgrade_password FOLIO_DATABASE_MIGRATION_PASSWORD
+\getenv folio_upgrade_password FOLIO_DATABASE_ADMIN_PASSWORD
 
 BEGIN;
 SET LOCAL search_path = pg_catalog;

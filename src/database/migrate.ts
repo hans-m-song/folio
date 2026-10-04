@@ -62,16 +62,24 @@ try {
     throw Object.assign(new Error(), { code: "42501" });
   }
   stage = "schema_check";
-  const schema = await pool.query<{ owner: string }>(
-    "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
+  const schema = await pool.query<{
+    has_usage: boolean;
+    has_create: boolean;
+  }>(
+    `SELECT
+      has_schema_privilege(current_user, namespace.oid, 'USAGE') AS has_usage,
+      has_schema_privilege(current_user, namespace.oid, 'CREATE') AS has_create
+    FROM pg_namespace AS namespace
+    WHERE namespace.nspname = $1`,
     [config.databaseSchema],
   );
   if (schema.rowCount === 0) {
     throw new MigrationPreconditionError("schema_missing");
   }
-  if (schema.rows[0]?.owner !== config.databaseMigrationRole) {
-    throw new MigrationPreconditionError("schema_owner_mismatch");
-  }
+  if (!schema.rows[0]?.has_usage)
+    throw new MigrationPreconditionError("schema_usage_missing");
+  if (!schema.rows[0]?.has_create)
+    throw new MigrationPreconditionError("schema_create_missing");
   stage = "ownership";
   const ownership = await pool.query<{ has_unowned_objects: boolean }>(
     `SELECT EXISTS (

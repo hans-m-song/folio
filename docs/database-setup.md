@@ -1,8 +1,8 @@
 # Database setup
 
 ```text
-Cluster administrator -> runs setup or an explicit ownership upgrade
-folio_admin           -> owns the folio schema and applies migrations
+Provisioning admin    -> owns schema, controls schema ACLs, runs manual setup
+folio_admin           -> schema USAGE/CREATE, owns objects, applies migrations
 folio_app             -> restricted runtime CRUD
 ```
 
@@ -18,12 +18,22 @@ configured through standard PostgreSQL settings (`PGHOST`, `PGPORT`, `PGDATABASE
 this script automatically. The wrapper does not load files.
 
 Required password inputs are `FOLIO_DATABASE_APP_PASSWORD` and
-`FOLIO_DATABASE_MIGRATION_PASSWORD`; use distinct passwords. Passwords are not command-line arguments;
+`FOLIO_DATABASE_ADMIN_PASSWORD`; use distinct passwords. Passwords are not command-line arguments;
 administrator statement logging must still avoid password-bearing SQL.
 
 Bootstrap creates exactly two roles (`folio_app`, `folio_admin`), the `folio`
 schema, and default privileges. Names are fixed. It deliberately fails and rolls
 back when a role or schema already exists: it is not a repeatable repair tool.
+The provisioning connection needs CREATEROLE and CREATE on the target database,
+or superuser privileges. The schema remains owned by that provisioning role.
+The migration runner neither requires schema ownership nor changes schema ACLs;
+it still requires ownership of the tables, sequences and functions it manages.
+Setup temporarily enables assuming `folio_admin` to establish that role's future
+object defaults, then removes its own temporary membership grant. PostgreSQL's
+automatic role-creator administration grant, where present, is retained.
+A non-owner administrator with database CREATE but no grant option may receive
+a warning on the database-level REVOKE. Fresh `folio_app` has no direct database
+CREATE grant to revoke; setup does not grant it one.
 Default table access is SELECT; sequence access is USAGE/SELECT; function execution
 is granted to the app rather than PUBLIC. Migrations supply table-specific writes.
 
@@ -47,7 +57,7 @@ the username/database if your cluster administrator settings differ:
 ```sh
 docker compose exec --no-tty \
   --env FOLIO_DATABASE_APP_PASSWORD \
-  --env FOLIO_DATABASE_MIGRATION_PASSWORD \
+  --env FOLIO_DATABASE_ADMIN_PASSWORD \
   postgres psql --no-psqlrc --username folio_owner --dbname folio \
   < ops/setup-database.sql
 ```
@@ -72,7 +82,7 @@ the application. Keep any required authentication and storage configuration read
 Do not rerun bootstrap or delete a data volume. Stop the application and take a
 backup before the upgrade. Run `ops/upgrade-database-owner.sql` through administrator
 `psql --no-psqlrc --file ops/upgrade-database-owner.sql` using standard connection
-settings and `FOLIO_DATABASE_MIGRATION_PASSWORD`.
+settings and `FOLIO_DATABASE_ADMIN_PASSWORD`.
 
 This one-time upgrade expects `folio_app` and the `folio` schema. It renames the
 previous `folio_migrate` role to `folio_admin` if present, or creates `folio_admin`
@@ -82,11 +92,14 @@ not provision arbitrary roles/schemas, transfer unrelated
 objects or use database-wide `REASSIGN OWNED`. Unsupported existing states fail
 rather than being automatically repaired. Role membership and privileged-role
 checks remain on this explicit upgrade path.
+This legacy upgrade retains migration-role schema ownership; the new fresh-setup
+workflow does not require it. Existing schema ownership need not change to use
+the privilege-based runner.
 
 Update the migration connection URL username to `folio_admin`. Remove or change
 an explicit `FOLIO_DATABASE_MIGRATION_ROLE=folio_migrate` override. The setting
 names remain `FOLIO_MIGRATION_DATABASE_URL` and
-`FOLIO_DATABASE_MIGRATION_PASSWORD`; `FOLIO_DATABASE_URL` remains the app connection.
+`FOLIO_DATABASE_ADMIN_PASSWORD`; `FOLIO_DATABASE_URL` remains the app connection.
 
 Then run migrations before restarting the application. The upgrade sets ownership
 and future defaults; the migration runner resets existing table/sequence grants

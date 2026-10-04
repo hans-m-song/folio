@@ -3,7 +3,7 @@ set -eu
 
 [ "$#" -eq 0 ] || { printf '%s\n' 'setup-database.sh accepts no arguments.' >&2; exit 2; }
 : "${FOLIO_DATABASE_APP_PASSWORD:?FOLIO_DATABASE_APP_PASSWORD is required}"
-: "${FOLIO_DATABASE_MIGRATION_PASSWORD:?FOLIO_DATABASE_MIGRATION_PASSWORD is required}"
+: "${FOLIO_DATABASE_ADMIN_PASSWORD:?FOLIO_DATABASE_ADMIN_PASSWORD is required}"
 
 case "$0" in
   */*) folio_setup_directory=${0%/*} ;;
