@@ -1,5 +1,37 @@
 # Folio standalone decisions
 
+## 2026-10-04 — Minimal fixed-name bootstrap
+
+- BILL-T91 replaces the reusable setup/repair tool with fresh-only provisioning:
+  fixed folio schema, folio_app runtime role and folio_admin migration role. The
+  latter remains non-superuser with no database/role creation, replication or
+  RLS-bypass attributes. Migration configuration keys are unchanged.
+- Fresh setup is 46 SQL lines instead of 448; its wrapper is 23 instead of 96.
+  Existing roles/schema cause transactional failure rather than password updates
+  or ownership repair. Existing databases require a separate explicit upgrade.
+- Disposable PostgreSQL verifies fresh setup, rejection of repeat setup, all 18
+  bundled migrations under the renamed default and a no-op repeat. New objects
+  give app reads, sequence usage and function execution, without table writes or
+  PUBLIC function execution. App schema CREATE and SET ROLE folio_admin are denied.
+- No actual credential files or environment values were inspected and no live
+  database writes occurred. Unrelated Compose/local configuration remains excluded.
+- The separate 87-line upgrade supports renaming the previous role or creating
+  folio_admin for an older database. Both synthetic paths preserve data; the rename
+  path also verifies functions, unrelated ownership, reset legacy default ACLs,
+  TCP password authentication and membership rejection with rollback.
+- Upgrade rejects an empty migration password before role changes. Manual steps
+  require keeping the app stopped through upgrade and migration, since only the
+  migration runner resets existing runtime table/sequence permissions.
+- Replacing a shell file through delete/add lost its executable mode. Restored
+  executable mode and added a regression assertion: PostgreSQL initialization must
+  execute the wrapper as a child, not source its exec command into the entrypoint.
+- Actual fresh PostgreSQL Docker initialization completes with both roles and the
+  expected schema owner; PID 1 reaches the database server. Final suite still
+  passes 1,118 tests with one skipped.
+- Final suite passes 1,118 tests with one skipped. Build/TypeScript, runtime image,
+  lint and scoped formatting pass. The earlier repo-wide formatting limitation in
+  unchanged reconciliation/storage tests remains outside this scope.
+
 ## 2026-10-04 — Separate database administration and migrations
 
 - BILL-T90 uses a dedicated migration role, rather than making the application

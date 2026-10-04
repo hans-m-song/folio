@@ -253,11 +253,13 @@ command is unchanged. No pnpm, tsx or build dependency tree is copied into runti
 
 Administrator provisioning lives in `ops/setup-database.sh` and
 `ops/setup-database.sql`. It creates separate runtime and migration roles, owns
-the schema through the migration role, and establishes default privileges.
+the fixed folio schema through folio_admin, and establishes default privileges.
+Fresh setup fails on existing objects. `ops/upgrade-database-owner.sql` separately
+renames the previous migration role and transfers existing Folio object ownership.
 `database/migration-config.ts` isolates migration connection settings from runtime
 configuration; `database/migration-permissions.ts` owns the table-specific runtime
 grant policy. The runner verifies its role and schema/object ownership before
-applying SQL. Existing ownership transfers require explicit administrator opt-in.
+applying SQL. Existing ownership transfers require explicit administrator execution.
 
 Documents upload directly from the browser after the
 server issues a narrowly scoped presigned request. Local Compose uses a fixed

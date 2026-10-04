@@ -1,81 +1,71 @@
 # Database setup
 
-Folio uses three database identities:
-
 ```text
-Administrator  -> provisions roles, schema and default privileges
-Migration role -> owns Folio objects and applies migrations
-Runtime role   -> table-specific application CRUD; no Folio schema CREATE
+Cluster administrator -> runs setup or an explicit ownership upgrade
+folio_admin           -> owns the folio schema and applies migrations
+folio_app             -> restricted runtime CRUD
 ```
 
-## Administrator provisioning
+Despite its name, `folio_admin` has no superuser, database-creation, role-creation,
+replication or RLS-bypass powers. The runtime role cannot assume it.
+
+## Fresh database
 
 Run `pnpm database:setup` with `psql` installed and an administrator connection
-configured through standard PostgreSQL connection settings (`PGHOST`, `PGPORT`,
-`PGDATABASE`, `PGUSER`, and secure password handling). The wrapper does not load
-credential files. An explicit `--username` is also accepted.
+configured through standard PostgreSQL settings (`PGHOST`, `PGPORT`, `PGDATABASE`,
+`PGUSER` and secure password handling). Docker initialization can use
+`POSTGRES_USER` and `POSTGRES_DB` as fallbacks. The wrapper does not load files.
 
-Required setup inputs are `FOLIO_DATABASE_APP_PASSWORD` and
-`FOLIO_DATABASE_MIGRATION_PASSWORD`. Optional identifiers default to:
+Required password inputs are `FOLIO_DATABASE_APP_PASSWORD` and
+`FOLIO_DATABASE_MIGRATION_PASSWORD`; use distinct passwords. Passwords are not command-line arguments;
+administrator statement logging must still avoid password-bearing SQL.
 
-| Setting                         | Default         |
-| ------------------------------- | --------------- |
-| `FOLIO_DATABASE_SCHEMA`         | `folio`         |
-| `FOLIO_DATABASE_APP_ROLE`       | `folio_app`     |
-| `FOLIO_DATABASE_MIGRATION_ROLE` | `folio_migrate` |
+Bootstrap creates exactly two roles (`folio_app`, `folio_admin`), the `folio`
+schema, and default privileges. Names are fixed. It deliberately fails and rolls
+back when a role or schema already exists: it is not a repeatable repair tool.
+Default table access is SELECT; sequence access is USAGE/SELECT; function execution
+is granted to the app rather than PUBLIC. Migrations supply table-specific writes.
 
-Identifiers must start with a lowercase letter and contain only lowercase letters,
-digits and underscores, up to 63 characters. The roles must differ.
-Provisioning is transactional and repeatable. It refuses
-privileged existing roles or any memberships on either dedicated role.
-Passwords are supplied through process inputs, not command-line arguments.
-Role creation still sends passwords in SQL; administrator-side statement logging
-must be configured to avoid recording password-bearing statements.
+## Existing database upgrade
 
-For an existing schema, ownership transfer is disabled by default. After a backup
-and an operator-reviewed maintenance plan, set
-`FOLIO_DATABASE_TRANSFER_OWNERSHIP=true` for the administrator setup invocation.
-Transfer is limited to objects in the configured Folio schema; it does not use
-database-wide `REASSIGN OWNED` or delete records. Migrations refuse an absent
-schema or incomplete ownership transfer.
+Do not rerun bootstrap or delete a data volume. Stop the application and take a
+backup before the upgrade. Run `ops/upgrade-database-owner.sql` through administrator
+`psql --no-psqlrc --file ops/upgrade-database-owner.sql` using standard connection
+settings and `FOLIO_DATABASE_MIGRATION_PASSWORD`.
 
-## Migration and runtime connections
+This one-time upgrade expects `folio_app` and the `folio` schema. It renames the
+previous `folio_migrate` role to `folio_admin` if present, or creates `folio_admin`
+for an older database without a migration role. It sets the role's password and
+transfers ownership of existing Folio tables, sequences and functions. It does
+not provision arbitrary roles/schemas, transfer unrelated
+objects or use database-wide `REASSIGN OWNED`. Unsupported existing states fail
+rather than being automatically repaired. Role membership and privileged-role
+checks remain on this explicit upgrade path.
 
-`FOLIO_MIGRATION_DATABASE_URL` must authenticate directly as the configured
-migration role. There is no fallback to `FOLIO_DATABASE_URL`. The latter must
-authenticate as the runtime role, including for the local-user seed command.
-The migration command requires only its connection URL and schema/role settings;
-it does not require authentication, browser or object-storage configuration.
+Update the migration connection URL username to `folio_admin`. Remove or change
+an explicit `FOLIO_DATABASE_MIGRATION_ROLE=folio_migrate` override. The setting
+names remain `FOLIO_MIGRATION_DATABASE_URL` and
+`FOLIO_DATABASE_MIGRATION_PASSWORD`; `FOLIO_DATABASE_URL` remains the app connection.
 
-Default privileges apply to future objects created by the migration role:
-runtime table reads, sequence usage/read access and function execution. The
-migration runner separately reapplies the existing table-specific write policy.
-New tables therefore do not automatically receive unrestricted CRUD. Ownership
-and role provisioning remain outside the migration runner.
+Then run migrations before restarting the application. The upgrade sets ownership
+and future defaults; the migration runner resets existing table/sequence grants
+and reapplies the runtime write policy. Do not resume the app between those steps.
 
-## Docker Compose
+## Docker Compose and migrations
 
-The migration job shares the application image but uses a one-shot entrypoint.
-The default application entrypoint remains the server. Supply migration-only
-credentials in a private `.env.migrate` file containing
-`FOLIO_MIGRATION_DATABASE_URL` and `FOLIO_DATABASE_MIGRATION_PASSWORD`; do not add
-them to the runtime credential file. Keep schema and role identifiers consistent
-across setup and migration inputs. The application service explicitly clears the
-known administrator and migration credential variables. The migration job clears
-administrator/password-provisioning variables and retains only its migration URL
-and the runtime connection required for seeding.
+Private `.env.migrate` supplies the migration URL/password to the migration job
+and PostgreSQL initialization, not to the application. No credentials are bundled
+into the shared application image. PostgreSQL invokes fresh setup only for a new
+data directory; existing volumes do not rerun initialization after a restart.
 
-The PostgreSQL initialization mount invokes administrator setup only when its
-data directory is new. Existing volumes require an explicit administrator setup
-invocation; restarting PostgreSQL does not rerun initialization. Configure the
-application password and administrator connection separately, and never remove
-the data volume to trigger an ownership upgrade.
-
-After setup, the migration job applies SQL and then seeds the configured local
-administrator using the runtime connection. To omit seeding:
+The migration job uses the shared image's one-shot command, then seeds the local
+user through the runtime connection. The default image command remains the server.
+To run migrations without seeding:
 
 ```sh
 docker compose run --rm --no-deps folio-migrate node src/database/migrate.mjs
 ```
 
-No administrator provisioning command is bundled into the application image.
+The migration runner retains custom schema/role configuration for separately
+managed deployments. These administrator scripts intentionally target only the
+fixed Folio names.

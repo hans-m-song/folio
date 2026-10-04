@@ -13,7 +13,7 @@ const migrationConfigSchema = z
       }, "Expected a PostgreSQL connection URL"),
     FOLIO_DATABASE_SCHEMA: identifier,
     FOLIO_DATABASE_APP_ROLE: identifier.default("folio_app"),
-    FOLIO_DATABASE_MIGRATION_ROLE: identifier.default("folio_migrate"),
+    FOLIO_DATABASE_MIGRATION_ROLE: identifier.default("folio_admin"),
   })
   .superRefine((value, context) => {
     if (value.FOLIO_DATABASE_APP_ROLE === value.FOLIO_DATABASE_MIGRATION_ROLE) {

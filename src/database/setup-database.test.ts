@@ -1,116 +1,141 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 const readSetupSources = async () => {
-  const [sql, shell] = await Promise.all([
+  const [setupSql, upgradeSql, shell] = await Promise.all([
     readFile(new URL("../../ops/setup-database.sql", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../ops/upgrade-database-owner.sql", import.meta.url),
+      "utf8",
+    ),
     readFile(new URL("../../ops/setup-database.sh", import.meta.url), "utf8"),
   ]);
 
-  return { sql, shell };
+  return { setupSql, upgradeSql, shell };
 };
 
-describe("administrative database setup sources", () => {
-  it("reads setup configuration from the environment and validates names", async () => {
-    const { sql } = await readSetupSources();
+describe("database setup sources", () => {
+  it("keeps fresh bootstrap fixed, transactional, and compact", async () => {
+    const { setupSql, shell } = await readSetupSources();
 
-    expect(sql).toContain("\\getenv folio_setup_schema FOLIO_DATABASE_SCHEMA");
-    expect(sql).toContain(
-      "\\getenv folio_setup_app_role FOLIO_DATABASE_APP_ROLE",
+    expect(setupSql.match(/\bCREATE ROLE\b/g)).toHaveLength(2);
+    expect(setupSql).toContain("CREATE ROLE folio_app");
+    expect(setupSql).toContain("CREATE ROLE folio_admin");
+    expect(setupSql).toContain("CREATE SCHEMA folio AUTHORIZATION folio_admin");
+    expect(setupSql).toContain("PASSWORD :'folio_app_password'");
+    expect(setupSql).toContain("PASSWORD :'folio_admin_password'");
+    expect(setupSql).not.toMatch(
+      /\bALTER ROLE\b|\bpg_roles\b|\bpg_auth_members\b/,
     );
-    expect(sql).toContain(
-      "\\getenv folio_setup_migration_role FOLIO_DATABASE_MIGRATION_ROLE",
+    expect(setupSql).not.toContain("FOLIO_DATABASE_SCHEMA");
+    expect(setupSql).not.toContain("FOLIO_DATABASE_TRANSFER_OWNERSHIP");
+    expect(setupSql.split("\n")).toHaveLength(47);
+    expect(shell.split("\n").length).toBeLessThanOrEqual(30);
+  });
+
+  it("uses the migration lock and never passes or echoes password values", async () => {
+    const { setupSql, upgradeSql, shell } = await readSetupSources();
+
+    for (const sql of [setupSql, upgradeSql]) {
+      expect(sql).toContain("BEGIN;");
+      expect(sql).toContain("hashtext('folio-migrations:folio')");
+      expect(sql).toContain("COMMIT;");
+      expect(sql).toContain("\\set ECHO none");
+      expect(sql).toContain("\\set VERBOSITY terse");
+      expect(sql).toContain("\\set SHOW_CONTEXT never");
+    }
+
+    expect(setupSql).toContain(
+      "\\getenv folio_app_password FOLIO_DATABASE_APP_PASSWORD",
     );
-    expect(sql).toContain(
-      "\\getenv folio_setup_app_password FOLIO_DATABASE_APP_PASSWORD",
+    expect(setupSql).toContain(
+      "\\getenv folio_admin_password FOLIO_DATABASE_MIGRATION_PASSWORD",
     );
-    expect(sql).toContain(
-      "\\getenv folio_setup_migration_password FOLIO_DATABASE_MIGRATION_PASSWORD",
-    );
-    expect(sql).toContain(
-      "setup_config.schema_name !~ '^[a-z][a-z0-9_]{0,62}$'",
-    );
-    expect(sql).toContain(
-      "setup_config.app_role_name = setup_config.migration_role_name",
+    expect(shell).not.toMatch(/--set(?:=|\s+).*(?:app|migration).*password/i);
+    expect(shell).not.toMatch(
+      /(?:printf|echo)[^\n]*\$(?:\{)?FOLIO_DATABASE_.*PASSWORD/i,
     );
   });
 
-  it("fails closed for privileged roles and app membership in the migration role", async () => {
-    const { sql } = await readSetupSources();
+  it("creates the runtime role with limited access and administrator-owned defaults", async () => {
+    const { setupSql } = await readSetupSources();
 
-    expect(sql).toContain("role_record.rolsuper");
-    expect(sql).toContain("role_record.rolcreatedb");
-    expect(sql).toContain("role_record.rolcreaterole");
-    expect(sql).toContain("role_record.rolreplication");
-    expect(sql).toContain("role_record.rolbypassrls");
-    expect(sql).toContain("pg_catalog.pg_auth_members AS membership_record");
-    expect(sql).toContain(
-      "membership_record.roleid IN (app_role_oid, migration_role_oid)",
+    expect(
+      setupSql.match(/LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/g),
+    ).toHaveLength(2);
+    expect(setupSql.match(/NOREPLICATION NOBYPASSRLS NOINHERIT/g)).toHaveLength(
+      2,
     );
-    expect(sql).toContain(
-      "membership_record.member IN (app_role_oid, migration_role_oid)",
-    );
-    expect(sql).toContain("application or migration role has role memberships");
-    expect(sql).not.toMatch(/\b(?:GRANT|REVOKE)\s+[^;]*\bROLE\b/i);
+    expect(setupSql).toContain("REVOKE CREATE ON SCHEMA folio FROM PUBLIC");
+    expect(setupSql).toContain("REVOKE CREATE ON SCHEMA folio FROM folio_app");
+    expect(setupSql).toContain("GRANT USAGE ON SCHEMA folio TO folio_app");
+    expect(setupSql).toContain("REVOKE CREATE ON DATABASE %I FROM folio_app");
+    expect(setupSql).toContain("GRANT SELECT ON TABLES TO folio_app");
+    expect(setupSql).toContain("GRANT USAGE, SELECT ON SEQUENCES TO folio_app");
+    expect(setupSql).toContain("GRANT EXECUTE ON FUNCTIONS TO folio_app");
+    expect(setupSql).toContain("REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC");
   });
 
-  it("serializes schema-scoped setup and keeps ownership transfer scoped", async () => {
-    const { sql } = await readSetupSources();
-
-    expect(sql).toContain("BEGIN;");
-    expect(sql).toContain(
-      "pg_advisory_xact_lock(\n  pg_catalog.hashtext('folio-migrations:'",
-    );
-    expect(sql).toContain("FOLIO_DATABASE_TRANSFER_OWNERSHIP=true");
-    expect(sql).toContain("pg_catalog.pg_class");
-    expect(sql).toContain("pg_catalog.pg_proc");
-    expect(sql).toContain("pg_catalog.pg_type");
-    expect(sql).toContain(
-      "relation_record.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')",
-    );
-    expect(sql).toContain("routine_record.prokind IN ('f', 'p', 'a', 'w')");
-    expect(sql).not.toMatch(/\bREASSIGN\s+OWNED\b/i);
-    expect(sql).toContain("COMMIT;");
-  });
-
-  it("applies read-only app defaults and removes public schema and function access", async () => {
-    const { sql } = await readSetupSources();
-
-    expect(sql).toContain("application role owns the current database");
-    expect(sql).toContain("REVOKE CREATE ON DATABASE %I FROM %I");
-    expect(sql).toContain("REVOKE CREATE ON SCHEMA");
-    expect(sql).toContain("GRANT USAGE ON SCHEMA");
-    expect(sql).toContain("GRANT SELECT ON TABLES TO %I");
-    expect(sql).toContain("GRANT USAGE, SELECT ON SEQUENCES TO %I");
-    expect(sql).toContain("GRANT EXECUTE ON FUNCTIONS TO %I");
-    expect(sql).toContain("REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC");
-    expect(sql.split("REVOKE ALL ON TABLES FROM %I").length - 1).toBe(2);
-    expect(sql.split("REVOKE ALL ON SEQUENCES FROM %I").length - 1).toBe(2);
-    expect(sql.split("REVOKE EXECUTE ON FUNCTIONS FROM %I").length - 1).toBe(2);
-  });
-
-  it("requires passwords without placing them in psql arguments or output", async () => {
+  it("executes Docker initialization as a child with connection fallbacks", async () => {
     const { shell } = await readSetupSources();
 
-    expect(shell).toContain("FOLIO_DATABASE_APP_PASSWORD is required.");
-    expect(shell).toContain("FOLIO_DATABASE_MIGRATION_PASSWORD is required.");
-    expect(shell).toContain("--no-psqlrc");
-    expect(shell).toContain("--username");
-    expect(shell).toContain("POSTGRES_USER");
-    expect(shell).toContain("POSTGRES_DB");
-    expect(shell).toContain("/opt/folio/setup-database.sql");
-    expect(shell).not.toMatch(/--set(?:=|\s+)(?:app|migration)_password/i);
-    expect(shell).not.toMatch(
-      /(?:printf|echo)[^\n]*\$(?:\{)?FOLIO_DATABASE_(?:APP|MIGRATION)_PASSWORD/i,
+    const wrapper = await stat(
+      new URL("../../ops/setup-database.sh", import.meta.url),
     );
-    expect(shell).not.toContain("set -x");
+    expect(wrapper.mode & 0o111).not.toBe(0);
+
+    expect(shell).toContain('[ "$#" -eq 0 ]');
+    expect(shell).toContain("${PGUSER:-${POSTGRES_USER:-}}");
+    expect(shell).toContain("${PGDATABASE:-${POSTGRES_DB:-}}");
+    expect(shell).toContain("/opt/folio/setup-database.sql");
+    expect(shell).toContain("--no-psqlrc");
+    expect(shell).toContain("FOLIO_DATABASE_APP_PASSWORD");
+    expect(shell).toContain("FOLIO_DATABASE_MIGRATION_PASSWORD");
+    expect(shell).not.toContain("--username)");
   });
 
-  it("suppresses psql query and contextual diagnostics", async () => {
-    const { sql } = await readSetupSources();
+  it("guards and renames the existing migration role in the one-time upgrade", async () => {
+    const { upgradeSql } = await readSetupSources();
 
-    expect(sql).toContain("\\set ECHO none");
-    expect(sql).toContain("\\set VERBOSITY terse");
-    expect(sql).toContain("\\set SHOW_CONTEXT never");
+    expect(upgradeSql).toContain(
+      "\\getenv folio_upgrade_password FOLIO_DATABASE_MIGRATION_PASSWORD",
+    );
+    expect(upgradeSql).toContain(
+      "ALTER ROLE folio_migrate RENAME TO folio_admin",
+    );
+    expect(upgradeSql).toContain("\\if :folio_has_migrate");
+    expect(upgradeSql).toContain("CREATE ROLE folio_admin");
+    expect(upgradeSql).toContain("PASSWORD :'folio_upgrade_password'");
+    expect(
+      upgradeSql.indexOf("length(:'folio_upgrade_password') > 0"),
+    ).toBeLessThan(upgradeSql.indexOf("ALTER ROLE folio_app"));
+    expect(upgradeSql).toContain("rolsuper OR rolcreatedb OR rolcreaterole");
+    expect(upgradeSql).toContain("pg_catalog.pg_auth_members");
+    expect(upgradeSql).toContain(
+      "folio_app or folio_migrate has role memberships",
+    );
+    expect(upgradeSql).not.toContain("FOLIO_DATABASE_APP_PASSWORD");
+    expect(upgradeSql).not.toMatch(/\bREASSIGN\s+OWNED\b/i);
+  });
+
+  it("limits upgrade ownership changes and default repairs to Folio objects", async () => {
+    const { upgradeSql } = await readSetupSources();
+
+    expect(upgradeSql).toContain("n.nspname = 'folio'");
+    expect(upgradeSql).toContain("c.relkind IN ('r', 'p')");
+    expect(upgradeSql).toContain("c.relkind = 'S'");
+    expect(upgradeSql).toContain("p.prokind = 'f'");
+    expect(upgradeSql).not.toContain("pg_catalog.pg_type");
+    expect(upgradeSql).not.toMatch(
+      /relkind IN \([^)]*'v'|relkind IN \([^)]*'m'/,
+    );
+    expect(upgradeSql).toContain("REVOKE ALL ON TABLES FROM folio_app");
+    expect(upgradeSql).toContain("REVOKE ALL ON SEQUENCES FROM folio_app");
+    expect(upgradeSql).toContain("REVOKE EXECUTE ON FUNCTIONS FROM folio_app");
+    expect(upgradeSql).toContain("GRANT SELECT ON TABLES TO folio_app");
+    expect(upgradeSql).toContain(
+      "GRANT USAGE, SELECT ON SEQUENCES TO folio_app",
+    );
+    expect(upgradeSql).toContain("GRANT EXECUTE ON FUNCTIONS TO folio_app");
   });
 });

@@ -24,7 +24,7 @@ vi.mock("./migration-config", () => ({
     migrationDatabaseUrl: "postgres://migration.synthetic/folio",
     databaseSchema: "folio",
     databaseAppRole: "folio_app",
-    databaseMigrationRole: "folio_migrate",
+    databaseMigrationRole: "folio_admin",
   }),
 }));
 
@@ -47,7 +47,7 @@ const connectedAsMigrationOwner = (statement: string) => {
       rowCount: 1,
       rows: [
         {
-          role_name: "folio_migrate",
+          role_name: "folio_admin",
           rolsuper: false,
           rolcreatedb: false,
           rolcreaterole: false,
@@ -57,7 +57,7 @@ const connectedAsMigrationOwner = (statement: string) => {
     };
   }
   if (statement.includes("FROM pg_namespace")) {
-    return { rowCount: 1, rows: [{ owner: "folio_migrate" }] };
+    return { rowCount: 1, rows: [{ owner: "folio_admin" }] };
   }
   if (statement.includes('"_migrations" WHERE id = $1')) {
     return { rowCount: 1, rows: [] };
@@ -114,7 +114,7 @@ describe("migration runner", () => {
             rowCount: 1,
             rows: [
               {
-                role_name: "folio_migrate",
+                role_name: "folio_admin",
                 rolsuper: false,
                 rolcreatedb: false,
                 rolcreaterole: false,
@@ -124,7 +124,7 @@ describe("migration runner", () => {
           };
         }
         if (statement.includes("FROM pg_namespace")) {
-          return { rowCount: 1, rows: [{ owner: "folio_migrate" }] };
+          return { rowCount: 1, rows: [{ owner: "folio_admin" }] };
         }
         if (statement.includes('"_migrations" WHERE id = $1')) {
           return {
@@ -205,7 +205,7 @@ describe("migration runner", () => {
             rowCount: 1,
             rows: [
               {
-                role_name: "folio_migrate",
+                role_name: "folio_admin",
                 rolsuper: false,
                 rolcreatedb: false,
                 rolcreaterole: false,
@@ -243,7 +243,7 @@ describe("migration runner", () => {
           rowCount: 1,
           rows: [
             {
-              role_name: "folio_migrate",
+              role_name: "folio_admin",
               rolsuper: false,
               rolcreatedb: false,
               rolcreaterole: false,
@@ -282,7 +282,7 @@ describe("migration runner", () => {
           rowCount: 1,
           rows: [
             {
-              role_name: "folio_migrate",
+              role_name: "folio_admin",
               rolsuper: false,
               rolcreatedb: false,
               rolcreaterole: false,
@@ -292,7 +292,7 @@ describe("migration runner", () => {
         };
       }
       if (statement.includes("FROM pg_namespace")) {
-        return { rowCount: 1, rows: [{ owner: "folio_migrate" }] };
+        return { rowCount: 1, rows: [{ owner: "folio_admin" }] };
       }
       if (statement.includes("FROM pg_class AS relation")) {
         return { rowCount: 1, rows: [{ has_unowned_objects: true }] };
@@ -331,7 +331,7 @@ describe("migration runner", () => {
           rowCount: 1,
           rows: [
             {
-              role_name: "folio_migrate",
+              role_name: "folio_admin",
               rolsuper: false,
               rolcreatedb: false,
               rolcreaterole: false,

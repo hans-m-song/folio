@@ -1,5 +1,28 @@
 # Folio delivery roadmap
 
+## BILL-T91 — Minimal bootstrap and Folio admin role name
+
+Status: complete on 4 October 2026; verification gates passed.
+
+- [x] Confirm fresh-only bootstrap, separate upgrade and fixed role/schema names.
+- [x] Replace generic provisioning with create roles/schema and default privileges.
+- [x] Rename the migration-role default to folio_admin; retain limited privileges.
+- [x] Separate the previous-role rename/ownership upgrade from initialization.
+- [x] Verify synthetic fresh/upgrade paths, build/tests and commit.
+
+No live database changes or credential-file reads. Existing local Compose edits
+remain outside the commit. Bootstrap is deliberately not repeatable; existing
+roles/schema cause a transactional failure. Existing databases use an explicit
+administrator-run upgrade, never volume deletion or automatic startup transfer.
+
+Bootstrap is 46 SQL lines with a 23-line wrapper; explicit upgrade is 87 lines.
+Disposable PostgreSQL verifies fresh creation, repeat rejection, migration/no-op,
+future default ACLs and denied app DDL/role assumption. Upgrade verification covers
+both previous-role rename and older-state role creation, TCP authentication,
+membership rejection/rollback, preserved data/functions and unrelated ownership.
+Full suite: 1,118 passed, one skipped. Build/TypeScript, runtime image, lint and
+scoped formatting pass. No live configuration or deployment was performed.
+
 ## BILL-T90 — Separate database administration and migration roles
 
 Status: complete on 4 October 2026; verification gates passed.

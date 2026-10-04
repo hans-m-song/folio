@@ -5,7 +5,7 @@ import { applyRuntimePermissions } from "./migration-permissions";
 const config = {
   databaseSchema: "folio_test",
   databaseAppRole: "folio_app",
-  databaseMigrationRole: "folio_migrate",
+  databaseMigrationRole: "folio_admin",
 };
 
 describe("migration runtime permissions", () => {
@@ -68,10 +68,10 @@ describe("migration runtime permissions", () => {
       'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "folio_test" TO "folio_app"',
     );
     expect(statements).toContain(
-      'ALTER DEFAULT PRIVILEGES FOR ROLE "folio_migrate" IN SCHEMA "folio_test" REVOKE ALL ON TABLES FROM "folio_app"',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "folio_admin" IN SCHEMA "folio_test" REVOKE ALL ON TABLES FROM "folio_app"',
     );
     expect(statements).toContain(
-      'ALTER DEFAULT PRIVILEGES FOR ROLE "folio_migrate" IN SCHEMA "folio_test" GRANT SELECT ON TABLES TO "folio_app"',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "folio_admin" IN SCHEMA "folio_test" GRANT SELECT ON TABLES TO "folio_app"',
     );
     expect(statements.some((statement) => statement.includes("SET ROLE"))).toBe(
       false,

@@ -1,6 +1,27 @@
 # Handoff
 
-## Database role split verified — 2026-10-04
+## Bootstrap simplification verified — 2026-10-04
+
+- BILL-T91 approved: fixed folio schema, folio_app runtime role and folio_admin
+  schema-owning migration role. folio_admin is not a cluster superuser.
+- Replace generic repeated setup with fresh-only SQL; move previous-role rename
+  and existing ownership transfer into a separate administrator-run upgrade.
+- Implementation and verification complete. Bootstrap SQL is 46
+  lines, wrapper 23, and explicit upgrade 87. See docs/database-setup.md.
+- Keep FOLIO_MIGRATION_DATABASE_URL and password/config key names unchanged.
+  No actual env/PII reads, no live DB changes, preserve unrelated Compose edits.
+- Upgrade supports renaming the previous folio_migrate role or creating folio_admin
+  if absent; both paths verified. Runtime permissions and nonprivileged flags hold.
+  Membership rejection rolls back; synthetic data/functions/unrelated owners survive.
+- Final suite: 1,118 passed, one skipped. Build/TypeScript, runtime image, lint,
+  scoped formatting and disposable PostgreSQL checks pass. Before deployment,
+  operator must update migration URL username/role override to folio_admin and
+  run the separate upgrade for an existing database, not rerun fresh bootstrap.
+  Independent source audit passes. All disposable test databases were removed.
+- Executable wrapper mode is restored and regression-tested. Actual fresh Docker
+  initialization completes, not just an explicit shell invocation of the wrapper.
+
+## Previous database role split — 2026-10-04 (superseded by BILL-T91)
 
 - BILL-T90 approved: admin setup creates app/migration roles and schema/defaults;
   migrations run as dedicated migration role, app remains runtime-only CRUD.

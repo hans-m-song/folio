@@ -5,7 +5,7 @@ import { loadMigrationConfig } from "./migration-config";
 
 const valid = {
   FOLIO_MIGRATION_DATABASE_URL:
-    "postgresql://folio_migrate:synthetic@localhost/folio",
+    "postgresql://folio_admin:synthetic@localhost/folio",
   FOLIO_DATABASE_SCHEMA: "folio_test",
 };
 
@@ -15,7 +15,7 @@ describe("migration configuration", () => {
       migrationDatabaseUrl: valid.FOLIO_MIGRATION_DATABASE_URL,
       databaseSchema: "folio_test",
       databaseAppRole: "folio_app",
-      databaseMigrationRole: "folio_migrate",
+      databaseMigrationRole: "folio_admin",
     });
   });
 
@@ -72,7 +72,7 @@ describe("migration configuration", () => {
     expect(() =>
       loadMigrationConfig({
         ...valid,
-        FOLIO_DATABASE_APP_ROLE: "folio_migrate",
+        FOLIO_DATABASE_APP_ROLE: "folio_admin",
       }),
     ).toThrow("roles must be different");
   });
