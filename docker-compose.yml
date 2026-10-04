@@ -44,6 +44,12 @@ services:
       AWS_ACCESS_KEY_ID: folio_local_access
       AWS_SECRET_ACCESS_KEY: folio_local_secret_1234
       AWS_EC2_METADATA_DISABLED: "true"
+      FOLIO_MIGRATION_DATABASE_URL: ""
+      FOLIO_DATABASE_MIGRATION_PASSWORD: ""
+      FOLIO_DATABASE_ADMIN_URL: ""
+      FOLIO_DATABASE_APP_PASSWORD: ""
+      POSTGRES_PASSWORD: ""
+      PGPASSWORD: ""
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,6 +67,8 @@ services:
   folio-migrate:
     image: folio:local
     build: *folio-build
+    env_file:
+      - .env.migrate
     restart: "no"
     command:
       [
@@ -75,7 +83,7 @@ services:
       FOLIO_PRIVATE_MODE: "true"
       FOLIO_BIND_HOST: 0.0.0.0
       FOLIO_ALLOW_CONTAINER_BIND: "true"
-      FOLIO_DATABASE_URL: postgres://folio_owner:folio-local-owner-password@postgres/folio
+      FOLIO_DATABASE_URL: postgres://folio_app:folio-local-app-password@postgres/folio
       FOLIO_DATABASE_SCHEMA: folio
       FOLIO_DATABASE_APP_ROLE: folio_app
       FOLIO_S3_REGION: us-east-1
@@ -89,12 +97,19 @@ services:
       FOLIO_ORIGIN: http://folio.lamarr.axatol.xyz
       FOLIO_AUTH_MODE: local
       FOLIO_LOCAL_PASSWORD: folio-local-password-123
+      FOLIO_DATABASE_MIGRATION_PASSWORD: ""
+      FOLIO_DATABASE_ADMIN_URL: ""
+      FOLIO_DATABASE_APP_PASSWORD: ""
+      POSTGRES_PASSWORD: ""
+      PGPASSWORD: ""
     depends_on:
       postgres:
         condition: service_healthy
 
   postgres:
     image: postgres:17.6-alpine
+    env_file:
+      - .env.migrate
     restart: unless-stopped
     environment:
       POSTGRES_DB: folio
@@ -103,8 +118,8 @@ services:
       FOLIO_DATABASE_APP_PASSWORD: folio-local-app-password
     volumes:
       - folio_postgres_data:/var/lib/postgresql/data
-      - ./ops/init-app-role.sh:/docker-entrypoint-initdb.d/10-init-app-role.sh:ro
-      - ./ops/init-app-role.sql:/opt/folio/init-app-role.sql:ro
+      - ./ops/setup-database.sh:/docker-entrypoint-initdb.d/10-setup-database.sh:ro
+      - ./ops/setup-database.sql:/opt/folio/setup-database.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready --username folio_owner --dbname folio"]
       interval: 5s

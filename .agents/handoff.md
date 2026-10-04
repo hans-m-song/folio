@@ -1,5 +1,28 @@
 # Handoff
 
+## Database role split verified — 2026-10-04
+
+- BILL-T90 approved: admin setup creates app/migration roles and schema/defaults;
+  migrations run as dedicated migration role, app remains runtime-only CRUD.
+- Implementation and verification complete. Admin setup is
+  ops/setup-database.sql/sh; migration config and table grants are separate modules.
+- Required FOLIO_MIGRATION_DATABASE_URL must never fall back to app URL. Default
+  migration role folio_migrate; app folio_app. Roles must differ. Runner verifies
+  migration identity and schema ownership; never creates schema/roles.
+- Existing schema upgrade is admin-only, explicitly enabled and limited to target
+  schema. Preserve schema data and unrelated objects; never REASSIGN OWNED globally.
+- Test using disposable PostgreSQL only. No actual env/secret/PII reads, no live DB
+  changes. Preserve pre-existing dirty Compose image/env/port/health configuration.
+- Full suite: 1,118 passed, one skipped. Build/TypeScript, image, lint, scoped format
+  and source audit pass. Disposable PostgreSQL verifies CRUD/denied DDL, default
+  ACLs and opt-in ownership transfer preserving data and unrelated schema ownership.
+- Bundled migrate applies all 18 SQL files and repeats as a no-op; local-user seed
+  succeeds as runtime role. The default image command remains the nonroot server.
+- Before deployment, operator must configure private migration-only credentials
+  separately and run administrator setup explicitly for an existing data volume.
+  No live setup, ownership transfer or deployment was performed. See
+  docs/database-setup.md. Repo-wide format flags two unchanged document tests.
+
 ## HTTP browser crypto compatibility verified — 2026-10-03
 
 - BILL-T89 approved: retain http://folio.lamarr.axatol.xyz on port 80. HTTP hostname

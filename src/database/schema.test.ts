@@ -30,8 +30,10 @@ describe("Folio schema and migration", () => {
       new URL("../../migrations/0004_folio_oidc_sessions.sql", import.meta.url),
     );
     const authMigration = await readFile(authPath, "utf8");
-    const migratePath = fileURLToPath(new URL("./migrate.ts", import.meta.url));
-    const migrate = await readFile(migratePath, "utf8");
+    const permissionsPath = fileURLToPath(
+      new URL("./migration-permissions.ts", import.meta.url),
+    );
+    const permissions = await readFile(permissionsPath, "utf8");
     expect(migration.match(/CREATE TABLE/g)).toHaveLength(3);
     expect(migration).toContain('"__FOLIO_SCHEMA__"."users"');
     expect(migration).toContain("transactions_artifact_trigger");
@@ -63,11 +65,11 @@ describe("Folio schema and migration", () => {
     expect(authMigration).not.toContain("access_token");
     expect(authMigration).not.toContain("refresh_token");
     expect(authMigration).not.toMatch(/\b(public|DROP)\b/i);
-    expect(migrate).toContain('"auth_sessions"');
-    expect(migrate).toContain('"auth_attempts"');
-    expect(migrate).toContain("SELECT, INSERT, DELETE");
-    expect(migrate).toContain(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "${config.databaseSchema}"."source_artifacts"',
+    expect(permissions).toContain('tables: ["users", "auth_sessions"]');
+    expect(permissions).toContain('tables: ["auth_attempts"]');
+    expect(permissions).toContain("SELECT, INSERT, DELETE");
+    expect(permissions).toMatch(
+      /privileges: "SELECT, INSERT, UPDATE, DELETE",\s*tables: \["source_artifacts"\]/,
     );
   });
 });

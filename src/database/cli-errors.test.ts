@@ -5,7 +5,10 @@ import {
   ProposalAuthorizationError,
   ProposalCredentialEligibilityError,
 } from "./proposal-repository";
-import { formatDatabaseCliFailure } from "./cli-errors";
+import {
+  formatDatabaseCliFailure,
+  MigrationPreconditionError,
+} from "./cli-errors";
 
 describe("database CLI errors", () => {
   it("identifies missing MCP migrations without exposing database details", () => {
@@ -55,6 +58,25 @@ describe("database CLI errors", () => {
     );
     expect(formatted).toContain("FOLIO_DATABASE_URL");
     expect(formatted).not.toContain("sensitive invalid value");
+  });
+
+  it("sanitizes migration role and schema precondition failures", () => {
+    const roleFailure = formatDatabaseCliFailure("migrate", "migration_role", {
+      code: "42501",
+      message: "unexpected administrator name and connection details",
+    });
+    const schemaFailure = formatDatabaseCliFailure(
+      "migrate",
+      "schema_check",
+      new MigrationPreconditionError("schema_owner_mismatch"),
+    );
+
+    expect(roleFailure).toContain("code=42501");
+    expect(roleFailure).toContain("role lacks permission");
+    expect(schemaFailure).toContain("code=MIGRATION_SCHEMA_OWNER");
+    expect(schemaFailure).toContain("must own the schema");
+    expect(`${roleFailure}\n${schemaFailure}`).not.toContain("postgres");
+    expect(`${roleFailure}\n${schemaFailure}`).not.toContain("private");
   });
 
   it("keeps unknown error messages out of output", () => {

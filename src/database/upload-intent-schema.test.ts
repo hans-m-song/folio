@@ -26,12 +26,12 @@ describe("MCP upload intent migration", () => {
       /"artifact_id" uuid[^\n]*REFERENCES "__FOLIO_SCHEMA__"\."source_artifacts"/,
     );
 
-    const migrator = await readFile(
-      fileURLToPath(new URL("./migrate.ts", import.meta.url)),
+    const permissions = await readFile(
+      fileURLToPath(new URL("./migration-permissions.ts", import.meta.url)),
       "utf8",
     );
-    expect(migrator).toContain(
-      'GRANT SELECT, INSERT ON TABLE "${config.databaseSchema}"."mcp_upload_intents"',
+    expect(permissions).toMatch(
+      /privileges: "SELECT, INSERT",\s*tables: \["mcp_upload_intents"\]/,
     );
   });
 });

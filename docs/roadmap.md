@@ -1,5 +1,33 @@
 # Folio delivery roadmap
 
+## BILL-T90 — Separate database administration and migration roles
+
+Status: complete on 4 October 2026; verification gates passed.
+
+- [x] Confirm separate migration role and runtime-only app permissions.
+- [x] Add idempotent admin role/schema/default-privilege setup and explicit upgrade.
+- [x] Require dedicated migration URL/role; remove schema provisioning from runner.
+- [x] Preserve table-specific runtime CRUD restrictions and shared runtime image.
+- [x] Verify fresh setup, repeats, existing ownership upgrade and role boundaries.
+- [x] Verify build/tests/lint/format and commit scoped changes.
+
+Admin setup owns role/schema provisioning. Migration role owns schema objects;
+app role cannot create objects or assume the migration role. Default privileges
+apply only to future objects created by the specified role; existing ownership
+transfer must be schema-scoped and explicitly enabled. No live database changes,
+credential-file reads, historical migration edits or unrelated Compose staging.
+Verification uses disposable PostgreSQL with synthetic credentials/data only.
+
+The full suite passes 1,118 tests with one skipped. Build/TypeScript, runtime-image
+build, lint, scoped formatting and source audit pass. PostgreSQL checks verify
+runtime CRUD and denied DDL/unsafe writes, migration table/sequence creation,
+read-only future table defaults, ownership-upgrade rollback without opt-in and
+data-preserving schema-scoped transfer with opt-in. The bundled migration command
+applies all 18 migrations, repeats as a no-op, and seeds through the runtime role.
+Repo-wide formatting still flags two unchanged document tests outside this scope.
+Setup rejects an existing app membership in another privileged role, preserving
+the membership and schema on rollback rather than silently removing authority.
+
 ## BILL-T89 — HTTP browser crypto compatibility
 
 Status: complete on 3 October 2026; verification gates pass.

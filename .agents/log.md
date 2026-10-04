@@ -1,5 +1,41 @@
 # Folio standalone decisions
 
+## 2026-10-04 — Separate database administration and migrations
+
+- BILL-T90 uses a dedicated migration role, rather than making the application
+  role an object owner. PostgreSQL ownership permits DDL and privilege changes;
+  restricting CRUD grants alone does not remove those powers from an owner.
+- Administrator setup is separate from the shared runtime-image migration command.
+  Existing schema ownership transfer requires explicit opt-in and is limited to
+  the Folio namespace. Setup and migration share a transaction advisory lock.
+- Migration configuration requires its own connection URL, without fallback to
+  the runtime connection. The runner checks role identity/administrative flags
+  and existing schema, relation and routine ownership before applying SQL.
+- Default table permissions are read-only; existing table-specific write grants
+  are reset and reapplied by the migration runner. Default ACLs belong to the
+  creating role, and schema-specific defaults are additive to global defaults.
+- Migration credentials are separated into an operator-managed private file.
+  No credential files were read or created, and no live database changes were made.
+- Full synthetic suite passes 1,118 tests with one skipped. Production build,
+  TypeScript, runtime-image build, lint and scoped formatting pass. Repo-wide
+  formatting reports two unchanged tests outside this task: reconciliation and
+  storage. Disposable PostgreSQL checks pass for runtime CRUD/denied DDL and
+  unsafe writes, migration DDL/default ACLs, and data-preserving ownership transfer.
+- The built runtime image applies all 18 migrations using the dedicated role;
+  repeat execution is a no-op. Local-user seeding succeeds through the runtime
+  connection. Independent source audit passes after aligning identifier validation,
+  rejecting all dedicated-role memberships and clearing provisioning credentials
+  from both application and migration services.
+- Existing schema upgrade without opt-in rolls back. With opt-in, schema, table
+  and function ownership transfers while synthetic rows/function results and an
+  unrelated schema remain unchanged. Legacy global/schema write defaults are
+  removed; new migration-owned tables grant app reads, not writes, and sequences
+  grant usage/read access.
+- PostgreSQL confirms NOINHERIT alone still permits SET ROLE into a membership;
+  setup rejects the synthetic privileged membership and preserves existing state
+  on rollback. Verification did not execute the optional temporary harness or
+  additional seeded column-ACL/direct-migrator-membership cases.
+
 ## 2026-10-03 — HTTP browser compatibility regression
 
 - BILL-T88 proxy checks used Node/curl and did not exercise browser secure-context

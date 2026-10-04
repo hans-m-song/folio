@@ -156,8 +156,8 @@ describe("tax review snapshot migration", () => {
       ),
       "utf8",
     );
-    const migrator = await readFile(
-      fileURLToPath(new URL("./migrate.ts", import.meta.url)),
+    const permissions = await readFile(
+      fileURLToPath(new URL("./migration-permissions.ts", import.meta.url)),
       "utf8",
     );
 
@@ -178,8 +178,8 @@ describe("tax review snapshot migration", () => {
     expect(migration).toContain("tax_review_snapshots_append_only_trigger");
     expect(migration).toContain("BEFORE UPDATE OR DELETE");
     expect(migration).toContain("ON DELETE RESTRICT");
-    expect(migrator).toContain(
-      'GRANT SELECT, INSERT ON TABLE "${config.databaseSchema}"."tax_review_snapshots"',
+    expect(permissions).toMatch(
+      /privileges: "SELECT, INSERT",\s*tables: \["tax_review_snapshots"\]/,
     );
   });
 });

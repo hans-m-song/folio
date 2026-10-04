@@ -7,6 +7,7 @@
     "build": "vite build && tsc --noEmit",
     "backup": "sh ops/backup.sh",
     "build:database": "node ops/build-database-tools.mjs",
+    "database:setup": "sh ops/setup-database.sh",
     "dev": "vite dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

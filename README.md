@@ -45,6 +45,13 @@ PostgreSQL remains on the stack network. `docker compose down` stops the stack
 without deleting its named data volumes. Removing those volumes destroys the
 local database and stored artifacts.
 
+Database provisioning is an administrator-only operation, separate from migrations.
+The migration role owns the Folio schema and objects; the runtime role receives
+table-specific CRUD permissions and cannot assume the migration role. See
+[database setup](docs/database-setup.md) before configuring a new database or
+upgrading ownership on an existing one. Migration credentials belong in the
+separate `.env.migrate` file, not the runtime credential file.
+
 Local password login creates the same expiring, revocable server session used by
 the application permission checks. It is rejected in production mode. Google
 OIDC remains the production authentication path, but this Compose file is not a

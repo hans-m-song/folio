@@ -2,15 +2,19 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 
-import { loadConfig } from "../config";
-import { formatDatabaseCliFailure } from "./cli-errors";
+import {
+  formatDatabaseCliFailure,
+  MigrationPreconditionError,
+} from "./cli-errors";
+import { loadMigrationConfig } from "./migration-config";
+import { applyRuntimePermissions } from "./migration-permissions";
 import { requiredMigrationIds } from "./migrations";
 
 let stage = "configuration";
 let pool: pg.Pool | undefined;
 let transactionOpen = false;
 try {
-  const config = loadConfig(process.env);
+  const config = loadMigrationConfig(process.env);
   stage = "load_migrations";
   const migrations = await Promise.all(
     requiredMigrationIds.map(async (id) => ({
@@ -23,7 +27,10 @@ try {
       ).replaceAll("__FOLIO_SCHEMA__", config.databaseSchema),
     })),
   );
-  pool = new pg.Pool({ connectionString: config.databaseUrl, max: 1 });
+  pool = new pg.Pool({
+    connectionString: config.migrationDatabaseUrl,
+    max: 1,
+  });
   stage = "begin";
   await pool.query("BEGIN");
   transactionOpen = true;
@@ -31,8 +38,61 @@ try {
   await pool.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
     `folio-migrations:${config.databaseSchema}`,
   ]);
+  stage = "migration_role";
+  const identity = await pool.query<{
+    role_name: string;
+    rolsuper: boolean;
+    rolcreatedb: boolean;
+    rolcreaterole: boolean;
+    rolbypassrls: boolean;
+  }>(
+    `SELECT current_user AS role_name, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
+    FROM pg_roles
+    WHERE rolname = current_user`,
+  );
+  const role = identity.rows[0];
+  if (
+    !role ||
+    role.role_name !== config.databaseMigrationRole ||
+    role.rolsuper ||
+    role.rolcreatedb ||
+    role.rolcreaterole ||
+    role.rolbypassrls
+  ) {
+    throw Object.assign(new Error(), { code: "42501" });
+  }
+  stage = "schema_check";
+  const schema = await pool.query<{ owner: string }>(
+    "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
+    [config.databaseSchema],
+  );
+  if (schema.rowCount === 0) {
+    throw new MigrationPreconditionError("schema_missing");
+  }
+  if (schema.rows[0]?.owner !== config.databaseMigrationRole) {
+    throw new MigrationPreconditionError("schema_owner_mismatch");
+  }
+  stage = "ownership";
+  const ownership = await pool.query<{ has_unowned_objects: boolean }>(
+    `SELECT EXISTS (
+      SELECT 1
+      FROM pg_class AS relation
+      JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = $1
+        AND relation.relowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user)
+      UNION ALL
+      SELECT 1
+      FROM pg_proc AS routine
+      JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+      WHERE namespace.nspname = $1
+        AND routine.proowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user)
+    ) AS has_unowned_objects`,
+    [config.databaseSchema],
+  );
+  if (ownership.rows[0]?.has_unowned_objects) {
+    throw Object.assign(new Error(), { code: "42501" });
+  }
   stage = "schema_setup";
-  await pool.query(`CREATE SCHEMA IF NOT EXISTS "${config.databaseSchema}"`);
   await pool.query(
     `CREATE TABLE IF NOT EXISTS "${config.databaseSchema}"."_migrations" (id text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
   );
@@ -53,54 +113,7 @@ try {
     }
   }
   stage = "permissions";
-  await pool.query(
-    `REVOKE CREATE ON SCHEMA "${config.databaseSchema}" FROM PUBLIC`,
-  );
-  await pool.query(
-    `GRANT USAGE ON SCHEMA "${config.databaseSchema}" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE ON TABLE "${config.databaseSchema}"."users", "${config.databaseSchema}"."auth_sessions" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "${config.databaseSchema}"."transactions" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "${config.databaseSchema}"."source_artifacts" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "${config.databaseSchema}"."transaction_artifacts" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE ON TABLE "${config.databaseSchema}"."bank_transactions" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT ON TABLE "${config.databaseSchema}"."bank_transaction_artifacts" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, DELETE ON TABLE "${config.databaseSchema}"."auth_attempts" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE ON TABLE "${config.databaseSchema}"."mcp_credentials" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "${config.databaseSchema}"."mcp_submissions" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT ON TABLE "${config.databaseSchema}"."mcp_upload_intents" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT ON TABLE "${config.databaseSchema}"."tax_review_snapshots" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE ON TABLE "${config.databaseSchema}"."recurring_bill_schedules" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT, INSERT, DELETE ON TABLE "${config.databaseSchema}"."recurring_bill_links" TO "${config.databaseAppRole}"`,
-  );
-  await pool.query(
-    `GRANT SELECT ON TABLE "${config.databaseSchema}"."_migrations" TO "${config.databaseAppRole}"`,
-  );
+  await applyRuntimePermissions(pool, config);
   stage = "commit";
   await pool.query("COMMIT");
   transactionOpen = false;

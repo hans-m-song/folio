@@ -29,14 +29,15 @@ describe("MCP proposal migration", () => {
     );
     expect(migration).toContain("artifact.\"state\" = 'available'");
     expect(migration).toContain("ON DELETE RESTRICT");
-    const migrator = await readFile(
-      fileURLToPath(new URL("./migrate.ts", import.meta.url)),
+    const permissions = await readFile(
+      fileURLToPath(new URL("./migration-permissions.ts", import.meta.url)),
       "utf8",
     );
-    expect(migrator).toContain('"mcp_credentials"');
-    expect(migrator).toContain('"mcp_submissions"');
-    expect(migrator).toContain(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "${config.databaseSchema}"."mcp_submissions"',
+    expect(permissions).toMatch(
+      /privileges: "SELECT, INSERT, UPDATE",\s*tables: \["mcp_credentials"\]/,
+    );
+    expect(permissions).toMatch(
+      /privileges: "SELECT, INSERT, UPDATE, DELETE",\s*tables: \["mcp_submissions"\]/,
     );
   });
 

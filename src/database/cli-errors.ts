@@ -43,6 +43,24 @@ const credentialEligibilityMessages = {
   },
 } as const;
 
+const migrationPreconditionMessages = {
+  schema_missing: {
+    code: "MIGRATION_SCHEMA",
+    message: "Create the configured schema before running migrations.",
+  },
+  schema_owner_mismatch: {
+    code: "MIGRATION_SCHEMA_OWNER",
+    message: "The configured migration role must own the schema.",
+  },
+} as const;
+
+export class MigrationPreconditionError extends Error {
+  constructor(readonly reason: keyof typeof migrationPreconditionMessages) {
+    super();
+    this.name = "MigrationPreconditionError";
+  }
+}
+
 const credentialEligibility = (error: Error) => {
   if (error.name !== "ProposalCredentialEligibilityError") return undefined;
   const participant = (error as Error & { participant?: unknown }).participant;
@@ -69,6 +87,10 @@ export const formatDatabaseCliFailure = (
   stage: string,
   error: unknown,
 ) => {
+  if (operation === "migrate" && error instanceof MigrationPreconditionError) {
+    const failure = migrationPreconditionMessages[error.reason];
+    return `operation=${operation} stage=${stage} code=${failure.code} message="${failure.message}"`;
+  }
   if (error instanceof ZodError) {
     const fields = [
       ...new Set(error.issues.map((issue) => issue.path.join("."))),

@@ -251,6 +251,14 @@ the runtime includes these under `src/database/` and SQL under `migrations/`, so
 the migration runner retains its existing relative file lookup. The default server
 command is unchanged. No pnpm, tsx or build dependency tree is copied into runtime.
 
+Administrator provisioning lives in `ops/setup-database.sh` and
+`ops/setup-database.sql`. It creates separate runtime and migration roles, owns
+the schema through the migration role, and establishes default privileges.
+`database/migration-config.ts` isolates migration connection settings from runtime
+configuration; `database/migration-permissions.ts` owns the table-specific runtime
+grant policy. The runner verifies its role and schema/object ownership before
+applying SQL. Existing ownership transfers require explicit administrator opt-in.
+
 Documents upload directly from the browser after the
 server issues a narrowly scoped presigned request. Local Compose uses a fixed
 synthetic-password login that creates ordinary server sessions; Google client
