@@ -108,8 +108,6 @@ services:
 
   postgres:
     image: postgres:17.6-alpine
-    env_file:
-      - .env.migrate
     restart: unless-stopped
     environment:
       POSTGRES_DB: folio
@@ -118,8 +116,6 @@ services:
       FOLIO_DATABASE_APP_PASSWORD: folio-local-app-password
     volumes:
       - folio_postgres_data:/var/lib/postgresql/data
-      - ./ops/setup-database.sh:/docker-entrypoint-initdb.d/10-setup-database.sh:ro
-      - ./ops/setup-database.sql:/opt/folio/setup-database.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready --username folio_owner --dbname folio"]
       interval: 5s

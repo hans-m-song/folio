@@ -1,6 +1,21 @@
 # Handoff
 
-## Bootstrap simplification verified — 2026-10-04
+## Manual administrator setup verified — 2026-10-04
+
+- BILL-T92 confirmed: no automatic application-role/schema provisioning from
+  PostgreSQL startup. Keep setup script as optional manual administrator tool.
+- Compose init mounts/PostgreSQL migration env-file dependency are removed;
+  optional manual scripts and regression guards remain. Verification complete.
+- New order: start PostgreSQL, manually provision roles/schema, run migrations,
+  then start app. Migration runner preconditions remain unchanged.
+- No actual credential files/environment values or live DB were inspected or
+  changed. Preserve pre-existing local Compose images/env files/ports/health edits.
+- Full suite passes 1,119 tests with one skipped. TypeScript, scoped lint/format
+  and staged/worktree Compose validation pass without resolving credential files.
+  Independent audit passes; Compose setup instructions use an administrator's
+  manual container psql command rather than assuming a published host DB port.
+
+## Previous bootstrap simplification — 2026-10-04 (startup superseded by BILL-T92)
 
 - BILL-T91 approved: fixed folio schema, folio_app runtime role and folio_admin
   schema-owning migration role. folio_admin is not a cluster superuser.

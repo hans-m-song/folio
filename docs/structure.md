@@ -256,6 +256,9 @@ Administrator provisioning lives in `ops/setup-database.sh` and
 the fixed folio schema through folio_admin, and establishes default privileges.
 Fresh setup fails on existing objects. `ops/upgrade-database-owner.sql` separately
 renames the previous migration role and transfers existing Folio object ownership.
+These are optional administrator-run tools, never automatic PostgreSQL init hooks
+or migration-job provisioning. Compose starts PostgreSQL without mounting setup
+scripts; application roles/schema must already exist before migrations run.
 `database/migration-config.ts` isolates migration connection settings from runtime
 configuration; `database/migration-permissions.ts` owns the table-specific runtime
 grant policy. The runner verifies its role and schema/object ownership before

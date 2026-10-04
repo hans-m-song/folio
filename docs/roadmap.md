@@ -1,5 +1,23 @@
 # Folio delivery roadmap
 
+## BILL-T92 — Manual administrator provisioning only
+
+Status: complete on 4 October 2026; verification gates passed.
+
+- [x] Confirm removal of automatic setup while retaining the optional admin tool.
+- [x] Remove PostgreSQL setup mounts and migration credential-file dependency.
+- [x] Document manual provisioning before migration/application startup.
+- [x] Verify configuration/source regression and commit scoped changes.
+
+The migration job already requires an existing schema and dedicated role; retain
+that fail-closed boundary. Do not read credentials, change live databases, or stage
+unrelated local Compose settings. Existing SQL setup/upgrade tools remain manual.
+
+Full suite: 1,119 passed, one skipped. TypeScript and scoped lint/format pass.
+Both staged and worktree Compose validate without env resolution; a source
+regression prevents automatic setup mounts and PostgreSQL migration-file loading.
+No live deployment, DB writes or credential-file reads were performed.
+
 ## BILL-T91 — Minimal bootstrap and Folio admin role name
 
 Status: complete on 4 October 2026; verification gates passed.

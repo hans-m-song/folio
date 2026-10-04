@@ -2,16 +2,17 @@ import { readFile, stat } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 const readSetupSources = async () => {
-  const [setupSql, upgradeSql, shell] = await Promise.all([
+  const [setupSql, upgradeSql, shell, compose] = await Promise.all([
     readFile(new URL("../../ops/setup-database.sql", import.meta.url), "utf8"),
     readFile(
       new URL("../../ops/upgrade-database-owner.sql", import.meta.url),
       "utf8",
     ),
     readFile(new URL("../../ops/setup-database.sh", import.meta.url), "utf8"),
+    readFile(new URL("../../docker-compose.yml", import.meta.url), "utf8"),
   ]);
 
-  return { setupSql, upgradeSql, shell };
+  return { setupSql, upgradeSql, shell, compose };
 };
 
 describe("database setup sources", () => {
@@ -76,7 +77,7 @@ describe("database setup sources", () => {
     expect(setupSql).toContain("REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC");
   });
 
-  it("executes Docker initialization as a child with connection fallbacks", async () => {
+  it("supports the optional manual administrator wrapper with connection fallbacks", async () => {
     const { shell } = await readSetupSources();
 
     const wrapper = await stat(
@@ -92,6 +93,22 @@ describe("database setup sources", () => {
     expect(shell).toContain("FOLIO_DATABASE_APP_PASSWORD");
     expect(shell).toContain("FOLIO_DATABASE_MIGRATION_PASSWORD");
     expect(shell).not.toContain("--username)");
+  });
+
+  it("keeps database setup manual and migrations in their separate service", async () => {
+    const { compose } = await readSetupSources();
+    const postgresService = compose.match(
+      /^ {2}postgres:\n([\s\S]*?)(?=^ {2}[a-z][a-z0-9_-]*:\n|^networks:)/m,
+    )?.[1];
+    const migrationService = compose.match(
+      /^ {2}folio-migrate:\n([\s\S]*?)(?=^ {2}[a-z][a-z0-9_-]*:\n|^networks:)/m,
+    )?.[1];
+
+    expect(compose).not.toMatch(/setup-database\.(?:sh|sql)\s*:/i);
+    expect(compose).not.toContain("docker-entrypoint-initdb.d");
+    expect(postgresService).toBeDefined();
+    expect(postgresService).not.toMatch(/^[ \t]*-[ \t]*\.env\.migrate[ \t]*$/m);
+    expect(migrationService).toContain("node src/database/migrate.mjs");
   });
 
   it("guards and renames the existing migration role in the one-time upgrade", async () => {

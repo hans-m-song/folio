@@ -13,8 +13,9 @@ replication or RLS-bypass powers. The runtime role cannot assume it.
 
 Run `pnpm database:setup` with `psql` installed and an administrator connection
 configured through standard PostgreSQL settings (`PGHOST`, `PGPORT`, `PGDATABASE`,
-`PGUSER` and secure password handling). Docker initialization can use
-`POSTGRES_USER` and `POSTGRES_DB` as fallbacks. The wrapper does not load files.
+`PGUSER` and secure password handling). The wrapper accepts
+`POSTGRES_USER` and `POSTGRES_DB` as connection fallbacks, but no container invokes
+this script automatically. The wrapper does not load files.
 
 Required password inputs are `FOLIO_DATABASE_APP_PASSWORD` and
 `FOLIO_DATABASE_MIGRATION_PASSWORD`; use distinct passwords. Passwords are not command-line arguments;
@@ -25,6 +26,46 @@ schema, and default privileges. Names are fixed. It deliberately fails and rolls
 back when a role or schema already exists: it is not a repeatable repair tool.
 Default table access is SELECT; sequence access is USAGE/SELECT; function execution
 is granted to the app rather than PUBLIC. Migrations supply table-specific writes.
+
+For a new Compose installation, the explicit order is:
+
+```text
+Start PostgreSQL → admin provisions roles/schema → run migrations → start Folio
+```
+
+Start only PostgreSQL first:
+
+```sh
+docker compose up --detach postgres
+```
+
+Compose does not publish a PostgreSQL host port by default. An administrator can
+manually apply the SQL through the running container, with both role-password
+inputs exported in their shell. Replace
+the username/database if your cluster administrator settings differ:
+
+```sh
+docker compose exec --no-tty \
+  --env FOLIO_DATABASE_APP_PASSWORD \
+  --env FOLIO_DATABASE_MIGRATION_PASSWORD \
+  postgres psql --no-psqlrc --username folio_owner --dbname folio \
+  < ops/setup-database.sql
+```
+
+For an externally reachable database, the administrator can instead run
+`pnpm database:setup` locally using the PostgreSQL connection settings above.
+The migration and app connections must use `folio_admin` and `folio_app`, respectively.
+
+After administrator setup succeeds:
+
+```sh
+docker compose build folio
+docker compose run --rm --no-deps folio-migrate node src/database/migrate.mjs
+docker compose up --detach
+```
+
+The final startup also runs the configured migration/local-user seed job before
+the application. Keep any required authentication and storage configuration ready.
 
 ## Existing database upgrade
 
@@ -53,13 +94,17 @@ and reapplies the runtime write policy. Do not resume the app between those step
 
 ## Docker Compose and migrations
 
-Private `.env.migrate` supplies the migration URL/password to the migration job
-and PostgreSQL initialization, not to the application. No credentials are bundled
-into the shared application image. PostgreSQL invokes fresh setup only for a new
-data directory; existing volumes do not rerun initialization after a restart.
+Private `.env.migrate` supplies the migration URL to the migration job. Neither
+PostgreSQL nor the application loads this file. Supply provisioning passwords
+explicitly to the administrator's manual setup process. No credentials or
+administrator provisioning scripts are bundled into the shared application image.
+No Folio role/schema creation runs during PostgreSQL startup, even on a fresh
+volume. Starting the entire stack before manual provisioning causes migrations to
+fail rather than automatically creating missing roles or schema.
 
 The migration job uses the shared image's one-shot command, then seeds the local
-user through the runtime connection. The default image command remains the server.
+application-login record through the runtime connection; this is not PostgreSQL
+role creation. The default image command remains the server.
 To run migrations without seeding:
 
 ```sh

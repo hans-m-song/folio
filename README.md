@@ -9,6 +9,10 @@ existing Traefik on the external `services_public` Docker network. Tailscale Ser
 forwards tailnet port 80 to Traefik at `127.0.0.1:18080`. This deployment is
 **not suitable for public exposure**.
 
+For a fresh database, start PostgreSQL and have an administrator provision the
+Folio roles/schema before the full-stack command below. Setup is manual, not a
+PostgreSQL startup hook; see [database setup](docs/database-setup.md).
+
 ```sh
 docker compose up --build --detach
 ```
@@ -27,7 +31,7 @@ exposure.
 
 The application and migration job share the `folio:local` runtime image. Its
 default command starts the server; the migration job instead runs bundled Node
-entrypoints, then exits. It creates an idempotent synthetic administrator after
+entrypoints, then exits. It seeds an idempotent local application-login record after
 successful migrations. To run migrations without local-user seeding, override
 the command while PostgreSQL is running:
 

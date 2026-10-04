@@ -1,5 +1,23 @@
 # Folio standalone decisions
 
+## 2026-10-04 — Administrator provisioning is manual
+
+- BILL-T92 removes the Folio setup-script mounts from PostgreSQL initialization.
+  PostgreSQL no longer loads the migration credential file. It still initializes
+  its own cluster administrator/database; no Folio app/migration roles or schema
+  are provisioned automatically.
+- The optional setup and ownership-upgrade SQL tools remain administrator-run.
+  Fresh deployment order is PostgreSQL, manual role/schema setup, migrations, app.
+  The migration runner's role/schema checks and runtime grant policy are unchanged.
+- Full suite passes 1,119 tests with one skipped; TypeScript, focused lint/format
+  and both worktree/staged Compose validation pass without resolving env files.
+  Regression guards prevent reintroducing init mounts or the PostgreSQL dependency
+  on the migration env file. No live database/configuration changes were made.
+- Independent audit passes. Canonical Compose does not publish PostgreSQL to the
+  host, so docs prefer manual administrator psql through container exec; host
+  setup applies to separately reachable databases. The seed is clarified as an
+  application-login record, not PostgreSQL role creation.
+
 ## 2026-10-04 — Minimal fixed-name bootstrap
 
 - BILL-T91 replaces the reusable setup/repair tool with fresh-only provisioning:
