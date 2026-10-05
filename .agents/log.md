@@ -1,5 +1,33 @@
 # Folio standalone decisions
 
+## 2026-10-05 — Safe error contract and default operation diagnostics
+
+- BILL-T94 uses a domain policy catalog and framework-independent server logger.
+  Public errors expose approved code/message/recovery/reference, not causes,
+  stacks or operational configuration. Private structured events use validated
+  UUIDs, fixed stages/paths, bounded ID lists and allowlisted provider/count data.
+- Successful mutations/sign-ins and failures log by default; reads/health successes
+  stay quiet. Weak-map deduplication preserves a failure reference across adapters;
+  asynchronous context isolates actors/resources across concurrent operations.
+- Cleanup wrappers retain the primary classification and attach sanitized secondary
+  diagnostics. Interrupted database mutations require checking the existing outcome
+  before retrying; no automatic retry was introduced.
+- Installed TanStack converts standard-schema issues into plain Error messages.
+  A typed schema.parse callback preserves Zod error classification without parsing
+  arbitrary error messages. Its Error serializer drops custom properties; the UI
+  reconstructs approved recovery data from the surviving code/reference message.
+  Root UI avoids duplicate browser reports for already-handled server failures.
+- Auth preserves existing provisioning/eligibility rules while adding safe reason
+  codes and references. MCP preserves transport behavior and adds tool references;
+  runtime CLI failure and cleanup logging are sanitized. Existing migration CLI
+  formatting and the user's dirty migration/config/Compose changes remain protected.
+- Full final suite: 1,173 passed, one skipped; five pre-existing migration-role test
+  failures remain because local role checks are commented out. A recurring UI timer
+  test failed once in parallel, then passed isolated and in the final full run.
+  TypeScript, scoped lint/format, production application and database-tool builds
+  pass. Independent source/framework/serialization checks pass. No live calls,
+  credential-file/environment value reads or personal-data inspection occurred.
+
 ## 2026-10-04 — Schema ownership is not a migration prerequisite
 
 - BILL-T93 separates namespace administration from migration object ownership.

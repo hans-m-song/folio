@@ -1,5 +1,31 @@
 # Folio delivery roadmap
 
+## BILL-T94 — Standard error handling and operational diagnostics
+
+Status: complete on 5 October 2026; verified application slices committed.
+
+- [x] Audit authentication, operations, MCP, commands and returned failure results.
+- [x] Confirm public/private contract, validated IDs and success/failure logging.
+- [x] Implement shared error policy, safe diagnostics and transport adapters.
+- [x] Integrate auth, validation/session/health, MCP and runtime commands.
+- [x] Verify privacy, metadata, correlation, cleanup and deduplication regressions.
+- [x] Document verified behavior and commit verified feature slices.
+
+Frontend exposes approved public messages/codes, recovery and a copyable reference,
+not operational details. Backend includes operation/stage, validated relevant IDs
+and allowlisted metadata. Log successful sign-ins/mutations and failures by default;
+successful reads/health checks remain quiet. Preserve unknown mutation outcomes and
+primary errors during cleanup. No secret/PII reads, live VPS/Google/database checks,
+automatic retries, new logging service or unrelated migration/config edits.
+
+Independent framework/serializer verification passes, including a typed validator
+adapter for TanStack's standard-schema error conversion and safe frontend recovery
+decoding after Error-only serialization. TypeScript, scoped lint/format, application
+and database-tool builds pass. Full suite: 1,173 passed, one skipped; five existing
+failures remain in the user's dirty migration-role tests. An unchanged recurring
+UI timing test failed once under the full parallel run, then passed both isolated
+and in the final full run. No live deployment/database/Google checks were performed.
+
 ## BILL-T93 — Privilege-based migration schema access
 
 Status: complete on 4 October 2026; verification gates passed.

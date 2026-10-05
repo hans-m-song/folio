@@ -16,6 +16,29 @@ not perform accounting, payments, BAS submission, or ATO lodgement.
 Folio is the product and application name. “Supplier-expense register” remains the
 domain description; the name does not imply a general ledger or accounting system.
 
+## Error and operational logging contract
+
+BILL-T94 separates browser-safe failures from private server diagnostics. Public
+failures contain an approved code, message, recovery action and correlation
+reference. Raw provider messages, server stacks and causes never enter that
+response. Authentication does not reveal whether a particular account exists.
+
+Server JSON events use `folio.operation`, version 1, with timestamp, operation,
+phase and, for failures, correlation ID, severity, internal/public codes and
+retryability. Optional fields include a fixed stage, validated UUID resource/actor
+IDs, bounded ID lists, numeric counts and allowlisted provider codes. Request
+logging omits query strings, dynamic identifiers, bodies and credentials. Emails,
+names, document contents, SQL parameters and raw source errors are excluded.
+
+Successful mutations and sign-ins log by default; successful reads and health
+checks remain quiet. Expected rejections use info/warn; unexpected faults use
+error. Operation and transport adapters reuse one failure reference rather than
+logging the same failure repeatedly. Cleanup faults retain the primary failure
+and add linked sanitized diagnostics. A mutation with an uncertain database
+outcome requires checking the existing result before another attempt; Folio
+does not automatically retry it. Logs are operational diagnostics, not an
+immutable financial audit trail.
+
 ## Confirmed boundaries
 
 - Recurring bills are separate monthly/annual forecasts with Upcoming/Pending/Due

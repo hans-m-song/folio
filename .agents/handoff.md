@@ -1,5 +1,24 @@
 # Handoff
 
+## Standard error handling verified — 2026-10-05
+
+- BILL-T94 confirmed: browser-safe public code/message/recovery/reference;
+  private operation/stage, validated IDs and allowlisted metadata. Default logs
+  include successful mutations/sign-ins and all failures; successful reads are quiet.
+- Shared policy/logger, framework validators/middleware, frontend recovery,
+  auth routes/service/repository and MCP/runtime commands are implemented.
+  Independent source, real-framework and Seroval verification pass; TypeScript,
+  scoped lint/format and production application/database-tool builds pass.
+- Final full suite: 1,173 passed, one skipped, five baseline migration failures.
+  One unchanged recurring UI timer test failed transiently, then passed isolated
+  and in the final full run. No live calls, credential/environment file reads or
+  personal data inspection occurred. Verified source slices are committed:
+  86602d1 (shared/framework/UI), 1d32be7 (auth), e204a56 (MCP/commands).
+- Baseline full suite has five failures in the user's dirty migrate.test.ts;
+  migrate.ts role preflight is commented out locally. Do not fix/revert/stage it.
+- Preserve pre-existing migration/config/Compose/database-setup edits and historical
+  handoff URL renames. Commit verified error-handling slices only after verification.
+
 ## Privilege-based migration schema access verified — 2026-10-04
 
 - BILL-T93 user confirmed administrator-owned schema, migration USAGE/CREATE,

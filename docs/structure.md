@@ -54,6 +54,16 @@ are owned by `database` and `documents`, respectively.
 
 ## Ownership boundaries
 
+`domain/errors.ts` owns the error policy catalog and public failure contract.
+`server/error-handling.ts` owns classification, sanitization, correlation,
+deduplication and asynchronous diagnostic context without a framework dependency.
+`server/diagnostics.ts` adapts operations to that interface. Authentication routes,
+MCP and commands use the same logging interface while retaining their own transport
+protocols. `server/error-middleware.ts` handles framework input/request failures;
+`src/start.ts` installs the middleware and explicitly preserves server-function CSRF
+protection. No adapter may log raw request/provider objects or serialize private
+causes into public errors.
+
 `browser/crypto.ts` centralizes upload SHA-256/base64 and client-generated UUIDs.
 HTTP hostname clients use compatible hashing and secure random bytes when native
 secure-context APIs are absent. Routes retain their file validation and upload
