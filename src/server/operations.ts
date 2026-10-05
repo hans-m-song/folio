@@ -1,3 +1,4 @@
+import { validateInput } from "./input-validation";
 import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
@@ -32,6 +33,8 @@ import {
   type Permission,
 } from "./authorization";
 import { runOperation, writeClientRenderFailure } from "./diagnostics";
+import { reportServerFailure, setDiagnosticContext } from "./error-handling";
+import { AppError } from "../domain/errors";
 import { runtime } from "./runtime";
 import { enumFilterSchema } from "../domain/enum-filter";
 import { bulkTransactionRequestSchema } from "../domain/bulk-transactions";
@@ -45,6 +48,7 @@ const authorize = async (required: readonly Permission[]) => {
   });
   for (const permission of required.slice(1))
     requirePermission(actor, permission);
+  setDiagnosticContext({ ids: { actorId: actor.id } });
   return { actor, current };
 };
 
@@ -328,12 +332,12 @@ export const healthCheck = createServerFn({ method: "GET" }).handler(async () =>
       return { status: "ok" as const };
     },
     {},
-    { log: "none" },
+    { log: "failures" },
   ),
 );
 
 export const reportClientRenderFailure = createServerFn({ method: "POST" })
-  .validator(clientRenderFailureSchema)
+  .validator(validateInput(clientRenderFailureSchema))
   .handler(async ({ data }) =>
     runOperation("Report client render failure", async () => {
       const { actor } = await authorize(operationPermissions.getTransaction);
@@ -345,7 +349,11 @@ export const reportClientRenderFailure = createServerFn({ method: "POST" })
   );
 
 export const listWorkspace = createServerFn({ method: "GET" })
-  .validator(z.object({ search: z.string().max(200).default("") }).strict())
+  .validator(
+    validateInput(
+      z.object({ search: z.string().max(200).default("") }).strict(),
+    ),
+  )
   .handler(async ({ data }) =>
     runOperation("Load workspace", async () => {
       const { actor, current } = await authorize(
@@ -376,7 +384,7 @@ export const listTransactionFormOptions = createServerFn({
 );
 
 export const listTransactionPage = createServerFn({ method: "GET" })
-  .validator(transactionPageQuerySchema)
+  .validator(validateInput(transactionPageQuerySchema))
   .handler(async ({ data }) =>
     runOperation("List transactions", async () => {
       const { actor, current } = await authorize(
@@ -390,7 +398,7 @@ export const listTransactionPage = createServerFn({ method: "GET" })
   );
 
 export const previewBulkTransactionEdit = createServerFn({ method: "POST" })
-  .validator(bulkTransactionRequestSchema)
+  .validator(validateInput(bulkTransactionRequestSchema))
   .handler(async ({ data }) =>
     runOperation("Preview transaction bulk edit", async () => {
       const { actor, current } = await authorize(
@@ -401,7 +409,7 @@ export const previewBulkTransactionEdit = createServerFn({ method: "POST" })
   );
 
 export const applyBulkTransactionEdit = createServerFn({ method: "POST" })
-  .validator(bulkTransactionRequestSchema)
+  .validator(validateInput(bulkTransactionRequestSchema))
   .handler(async ({ data }) =>
     runOperation(
       "Apply transaction bulk edit",
@@ -452,7 +460,7 @@ export const listUsers = createServerFn({ method: "GET" }).handler(async () =>
 );
 
 export const getTransaction = createServerFn({ method: "GET" })
-  .validator(z.object({ id: z.string().uuid() }).strict())
+  .validator(validateInput(z.object({ id: z.string().uuid() }).strict()))
   .handler(async ({ data }) =>
     runOperation("Load transaction", async () => {
       const { actor, current } = await authorize(
@@ -463,7 +471,9 @@ export const getTransaction = createServerFn({ method: "GET" })
   );
 
 export const getProposedDraftEvidence = createServerFn({ method: "GET" })
-  .validator(z.object({ transactionId: z.string().uuid() }).strict())
+  .validator(
+    validateInput(z.object({ transactionId: z.string().uuid() }).strict()),
+  )
   .handler(async ({ data }) =>
     runOperation("Load proposed draft evidence", async () => {
       const { actor, current } = await authorize(
@@ -477,7 +487,9 @@ export const getProposedDraftEvidence = createServerFn({ method: "GET" })
   );
 
 export const discardProposedDraftEvidence = createServerFn({ method: "POST" })
-  .validator(z.object({ transactionId: z.string().uuid() }).strict())
+  .validator(
+    validateInput(z.object({ transactionId: z.string().uuid() }).strict()),
+  )
   .handler(async ({ data }) =>
     runOperation(
       "Discard proposed draft evidence",
@@ -496,7 +508,7 @@ export const discardProposedDraftEvidence = createServerFn({ method: "POST" })
   );
 
 export const saveManualTransaction = createServerFn({ method: "POST" })
-  .validator(z.unknown())
+  .validator(validateInput(z.unknown()))
   .handler(async ({ data }) =>
     runOperation(
       "Save manual transaction",
@@ -505,11 +517,19 @@ export const saveManualTransaction = createServerFn({ method: "POST" })
           operationPermissions.saveManualTransaction,
         );
         const parsed = manualTransactionSavePayloadSchema.safeParse(data);
-        if (!parsed.success)
+        if (!parsed.success) {
+          reportServerFailure(
+            new AppError({ code: "INPUT_INVALID", stage: "input_validation" }),
+            {
+              operation: "save_manual_transaction",
+              metadata: { issueCount: parsed.error.issues.length },
+            },
+          );
           return {
             status: "invalid" as const,
             issues: safeManualTransactionServerIssues(parsed.error),
           };
+        }
         const transaction = parsed.data.id
           ? parsed.data.artifactIds === undefined
             ? current.repository.updateManual(
@@ -534,21 +554,25 @@ export const saveManualTransaction = createServerFn({ method: "POST" })
                 parsed.data.transaction,
                 parsed.data.artifactIds,
               );
-        return { status: "saved" as const, transaction: await transaction };
+        const saved = await transaction;
+        setDiagnosticContext({ ids: { transactionId: saved.id } });
+        return { status: "saved" as const, transaction: saved };
       },
       {},
-      { mutation: true },
+      { mutation: true, successWhen: (result) => result.status === "saved" },
     ),
   );
 
 export const voidTransaction = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        id: z.string().uuid(),
-        expectedUpdatedAt: z.string().datetime(),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          id: z.string().uuid(),
+          expectedUpdatedAt: z.string().datetime(),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -570,12 +594,14 @@ export const voidTransaction = createServerFn({ method: "POST" })
 
 export const deleteDraftTransaction = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        id: z.string().uuid(),
-        expectedUpdatedAt: z.string().datetime(),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          id: z.string().uuid(),
+          expectedUpdatedAt: z.string().datetime(),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -597,13 +623,15 @@ export const deleteDraftTransaction = createServerFn({ method: "POST" })
 
 export const createUser = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        email: z.string().trim().email(),
-        displayName: z.string().trim().max(200).nullable(),
-        role: userRoleSchema,
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          email: z.string().trim().email(),
+          displayName: z.string().trim().max(200).nullable(),
+          role: userRoleSchema,
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -612,7 +640,9 @@ export const createUser = createServerFn({ method: "POST" })
         const { actor, current } = await authorize(
           operationPermissions.createUser,
         );
-        return current.repository.createUser(actor.id, data);
+        const user = await current.repository.createUser(actor.id, data);
+        setDiagnosticContext({ ids: { userId: user.id } });
+        return user;
       },
       {},
       { mutation: true },
@@ -621,13 +651,15 @@ export const createUser = createServerFn({ method: "POST" })
 
 export const updateUser = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        id: z.string().uuid(),
-        role: userRoleSchema,
-        active: z.boolean(),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          id: z.string().uuid(),
+          role: userRoleSchema,
+          active: z.boolean(),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -671,7 +703,7 @@ const uploadSchema = z
   });
 
 export const startArtifactUpload = createServerFn({ method: "POST" })
-  .validator(uploadSchema)
+  .validator(validateInput(uploadSchema))
   .handler(async ({ data }) =>
     runOperation(
       "Start artifact upload",
@@ -681,7 +713,12 @@ export const startArtifactUpload = createServerFn({ method: "POST" })
         );
         if (data.artifactProfile && isBankArtifactProfile(data.artifactProfile))
           requirePermission(actor, permissions.bankActivityImport);
-        return current.documents.startUpload({ ...data, actorId: actor.id });
+        const result = await current.documents.startUpload({
+          ...data,
+          actorId: actor.id,
+        });
+        setDiagnosticContext({ ids: { artifactId: result?.artifact?.id } });
+        return result;
       },
       {},
       { mutation: true },
@@ -689,7 +726,7 @@ export const startArtifactUpload = createServerFn({ method: "POST" })
   );
 
 export const confirmArtifactUpload = createServerFn({ method: "POST" })
-  .validator(z.object({ id: z.string().uuid() }).strict())
+  .validator(validateInput(z.object({ id: z.string().uuid() }).strict()))
   .handler(async ({ data }) =>
     runOperation(
       "Confirm artifact upload",
@@ -711,7 +748,7 @@ export const confirmArtifactUpload = createServerFn({ method: "POST" })
   );
 
 export const approveArtifact = createServerFn({ method: "POST" })
-  .validator(z.object({ id: z.string().uuid() }).strict())
+  .validator(validateInput(z.object({ id: z.string().uuid() }).strict()))
   .handler(async ({ data }) =>
     runOperation(
       "Approve PDF artifact",
@@ -728,7 +765,7 @@ export const approveArtifact = createServerFn({ method: "POST" })
   );
 
 export const downloadArtifact = createServerFn({ method: "POST" })
-  .validator(z.object({ id: z.string().uuid() }).strict())
+  .validator(validateInput(z.object({ id: z.string().uuid() }).strict()))
   .handler(async ({ data }) =>
     runOperation("Download artifact", async () => {
       const { actor, current } = await authorize(
@@ -739,7 +776,7 @@ export const downloadArtifact = createServerFn({ method: "POST" })
   );
 
 export const previewArtifactForReview = createServerFn({ method: "POST" })
-  .validator(z.object({ id: z.string().uuid() }).strict())
+  .validator(validateInput(z.object({ id: z.string().uuid() }).strict()))
   .handler(async ({ data }) =>
     runOperation("Preview PDF artifact for review", async () => {
       const { actor, current } = await authorize(
@@ -750,7 +787,7 @@ export const previewArtifactForReview = createServerFn({ method: "POST" })
   );
 
 export const rejectArtifact = createServerFn({ method: "POST" })
-  .validator(z.object({ id: z.string().uuid() }).strict())
+  .validator(validateInput(z.object({ id: z.string().uuid() }).strict()))
   .handler(async ({ data }) =>
     runOperation(
       "Reject artifact",
@@ -766,7 +803,7 @@ export const rejectArtifact = createServerFn({ method: "POST" })
   );
 
 export const deleteArtifact = createServerFn({ method: "POST" })
-  .validator(z.object({ id: z.string().uuid() }).strict())
+  .validator(validateInput(z.object({ id: z.string().uuid() }).strict()))
   .handler(async ({ data }) =>
     runOperation(
       "Delete artifact",
@@ -864,78 +901,80 @@ const artifactListSortSchema = z
 
 export const listArtifacts = createServerFn({ method: "GET" })
   .validator(
-    z
-      .object({
-        search: z.string().max(200).optional(),
-        profile: artifactProfileSchema.nullable().optional(),
-        state: z
-          .enum([
-            "pending",
-            "awaiting_review",
-            "available",
-            "rejected",
-            "superseded",
-            "abandoned",
-            "deleting",
-          ])
-          .nullable()
-          .optional(),
-        from: z.string().date().nullable().optional(),
-        to: z.string().date().nullable().optional(),
-        linkage: z.enum(["all", "linked", "unlinked"]).optional(),
-        filters: z.array(artifactListFilterSchema).max(20).optional(),
-        sort: z.array(artifactListSortSchema).max(7).optional(),
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).max(100_000).default(0),
-      })
-      .strict()
-      .transform((input) => {
-        const legacyFilters: z.infer<typeof artifactListFilterSchema>[] = [];
-        const search = input.search?.trim();
-        if (search)
-          legacyFilters.push({
-            field: "filename",
-            operator: "contains",
-            value: search,
-          });
-        if (input.profile)
-          legacyFilters.push({
-            field: "profile",
-            operator: "is",
-            value: input.profile,
-          });
-        if (input.state)
-          legacyFilters.push({
-            field: "state",
-            operator: "is",
-            value: input.state,
-          });
-        if (input.from)
-          legacyFilters.push({
-            field: "uploaded",
-            operator: "greater_than_or_equal",
-            value: input.from,
-          });
-        if (input.to)
-          legacyFilters.push({
-            field: "uploaded",
-            operator: "less_than_or_equal",
-            value: input.to,
-          });
-        if (input.linkage && input.linkage !== "all")
-          legacyFilters.push({
-            field: "linkage",
-            operator: "is",
-            value: input.linkage,
-          });
+    validateInput(
+      z
+        .object({
+          search: z.string().max(200).optional(),
+          profile: artifactProfileSchema.nullable().optional(),
+          state: z
+            .enum([
+              "pending",
+              "awaiting_review",
+              "available",
+              "rejected",
+              "superseded",
+              "abandoned",
+              "deleting",
+            ])
+            .nullable()
+            .optional(),
+          from: z.string().date().nullable().optional(),
+          to: z.string().date().nullable().optional(),
+          linkage: z.enum(["all", "linked", "unlinked"]).optional(),
+          filters: z.array(artifactListFilterSchema).max(20).optional(),
+          sort: z.array(artifactListSortSchema).max(7).optional(),
+          limit: z.number().int().min(1).max(100).default(25),
+          offset: z.number().int().min(0).max(100_000).default(0),
+        })
+        .strict()
+        .transform((input) => {
+          const legacyFilters: z.infer<typeof artifactListFilterSchema>[] = [];
+          const search = input.search?.trim();
+          if (search)
+            legacyFilters.push({
+              field: "filename",
+              operator: "contains",
+              value: search,
+            });
+          if (input.profile)
+            legacyFilters.push({
+              field: "profile",
+              operator: "is",
+              value: input.profile,
+            });
+          if (input.state)
+            legacyFilters.push({
+              field: "state",
+              operator: "is",
+              value: input.state,
+            });
+          if (input.from)
+            legacyFilters.push({
+              field: "uploaded",
+              operator: "greater_than_or_equal",
+              value: input.from,
+            });
+          if (input.to)
+            legacyFilters.push({
+              field: "uploaded",
+              operator: "less_than_or_equal",
+              value: input.to,
+            });
+          if (input.linkage && input.linkage !== "all")
+            legacyFilters.push({
+              field: "linkage",
+              operator: "is",
+              value: input.linkage,
+            });
 
-        return {
-          filters: input.filters ?? legacyFilters,
-          sort: input.sort ?? [{ field: "uploaded", direction: "desc" }],
-          limit: input.limit,
-          offset: input.offset,
-        };
-      }),
+          return {
+            filters: input.filters ?? legacyFilters,
+            sort: input.sort ?? [{ field: "uploaded", direction: "desc" }],
+            limit: input.limit,
+            offset: input.offset,
+          };
+        }),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation("List artifacts", async () => {
@@ -948,12 +987,17 @@ export const listArtifacts = createServerFn({ method: "GET" })
 
 export const findArtifactFilenameMatches = createServerFn({ method: "GET" })
   .validator(
-    z
-      .object({
-        profile: artifactProfileSchema,
-        filenames: z.array(z.string().trim().min(1).max(255)).min(1).max(1000),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          profile: artifactProfileSchema,
+          filenames: z
+            .array(z.string().trim().min(1).max(255))
+            .min(1)
+            .max(1000),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation("Find artifact filename matches", async () => {
@@ -970,12 +1014,14 @@ export const findArtifactFilenameMatches = createServerFn({ method: "GET" })
 
 export const linkTransactionArtifact = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        transactionId: z.string().uuid(),
-        artifactId: z.string().uuid(),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          transactionId: z.string().uuid(),
+          artifactId: z.string().uuid(),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -998,12 +1044,14 @@ export const linkTransactionArtifact = createServerFn({ method: "POST" })
 
 export const unlinkTransactionArtifact = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        transactionId: z.string().uuid(),
-        artifactId: z.string().uuid(),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          transactionId: z.string().uuid(),
+          artifactId: z.string().uuid(),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -1025,7 +1073,9 @@ export const unlinkTransactionArtifact = createServerFn({ method: "POST" })
   );
 
 export const importStripeCsv = createServerFn({ method: "POST" })
-  .validator(z.object({ artifactId: z.string().uuid() }).strict())
+  .validator(
+    validateInput(z.object({ artifactId: z.string().uuid() }).strict()),
+  )
   .handler(async ({ data }) =>
     runOperation(
       "Import Stripe CSV",
@@ -1057,12 +1107,14 @@ const stripePreviewRowLimit = 200;
 
 export const previewStripeCsv = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        artifactId: z.string().uuid(),
-        page: z.number().int().min(1).max(100_000).default(1),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          artifactId: z.string().uuid(),
+          page: z.number().int().min(1).max(100_000).default(1),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation("Preview Stripe CSV", async () => {
@@ -1143,13 +1195,15 @@ export const previewStripeCsv = createServerFn({ method: "POST" })
 
 export const getReport = createServerFn({ method: "GET" })
   .validator(
-    z
-      .object({
-        basis: z.enum(["activity", "cash"]),
-        periodType: z.enum(["month", "bas_quarter", "financial_year"]),
-        format: z.enum(["json", "csv"]).default("json"),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          basis: z.enum(["activity", "cash"]),
+          periodType: z.enum(["month", "bas_quarter", "financial_year"]),
+          format: z.enum(["json", "csv"]).default("json"),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation("Load report", async () => {

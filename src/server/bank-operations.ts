@@ -1,3 +1,4 @@
+import { validateInput } from "./input-validation";
 import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
@@ -21,6 +22,8 @@ import {
   safeManualTransactionServerIssues,
 } from "../domain/manual-transaction";
 import { runOperation } from "./diagnostics";
+import { reportServerFailure, setDiagnosticContext } from "./error-handling";
+import { AppError } from "../domain/errors";
 import { runtime } from "./runtime";
 
 const commbankProfile = "commbank_transaction_history_csv_v1" as const;
@@ -35,11 +38,14 @@ const authorize = async (required: readonly Permission[]) => {
   });
   for (const permission of required.slice(1))
     requirePermission(actor, permission);
+  setDiagnosticContext({ ids: { actorId: actor.id } });
   return { actor, current };
 };
 
 export const previewBankCsv = createServerFn({ method: "POST" })
-  .validator(z.object({ artifactId: z.string().uuid() }).strict())
+  .validator(
+    validateInput(z.object({ artifactId: z.string().uuid() }).strict()),
+  )
   .handler(async ({ data }) =>
     runOperation("Preview CommBank CSV", async () => {
       const { actor, current } = await authorize(
@@ -50,12 +56,23 @@ export const previewBankCsv = createServerFn({ method: "POST" })
         data.artifactId,
         commbankProfile,
       );
-      return parseCommBankTransactionHistoryCsv(object.text);
+      const preview = parseCommBankTransactionHistoryCsv(object.text);
+      if (preview.errors.length)
+        reportServerFailure(
+          new AppError({ code: "INPUT_INVALID", stage: "csv_validation" }),
+          {
+            operation: "preview_commbank_csv",
+            metadata: { issueCount: preview.errors.length },
+          },
+        );
+      return preview;
     }),
   );
 
 export const getCsvDuplicateWarnings = createServerFn({ method: "POST" })
-  .validator(z.object({ artifactId: z.string().uuid() }).strict())
+  .validator(
+    validateInput(z.object({ artifactId: z.string().uuid() }).strict()),
+  )
   .handler(async ({ data }) =>
     runOperation("Check CSV duplicate warnings", async () => {
       const { actor, current } = await authorize(
@@ -98,16 +115,18 @@ export const getCsvDuplicateWarnings = createServerFn({ method: "POST" })
 
 export const confirmBankImport = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        artifactId: z.string().uuid(),
-        acknowledgedOverlapFingerprint: z
-          .string()
-          .regex(/^[0-9a-f]{64}$/)
-          .nullable()
-          .default(null),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          artifactId: z.string().uuid(),
+          acknowledgedOverlapFingerprint: z
+            .string()
+            .regex(/^[0-9a-f]{64}$/)
+            .nullable()
+            .default(null),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -141,8 +160,16 @@ export const confirmBankImport = createServerFn({ method: "POST" })
           !preview.rows.length ||
           !preview.earliestDate ||
           !preview.latestDate
-        )
+        ) {
+          reportServerFailure(
+            new AppError({ code: "INPUT_INVALID", stage: "csv_validation" }),
+            {
+              operation: "confirm_commbank_import",
+              metadata: { issueCount: preview.errors.length },
+            },
+          );
           return { status: "invalid" as const, errors: preview.errors };
+        }
         return current.bankRepository.confirmImport({
           actorId: actor.id,
           artifactId: data.artifactId,
@@ -154,12 +181,14 @@ export const confirmBankImport = createServerFn({ method: "POST" })
         });
       },
       {},
-      { mutation: true },
+      { mutation: true, successWhen: (result) => result.status !== "invalid" },
     ),
   );
 
 export const cancelBankImport = createServerFn({ method: "POST" })
-  .validator(z.object({ artifactId: z.string().uuid() }).strict())
+  .validator(
+    validateInput(z.object({ artifactId: z.string().uuid() }).strict()),
+  )
   .handler(async ({ data }) =>
     runOperation(
       "Cancel CommBank import",
@@ -422,7 +451,7 @@ const bankTransactionsListSchema = pageSchema.extend({
 });
 
 export const listBankImports = createServerFn({ method: "GET" })
-  .validator(bankImportsListSchema)
+  .validator(validateInput(bankImportsListSchema))
   .handler(async ({ data }) =>
     runOperation("List bank imports", async () => {
       const { actor, current } = await authorize(
@@ -433,7 +462,7 @@ export const listBankImports = createServerFn({ method: "GET" })
   );
 
 export const listBankTransactions = createServerFn({ method: "GET" })
-  .validator(bankTransactionsListSchema)
+  .validator(validateInput(bankTransactionsListSchema))
   .handler(async ({ data }) =>
     runOperation("List bank activity", async () => {
       const { actor, current } = await authorize(
@@ -454,7 +483,7 @@ const reconciliationQuerySchema = z
   .strict();
 
 export const getBankReconciliation = createServerFn({ method: "GET" })
-  .validator(reconciliationQuerySchema)
+  .validator(validateInput(reconciliationQuerySchema))
   .handler(async ({ data }) =>
     runOperation("Load bank reconciliation", async () => {
       const { actor, current } = await authorize(
@@ -517,7 +546,7 @@ const nextReconciliationQuerySchema = z
   .strict();
 
 export const getNextBankReconciliation = createServerFn({ method: "GET" })
-  .validator(nextReconciliationQuerySchema)
+  .validator(validateInput(nextReconciliationQuerySchema))
   .handler(async ({ data }) =>
     runOperation("Select next unresolved bank row", async () => {
       const { actor, current } = await authorize(
@@ -534,13 +563,15 @@ export const getNextBankReconciliation = createServerFn({ method: "GET" })
 
 export const reconcileBankTransaction = createServerFn({ method: "POST" })
   .validator(
-    z
-      .object({
-        bankTransactionId: z.string().uuid(),
-        expectedRevision: z.string().regex(/^\d+$/),
-        command: bankReconciliationCommandSchema,
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          bankTransactionId: z.string().uuid(),
+          expectedRevision: z.string().regex(/^\d+$/),
+          command: bankReconciliationCommandSchema,
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -575,7 +606,7 @@ const createAndMatchSchema = z
   });
 
 export const createAndMatchBankTransaction = createServerFn({ method: "POST" })
-  .validator(z.unknown())
+  .validator(validateInput(z.unknown()))
   .handler(async ({ data }) =>
     runOperation(
       "Create and match bank transaction",
@@ -584,17 +615,25 @@ export const createAndMatchBankTransaction = createServerFn({ method: "POST" })
           operationPermissions.createAndMatchBankTransaction,
         );
         const parsed = createAndMatchSchema.safeParse(data);
-        if (!parsed.success)
+        if (!parsed.success) {
+          reportServerFailure(
+            new AppError({ code: "INPUT_INVALID", stage: "input_validation" }),
+            {
+              operation: "create_and_match_bank_transaction",
+              metadata: { issueCount: parsed.error.issues.length },
+            },
+          );
           return {
             status: "invalid" as const,
             issues: safeManualTransactionServerIssues(parsed.error),
           };
+        }
         return current.bankRepository.createAndMatch({
           actorId: actor.id,
           ...parsed.data,
         });
       },
       {},
-      { mutation: true },
+      { mutation: true, successWhen: (result) => result.status !== "invalid" },
     ),
   );

@@ -1,3 +1,4 @@
+import { validateInput } from "./input-validation";
 import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
@@ -15,6 +16,7 @@ import {
   resolveAuthorizedActor,
 } from "./authorization";
 import { runOperation } from "./diagnostics";
+import { setDiagnosticContext } from "./error-handling";
 import { runtime } from "./runtime";
 
 const revisionSchema = z.string().datetime({ offset: true });
@@ -66,6 +68,7 @@ const authorize = async (
   });
   for (const permission of required.slice(1))
     requirePermission(actor, permission);
+  setDiagnosticContext({ ids: { actorId: actor.id } });
   return { actor, current };
 };
 
@@ -89,14 +92,16 @@ export const getRecurringBillsWorkspace = createServerFn({
   method: "GET",
 })
   .validator(
-    z
-      .object({
-        sourceTransactionId: z.string().uuid().optional(),
-        unresolvedOffset: z.number().int().min(0).max(120_000).optional(),
-      })
-      .strict()
-      .optional()
-      .default({}),
+    validateInput(
+      z
+        .object({
+          sourceTransactionId: z.string().uuid().optional(),
+          unresolvedOffset: z.number().int().min(0).max(120_000).optional(),
+        })
+        .strict()
+        .optional()
+        .default({}),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation("Load recurring bills", async () => {
@@ -167,7 +172,11 @@ export const getRecurringBillAttention = createServerFn({
 );
 
 export const previewRecurringBill = createServerFn({ method: "POST" })
-  .validator(z.object({ schedule: recurringBillScheduleInputSchema }).strict())
+  .validator(
+    validateInput(
+      z.object({ schedule: recurringBillScheduleInputSchema }).strict(),
+    ),
+  )
   .handler(async ({ data }) =>
     runOperation("Preview recurring bill", async () => {
       const { actor, current } = await authorize("previewRecurringBill");
@@ -179,13 +188,18 @@ export const previewRecurringBill = createServerFn({ method: "POST" })
   );
 
 export const saveRecurringBill = createServerFn({ method: "POST" })
-  .validator(saveRecurringBillSchema)
+  .validator(validateInput(saveRecurringBillSchema))
   .handler(async ({ data }) =>
     runOperation(
       "Save recurring bill",
       async () => {
         const { actor, current } = await authorize("saveRecurringBill");
-        return current.recurringBillRepository.save(actor.id, data);
+        const schedule = await current.recurringBillRepository.save(
+          actor.id,
+          data,
+        );
+        setDiagnosticContext({ ids: { scheduleId: schedule.id } });
+        return schedule;
       },
       {},
       { mutation: true },
@@ -193,7 +207,7 @@ export const saveRecurringBill = createServerFn({ method: "POST" })
   );
 
 export const setRecurringBillActive = createServerFn({ method: "POST" })
-  .validator(recurringBillActiveSchema)
+  .validator(validateInput(recurringBillActiveSchema))
   .handler(async ({ data }) =>
     runOperation(
       "Change recurring bill activity",
@@ -208,7 +222,11 @@ export const setRecurringBillActive = createServerFn({ method: "POST" })
 
 export const linkRecurringBillTransaction = createServerFn({ method: "POST" })
   .validator(
-    recurringBillAssociationSchema.extend({ transactionId: z.string().uuid() }),
+    validateInput(
+      recurringBillAssociationSchema.extend({
+        transactionId: z.string().uuid(),
+      }),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation(
@@ -228,7 +246,7 @@ export const linkRecurringBillTransaction = createServerFn({ method: "POST" })
   );
 
 export const unlinkRecurringBillTransaction = createServerFn({ method: "POST" })
-  .validator(recurringBillAssociationSchema)
+  .validator(validateInput(recurringBillAssociationSchema))
   .handler(async ({ data }) =>
     runOperation(
       "Unlink recurring bill transaction",

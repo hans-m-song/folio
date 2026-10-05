@@ -1,3 +1,4 @@
+import { validateInput } from "./input-validation";
 import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
@@ -20,6 +21,7 @@ import {
   resolveAuthorizedActor,
 } from "./authorization";
 import { runOperation } from "./diagnostics";
+import { setDiagnosticContext } from "./error-handling";
 import { runtime } from "./runtime";
 
 const financialYearSchema = z
@@ -45,6 +47,7 @@ const authorizedRuntime = async (
   });
   for (const permission of required.slice(1))
     requirePermission(actor, permission);
+  setDiagnosticContext({ ids: { actorId: actor.id } });
   return { actor, current };
 };
 
@@ -94,7 +97,7 @@ const loadSourceReview = async (
 };
 
 export const getTaxWorksheet = createServerFn({ method: "GET" })
-  .validator(financialYearSchema)
+  .validator(validateInput(financialYearSchema))
   .handler(async ({ data }) =>
     runOperation("Load tax worksheet", async () => {
       const { actor, current } = await authorizedRuntime("getTaxWorksheet");
@@ -129,7 +132,7 @@ export const getTaxWorksheet = createServerFn({ method: "GET" })
   );
 
 export const exportTaxSource = createServerFn({ method: "GET" })
-  .validator(financialYearSchema)
+  .validator(validateInput(financialYearSchema))
   .handler(async ({ data }) =>
     runOperation("Export tax source ledger", async () => {
       const { actor, current } = await authorizedRuntime("exportTaxSource");
@@ -147,53 +150,66 @@ export const exportTaxSource = createServerFn({ method: "GET" })
   );
 
 export const reviewTaxWorksheet = createServerFn({ method: "POST" })
-  .validator(taxReviewInputSchema)
+  .validator(validateInput(taxReviewInputSchema))
   .handler(async ({ data }) =>
-    runOperation("Review tax worksheet", async () => {
-      const { actor, current } = await authorizedRuntime("reviewTaxWorksheet");
-      const [source, partnerOptions] = await Promise.all([
-        loadSourceReview(current, actor.id, data.financialYearStartYear),
-        current.repository.listTaxPartnerOptions(actor.id),
-      ]);
-      if (source.fingerprint !== data.sourceFingerprint)
-        throw new FolioDiagnosticError({
-          category: "validation",
-          code: "TAX_SOURCE_CHANGED",
-          retryable: true,
-          httpStatus: 409,
-        });
-      if (!source.readyForReview)
-        throw new FolioDiagnosticError({
-          category: "validation",
-          code: "TAX_SOURCE_INCOMPLETE",
-          retryable: false,
-          httpStatus: 409,
-        });
-      const activePartnerIds = new Set(partnerOptions.map(({ id }) => id));
-      if (data.partners.some(({ userId }) => !activePartnerIds.has(userId)))
-        throw new FolioDiagnosticError({
-          category: "validation",
-          code: "TAX_PARTNER_INACTIVE",
-          retryable: false,
-          httpStatus: 422,
-        });
-      const snapshot = buildReviewedTaxSnapshot(source, data, partnerOptions);
-      return current.taxReviewRepository.createReviewedSnapshot(actor.id, {
-        financialYearStartYear: data.financialYearStartYear,
-        snapshot,
-        sourceFingerprint: source.fingerprint,
-      });
-    }),
+    runOperation(
+      "Review tax worksheet",
+      async () => {
+        const { actor, current } =
+          await authorizedRuntime("reviewTaxWorksheet");
+        const [source, partnerOptions] = await Promise.all([
+          loadSourceReview(current, actor.id, data.financialYearStartYear),
+          current.repository.listTaxPartnerOptions(actor.id),
+        ]);
+        if (source.fingerprint !== data.sourceFingerprint)
+          throw new FolioDiagnosticError({
+            category: "validation",
+            code: "TAX_SOURCE_CHANGED",
+            retryable: true,
+            httpStatus: 409,
+          });
+        if (!source.readyForReview)
+          throw new FolioDiagnosticError({
+            category: "validation",
+            code: "TAX_SOURCE_INCOMPLETE",
+            retryable: false,
+            httpStatus: 409,
+          });
+        const activePartnerIds = new Set(partnerOptions.map(({ id }) => id));
+        if (data.partners.some(({ userId }) => !activePartnerIds.has(userId)))
+          throw new FolioDiagnosticError({
+            category: "validation",
+            code: "TAX_PARTNER_INACTIVE",
+            retryable: false,
+            httpStatus: 422,
+          });
+        const snapshot = buildReviewedTaxSnapshot(source, data, partnerOptions);
+        const review = await current.taxReviewRepository.createReviewedSnapshot(
+          actor.id,
+          {
+            financialYearStartYear: data.financialYearStartYear,
+            snapshot,
+            sourceFingerprint: source.fingerprint,
+          },
+        );
+        setDiagnosticContext({ ids: { reviewId: review.id } });
+        return review;
+      },
+      {},
+      { mutation: true },
+    ),
   );
 
 export const exportTaxWorksheet = createServerFn({ method: "GET" })
   .validator(
-    z
-      .object({
-        snapshotId: z.string().uuid(),
-        format: z.enum(["csv", "json"]),
-      })
-      .strict(),
+    validateInput(
+      z
+        .object({
+          snapshotId: z.string().uuid(),
+          format: z.enum(["csv", "json"]),
+        })
+        .strict(),
+    ),
   )
   .handler(async ({ data }) =>
     runOperation("Export tax worksheet", async () => {

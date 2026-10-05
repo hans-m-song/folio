@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { createElement, type ComponentType } from "react";
 import type * as TanStackRouter from "@tanstack/react-router";
 
@@ -47,6 +47,21 @@ afterEach(() => {
 });
 
 describe("root error logging", () => {
+  it("retains safe server references without duplicate render reports or uncertain-mutation retry controls", () => {
+    mocks.pathname = "/transactions";
+    const reference = "11111111-1111-4111-8111-111111111111";
+    render(
+      createElement(ErrorBoundary, {
+        error: new Error(
+          `The result is uncertain. Check Folio before attempting the operation again. Code DB_OUTCOME_UNKNOWN. Reference ${reference}.`,
+        ),
+        reset: vi.fn(),
+      }),
+    );
+    expect(screen.getByText(reference)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(mocks.reportClientRenderFailure).not.toHaveBeenCalled();
+  });
   it("skips authentication for health while protecting private pages", async () => {
     const beforeLoad = (
       Route as unknown as {

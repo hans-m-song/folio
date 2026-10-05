@@ -15,15 +15,15 @@ vi.mock("@tanstack/react-start/server", () => ({
 }));
 vi.mock("@tanstack/react-start", () => ({
   createServerFn: () => {
-    let validator: { parse(value: unknown): unknown };
+    let validator: (value: unknown) => unknown;
     const builder = {
-      validator(schema: { parse(value: unknown): unknown }) {
+      validator(schema: (value: unknown) => unknown) {
         validator = schema;
         return builder;
       },
       handler(callback: (input: { data: unknown }) => Promise<unknown>) {
         return async (input: { data: unknown }) =>
-          callback({ data: validator.parse(input.data) });
+          callback({ data: validator(input.data) });
       },
     };
     return builder;

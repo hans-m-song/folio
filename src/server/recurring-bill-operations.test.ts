@@ -27,15 +27,15 @@ vi.mock("@tanstack/react-start/server", () => ({
 
 vi.mock("@tanstack/react-start", () => ({
   createServerFn: () => {
-    let validator: { parse(value: unknown): unknown } | undefined;
+    let validator: ((value: unknown) => unknown) | undefined;
     const builder = {
-      validator(schema: { parse(value: unknown): unknown }) {
+      validator(schema: (value: unknown) => unknown) {
         validator = schema;
         return builder;
       },
       handler(callback: (input: { data: unknown }) => Promise<unknown>) {
         return (input: { data?: unknown } = {}) =>
-          callback({ data: validator?.parse(input.data) });
+          callback({ data: validator?.(input.data) });
       },
     };
     return builder;
@@ -80,6 +80,7 @@ const association = {
 describe("in-app recurring bill operations", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    current.recurringBillRepository.save.mockResolvedValue({ id: scheduleId });
     current.repository.getTransaction.mockResolvedValue(null);
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-01T14:30:00.000Z"));

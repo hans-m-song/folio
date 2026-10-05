@@ -66,15 +66,15 @@ vi.mock("@tanstack/react-start/server", () => ({
 
 vi.mock("@tanstack/react-start", () => ({
   createServerFn: () => {
-    let validator: { parse(value: unknown): unknown } | undefined;
+    let validator: ((value: unknown) => unknown) | undefined;
     const builder = {
-      validator(schema: { parse(value: unknown): unknown }) {
+      validator(schema: (value: unknown) => unknown) {
         validator = schema;
         return builder;
       },
       handler(callback: (input: { data: unknown }) => Promise<unknown>) {
         return (input: { data?: unknown } = {}) =>
-          callback({ data: validator?.parse(input.data) });
+          callback({ data: validator?.(input.data) });
       },
     };
     return builder;
@@ -372,7 +372,7 @@ describe("server operation authorization", () => {
         message: "Cannot read properties of undefined",
       });
       expect(event.correlationId).toMatch(/^[0-9a-f-]{36}$/);
-      expect(infoWriter).toHaveBeenCalledTimes(6);
+      expect(infoWriter).not.toHaveBeenCalled();
     } finally {
       errorWriter.mockRestore();
       infoWriter.mockRestore();
@@ -435,7 +435,7 @@ describe("server operation authorization", () => {
         message: "trim is not a function; the value is not a string",
       });
       expect(event.correlationId).toMatch(/^[0-9a-f-]{36}$/);
-      expect(infoWriter).toHaveBeenCalledTimes(1);
+      expect(infoWriter).not.toHaveBeenCalled();
     } finally {
       errorWriter.mockRestore();
       infoWriter.mockRestore();
@@ -942,17 +942,15 @@ describe("server operation authorization", () => {
     expect((clientFailure as Error).message).not.toContain(artifactId);
     expect((clientFailure as Error).message).not.toContain(primary.message);
     const record = JSON.parse(loggedLine);
-    expect(record.sourceError.cleanupFailure).toEqual({
+    expect(record.cleanupFailure).toEqual({
       artifactId,
-      error: {
-        name: cleanup.name,
-        code: cleanup.code,
-        message: cleanup.message,
-      },
+      code: "DATABASE_UNAVAILABLE",
+      category: "database",
+      retryable: true,
+      provider: "postgres",
+      sqlstate: "08006",
     });
-    expect(JSON.stringify(record.sourceError.cleanupFailure)).not.toContain(
-      "unsafe.csv",
-    );
+    expect(JSON.stringify(record.cleanupFailure)).not.toContain("unsafe.csv");
   });
 
   it("returns a saved discriminator only after repository persistence", async () => {
@@ -1007,6 +1005,9 @@ describe("server operation authorization", () => {
       displayName: "New user",
       role: "member" as const,
     };
+    current.repository.createUser.mockResolvedValueOnce({
+      id: "11111111-1111-4111-8111-111111111111",
+    });
     await createUser({ data: input });
     expect(current.repository.createUser).toHaveBeenCalledWith(
       administrator.id,

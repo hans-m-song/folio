@@ -1,3 +1,4 @@
+import { validateInput } from "./input-validation";
 import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
@@ -9,6 +10,7 @@ import {
 } from "../domain/proposals";
 import { permissions, resolveAuthorizedActor } from "./authorization";
 import { runOperation } from "./diagnostics";
+import { setDiagnosticContext } from "./error-handling";
 import { runtime } from "./runtime";
 
 const scopePatternSchema = z
@@ -43,6 +45,7 @@ const authorizeAdministrator = async () => {
     permission: permissions.userAdmin,
     session: (token) => current.auth.session(token),
   });
+  setDiagnosticContext({ ids: { actorId: actor.id } });
   return { current, actor };
 };
 
@@ -55,7 +58,7 @@ export const listMcpCredentials = createServerFn({ method: "GET" }).handler(
 );
 
 export const createMcpCredential = createServerFn({ method: "POST" })
-  .validator(createInputSchema)
+  .validator(validateInput(createInputSchema))
   .handler(async ({ data }) =>
     runOperation(
       "Create access token",
@@ -72,6 +75,7 @@ export const createMcpCredential = createServerFn({ method: "POST" })
             tokenHash: secret.tokenHash,
           }),
         );
+        setDiagnosticContext({ ids: { credentialId: credential.id } });
         return { credential, token: secret.token };
       },
       {},
@@ -80,7 +84,7 @@ export const createMcpCredential = createServerFn({ method: "POST" })
   );
 
 export const revokeMcpCredential = createServerFn({ method: "POST" })
-  .validator(revokeInputSchema)
+  .validator(validateInput(revokeInputSchema))
   .handler(async ({ data }) =>
     runOperation(
       "Revoke access token",

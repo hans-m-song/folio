@@ -13,6 +13,7 @@ import { getCurrentSession } from "../auth/session-server";
 import { safeReturnPath } from "../auth/http";
 import { AppShell } from "../components/app-shell";
 import { sanitizeClientRenderFailure } from "../domain/diagnostics";
+import { publicFailureFrom } from "../domain/public-failure";
 import appCss from "../styles/app.css?url";
 import { privateGate, reportClientRenderFailure } from "../server/operations";
 
@@ -121,27 +122,39 @@ function FolioErrorBoundary({
   reset: () => void;
 }) {
   const lastReportedError = useRef<unknown>(null);
+  const failure = publicFailureFrom(error);
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
 
   useEffect(() => {
-    if (pathname === "/health") return;
+    if (pathname === "/health" || failure) return;
     if (lastReportedError.current === error) return;
     lastReportedError.current = error;
     void reportClientRenderFailure({
       data: sanitizeClientRenderFailure(error),
     }).catch(() => undefined);
-  }, [error, pathname]);
+  }, [error, pathname, failure]);
 
   return (
     <main className="boundary-page">
       <p className="eyebrow">Private preparation workspace</p>
       <h1>Folio is unavailable</h1>
-      <p>Folio could not load this page. Try again or reload the page.</p>
-      <button type="button" onClick={reset}>
-        Try again
-      </button>{" "}
+      <p>
+        {failure?.message ??
+          "Folio could not load this page. Try again or reload the page."}
+      </p>
+      {failure && (
+        <p>
+          Code {failure.code}. Reference <code>{failure.reference}</code>.
+        </p>
+      )}
+      {(!failure || failure.recovery === "retry") && (
+        <button type="button" onClick={reset}>
+          Try again
+        </button>
+      )}{" "}
+      {failure?.recovery === "sign_in" && <a href="/auth/login">Sign in</a>}{" "}
       <button type="button" onClick={() => window.location.reload()}>
         Reload page
       </button>
