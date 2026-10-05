@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { OperationCleanupError } from "../domain/errors";
 import { localAdministratorEmail } from "../auth/local";
 import { AuthRepository, AuthenticationRejectedError } from "./auth-repository";
 
@@ -39,6 +40,31 @@ describe("authentication repository", () => {
     });
     expect(query.mock.calls[0]?.[0]).toContain("DELETE");
     expect(query.mock.calls[0]?.[0]).toContain("RETURNING");
+  });
+
+  it("distinguishes an expired authorization attempt from an unknown state", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          nonce: "nonce",
+          code_verifier: "verifier",
+          return_path: "/",
+          expires_at: new Date("2026-09-19T23:59:59.000Z"),
+        },
+      ],
+    });
+    const repository = new AuthRepository({ query } as never, "folio");
+
+    await expect(
+      repository.consumeLoginAttempt(
+        "a".repeat(64),
+        new Date("2026-09-20T00:00:00.000Z"),
+      ),
+    ).rejects.toMatchObject({
+      code: "AUTH_STATE_EXPIRED",
+      stage: "state_expiration",
+    });
+    expect(query).toHaveBeenCalledTimes(1);
   });
 
   it("atomically binds an unbound user and inserts a hash-only session", async () => {
@@ -212,6 +238,76 @@ describe("authentication repository", () => {
       "role IN ('administrator', 'member')",
     );
     expect(clientQuery.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it("tags a subject binding conflict separately from an ineligible user", async () => {
+    const boundUser = {
+      ...eligibleUser,
+      google_subject: "different-subject",
+    };
+    const clientQuery = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [boundUser] })
+      .mockResolvedValueOnce({});
+    const repository = new AuthRepository(
+      {
+        connect: vi.fn().mockResolvedValue({
+          query: clientQuery,
+          release: vi.fn(),
+        }),
+      } as never,
+      "folio",
+    );
+
+    await expect(
+      repository.createSessionForIdentity({
+        email: boundUser.email,
+        subject: "synthetic-subject",
+        tokenHash: "m".repeat(64),
+        rotatedTokenHash: null,
+        expiresAt: new Date("2026-09-20T12:00:00.000Z"),
+        now: new Date("2026-09-20T00:00:00.000Z"),
+      }),
+    ).rejects.toMatchObject({
+      code: "AUTH_SUBJECT_MISMATCH",
+      stage: "subject_binding",
+    });
+    expect(clientQuery.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it("preserves the transaction failure when rollback cleanup also fails", async () => {
+    const rollbackError = new Error("synthetic rollback fault");
+    const primaryError = new AuthenticationRejectedError();
+    const release = vi.fn();
+    const clientQuery = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(primaryError)
+      .mockRejectedValueOnce(rollbackError);
+    const repository = new AuthRepository(
+      {
+        connect: vi.fn().mockResolvedValue({ query: clientQuery, release }),
+      } as never,
+      "folio",
+    );
+
+    const failure = await repository
+      .createSessionForIdentity({
+        email: eligibleUser.email,
+        subject: "synthetic-subject",
+        tokenHash: "n".repeat(64),
+        rotatedTokenHash: null,
+        expiresAt: new Date("2026-09-20T12:00:00.000Z"),
+        now: new Date("2026-09-20T00:00:00.000Z"),
+      })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(OperationCleanupError);
+    expect(failure).toMatchObject({ stage: "transaction_rollback" });
+    expect((failure as OperationCleanupError).primaryError).toBe(primaryError);
+    expect((failure as OperationCleanupError).cleanupError).toBe(rollbackError);
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it("requires non-revoked, unexpired sessions for currently eligible users", async () => {

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
+import * as oidc from "openid-client";
+
+import { AuthenticationRejectedError } from "../database/auth-repository";
 import { sha256 } from "./crypto";
 import {
   AuthService,
@@ -222,8 +225,122 @@ describe("OIDC login and session orchestration", () => {
         new URL(`${config.callbackUrl}?code=code&state=replayed`),
         null,
       ),
-    ).rejects.toThrow(InvalidAuthenticationResponseError);
+    ).rejects.toMatchObject({
+      code: "AUTH_STATE_INVALID",
+      stage: "state_lookup",
+    });
     expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+  });
+
+  it("records missing state before looking up or exchanging the callback", async () => {
+    const consumeLoginAttempt = vi.fn();
+    const exchangeAuthorizationCode = vi.fn();
+    const service = new AuthService(
+      { consumeLoginAttempt } as unknown as AuthRepositoryOperations,
+      config,
+      { exchangeAuthorizationCode } as unknown as OidcOperations,
+    );
+
+    await expect(
+      service.complete(new URL(config.callbackUrl), null),
+    ).rejects.toMatchObject({
+      code: "AUTH_STATE_MISSING",
+      stage: "state_validation",
+    });
+    expect(consumeLoginAttempt).not.toHaveBeenCalled();
+    expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+  });
+
+  it("separates expected OIDC rejection from provider failure", async () => {
+    const attempt = {
+      nonce: "nonce",
+      codeVerifier: "verifier",
+      returnPath: "/",
+      expiresAt: new Date("2026-09-20T00:10:00.000Z"),
+    };
+    const repository = {
+      consumeLoginAttempt: vi.fn().mockResolvedValue(attempt),
+    } as unknown as AuthRepositoryOperations;
+    const callback = new URL(`${config.callbackUrl}?code=code&state=state`);
+    const expectedFailure = new oidc.AuthorizationResponseError(
+      "Provider rejected authentication",
+      { cause: new URLSearchParams({ error: "access_denied" }) },
+    );
+    const expectedService = new AuthService(repository, config, {
+      exchangeAuthorizationCode: vi.fn().mockRejectedValue(expectedFailure),
+    } as unknown as OidcOperations);
+
+    await expect(
+      expectedService.complete(callback, null),
+    ).rejects.toMatchObject({
+      code: "AUTH_CODE_EXCHANGE_FAILED",
+      stage: "code_exchange",
+    });
+
+    const providerService = new AuthService(repository, config, {
+      exchangeAuthorizationCode: vi
+        .fn()
+        .mockRejectedValue(new Error("synthetic provider fault")),
+    } as unknown as OidcOperations);
+    await expect(
+      providerService.complete(callback, null),
+    ).rejects.toMatchObject({
+      code: "AUTH_PROVIDER_UNAVAILABLE",
+      stage: "code_exchange",
+    });
+  });
+
+  it("preserves eligibility and session creation failure categories", async () => {
+    const attempt = {
+      nonce: "nonce",
+      codeVerifier: "verifier",
+      returnPath: "/",
+      expiresAt: new Date("2026-09-20T00:10:00.000Z"),
+    };
+    const oidcOperations = {
+      exchangeAuthorizationCode: vi.fn().mockResolvedValue({
+        iss: config.googleIssuer,
+        sub: "synthetic-subject",
+        email: user.email,
+        email_verified: true,
+        hd: config.hostedDomain,
+      }),
+    } as unknown as OidcOperations;
+    const callback = new URL(`${config.callbackUrl}?code=code&state=state`);
+
+    const ineligibleService = new AuthService(
+      {
+        consumeLoginAttempt: vi.fn().mockResolvedValue(attempt),
+        createSessionForIdentity: vi
+          .fn()
+          .mockRejectedValue(new AuthenticationRejectedError()),
+      } as unknown as AuthRepositoryOperations,
+      config,
+      oidcOperations,
+    );
+    await expect(
+      ineligibleService.complete(callback, null),
+    ).rejects.toMatchObject({
+      code: "AUTH_USER_NOT_ELIGIBLE",
+      stage: "user_eligibility",
+    });
+
+    const sessionFailureService = new AuthService(
+      {
+        consumeLoginAttempt: vi.fn().mockResolvedValue(attempt),
+        createSessionForIdentity: vi
+          .fn()
+          .mockRejectedValue(new Error("synthetic database fault")),
+      } as unknown as AuthRepositoryOperations,
+      config,
+      oidcOperations,
+    );
+    await expect(
+      sessionFailureService.complete(callback, null),
+    ).rejects.toMatchObject({
+      code: "AUTH_SESSION_CREATION_FAILED",
+      stage: "session_creation",
+    });
   });
 
   it("hashes session tokens for lookup and logout revocation", async () => {
@@ -250,6 +367,36 @@ describe("OIDC login and session orchestration", () => {
       sha256("opaque-session"),
       new Date("2026-09-20T00:00:00.000Z"),
     );
+  });
+
+  it("tags session lookup and logout dependency failures", async () => {
+    const sessionService = new AuthService(
+      {
+        getActiveSession: vi
+          .fn()
+          .mockRejectedValue(new Error("synthetic lookup")),
+      } as unknown as AuthRepositoryOperations,
+      config,
+      {} as OidcOperations,
+    );
+    await expect(
+      sessionService.session("opaque-session"),
+    ).rejects.toMatchObject({
+      code: "AUTH_SESSION_LOOKUP_FAILED",
+      stage: "session_lookup",
+    });
+
+    const logoutService = new AuthService(
+      {
+        revokeSession: vi.fn().mockRejectedValue(new Error("synthetic revoke")),
+      } as unknown as AuthRepositoryOperations,
+      config,
+      {} as OidcOperations,
+    );
+    await expect(logoutService.logout("opaque-session")).rejects.toMatchObject({
+      code: "AUTH_LOGOUT_FAILED",
+      stage: "logout_revocation",
+    });
   });
 
   it("creates a hash-only local admin session and rotates the prior token", async () => {
@@ -297,7 +444,10 @@ describe("OIDC login and session orchestration", () => {
     );
     await expect(
       localService.authenticateLocal("incorrect-password", null),
-    ).rejects.toThrow(InvalidAuthenticationResponseError);
+    ).rejects.toMatchObject({
+      code: "AUTH_CREDENTIALS_INVALID",
+      stage: "local_credentials",
+    });
 
     const productionService = new AuthService(
       { createSessionForLocalUser } as unknown as AuthRepositoryOperations,
@@ -306,7 +456,10 @@ describe("OIDC login and session orchestration", () => {
     );
     await expect(
       productionService.authenticateLocal("synthetic-local-password", null),
-    ).rejects.toThrow(InvalidAuthenticationResponseError);
+    ).rejects.toMatchObject({
+      code: "AUTH_CREDENTIALS_INVALID",
+      stage: "local_credentials",
+    });
     expect(createSessionForLocalUser).not.toHaveBeenCalled();
   });
 
@@ -322,9 +475,10 @@ describe("OIDC login and session orchestration", () => {
       {} as OidcOperations,
     );
 
-    await expect(localService.begin("/")).rejects.toThrow(
-      InvalidAuthenticationResponseError,
-    );
+    await expect(localService.begin("/")).rejects.toMatchObject({
+      code: "AUTH_CONFIGURATION_INVALID",
+      stage: "login_mode",
+    });
     expect(createLoginAttempt).not.toHaveBeenCalled();
   });
 });

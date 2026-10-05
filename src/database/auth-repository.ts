@@ -1,4 +1,9 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
+import {
+  AppError,
+  OperationCleanupError,
+  type AppErrorCode,
+} from "../domain/errors";
 import { localAdministratorEmail } from "../auth/local";
 
 export interface AuthenticatedUser {
@@ -15,12 +20,31 @@ export interface LoginAttempt {
   expiresAt: Date;
 }
 
-export class AuthenticationRejectedError extends Error {
-  constructor() {
-    super("Authentication rejected");
+type AuthenticationRejectionCode = Extract<
+  AppErrorCode,
+  "AUTH_SUBJECT_MISMATCH" | "AUTH_USER_NOT_ELIGIBLE"
+>;
+
+export class AuthenticationRejectedError extends AppError {
+  constructor(
+    code: AuthenticationRejectionCode = "AUTH_USER_NOT_ELIGIBLE",
+    stage = "user_eligibility",
+    userId?: string,
+  ) {
+    super({ code, stage, userId });
     this.name = "AuthenticationRejectedError";
   }
 }
+
+const cleanupFailure = (
+  primaryError: unknown,
+  cleanupError: unknown,
+  stage: string,
+  hasPrimaryError: boolean,
+): Error =>
+  hasPrimaryError
+    ? new OperationCleanupError(primaryError, cleanupError, stage)
+    : new AppError({ code: "AUTH_CLEANUP_FAILED", stage, cause: cleanupError });
 
 const mapUser = (row: QueryResultRow): AuthenticatedUser => ({
   id: row.id,
@@ -70,7 +94,12 @@ export class AuthRepository {
       [stateHash],
     );
     const row = result.rows[0];
-    if (!row || row.expires_at <= now) return null;
+    if (!row) return null;
+    if (row.expires_at <= now)
+      throw new AppError({
+        code: "AUTH_STATE_EXPIRED",
+        stage: "state_expiration",
+      });
     return {
       nonce: row.nonce,
       codeVerifier: row.code_verifier,
@@ -88,9 +117,7 @@ export class AuthRepository {
     expiresAt: Date;
     now: Date;
   }): Promise<AuthenticatedUser> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
+    return this.withTransaction(async (client) => {
       const user = await this.lockEligibleUser(client, input.email);
       await this.bindSubject(client, user, input.subject);
       const shouldBackfillDisplayName =
@@ -105,15 +132,8 @@ export class AuthRepository {
         user.display_name = input.displayName;
       }
       await this.storeSession(client, user.id, input);
-      await client.query("COMMIT");
       return mapUser(user);
-    } catch (error) {
-      await client.query("ROLLBACK");
-      if (error instanceof AuthenticationRejectedError) throw error;
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async createSessionForLocalUser(input: {
@@ -122,9 +142,7 @@ export class AuthRepository {
     expiresAt: Date;
     now: Date;
   }): Promise<AuthenticatedUser> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
+    return this.withTransaction(async (client) => {
       const result = await client.query(
         `SELECT id, email, display_name, role FROM ${this.usersTable} WHERE lower(email) = lower($1) AND active = true AND role = 'administrator' FOR UPDATE`,
         [localAdministratorEmail],
@@ -132,14 +150,8 @@ export class AuthRepository {
       const user = result.rows[0];
       if (!user) throw new AuthenticationRejectedError();
       await this.storeSession(client, user.id, input);
-      await client.query("COMMIT");
       return mapUser(user);
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async getActiveSession(
@@ -178,13 +190,21 @@ export class AuthRepository {
     subject: string,
   ): Promise<void> {
     if (user.google_subject && user.google_subject !== subject)
-      throw new AuthenticationRejectedError();
+      throw new AuthenticationRejectedError(
+        "AUTH_SUBJECT_MISMATCH",
+        "subject_binding",
+        user.id,
+      );
     const existing = await client.query(
       `SELECT id FROM ${this.usersTable} WHERE google_subject = $1 FOR UPDATE`,
       [subject],
     );
     if (existing.rows[0] && existing.rows[0].id !== user.id)
-      throw new AuthenticationRejectedError();
+      throw new AuthenticationRejectedError(
+        "AUTH_SUBJECT_MISMATCH",
+        "subject_binding",
+        user.id,
+      );
     if (!user.google_subject) {
       await client.query(
         `UPDATE ${this.usersTable} SET google_subject = $2 WHERE id = $1 AND google_subject IS NULL`,
@@ -213,5 +233,52 @@ export class AuthRepository {
       `INSERT INTO ${this.sessionsTable} (token_hash, user_id, expires_at) VALUES ($1, $2, $3)`,
       [input.tokenHash, userId, input.expiresAt],
     );
+  }
+
+  private async withTransaction<T>(
+    action: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.pool.connect();
+    let result!: T;
+    let operationFailed = false;
+    let failure: unknown;
+    let transactionStarted = false;
+
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+      result = await action(client);
+      await client.query("COMMIT");
+    } catch (error) {
+      operationFailed = true;
+      failure = error;
+      if (transactionStarted) {
+        try {
+          await client.query("ROLLBACK");
+        } catch (rollbackError) {
+          failure = cleanupFailure(
+            failure,
+            rollbackError,
+            "transaction_rollback",
+            true,
+          );
+        }
+      }
+    } finally {
+      try {
+        client.release();
+      } catch (releaseError) {
+        failure = cleanupFailure(
+          failure,
+          releaseError,
+          "client_release",
+          operationFailed,
+        );
+        operationFailed = true;
+      }
+    }
+
+    if (operationFailed) throw failure;
+    return result;
   }
 }

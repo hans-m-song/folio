@@ -1,5 +1,10 @@
 import * as oidc from "openid-client";
 
+import {
+  AppError,
+  OperationCleanupError,
+  type AppErrorCode,
+} from "../domain/errors";
 import type { ReturnTypeOfLoadAuthConfig } from "./types";
 import { randomOpaqueToken, sha256 } from "./crypto";
 import { safeReturnPath } from "./http";
@@ -7,6 +12,7 @@ import { localPasswordMatches } from "./local";
 import type {
   AuthenticatedUser,
   AuthRepository,
+  LoginAttempt,
 } from "../database/auth-repository";
 
 type AuthConfig = ReturnTypeOfLoadAuthConfig;
@@ -45,12 +51,60 @@ export interface AuthRepositoryOperations {
   revokeSession: AuthRepository["revokeSession"];
 }
 
-export class InvalidAuthenticationResponseError extends Error {
-  constructor() {
-    super("Authentication response rejected");
+export class InvalidAuthenticationResponseError extends AppError {
+  constructor(
+    code: AppErrorCode = "AUTH_CALLBACK_INVALID",
+    stage = "authentication_validation",
+  ) {
+    super({ code, stage });
     this.name = "InvalidAuthenticationResponseError";
   }
 }
+
+const oauthAuthenticationRejections = new Set([
+  "access_denied",
+  "account_selection_required",
+  "consent_required",
+  "interaction_required",
+  "invalid_grant",
+  "invalid_request",
+  "login_required",
+]);
+
+const oidcClaimFailureCodes = new Set([
+  "OAUTH_JWT_CLAIM_COMPARISON_FAILED",
+  "OAUTH_JSON_ATTRIBUTE_COMPARISON_FAILED",
+  "OAUTH_JWT_TIMESTAMP_CHECK_FAILED",
+]);
+
+const isExpectedOidcRejection = (error: unknown): boolean => {
+  if (error instanceof InvalidAuthenticationResponseError) return true;
+  if (
+    error instanceof oidc.AuthorizationResponseError &&
+    oauthAuthenticationRejections.has(error.error)
+  )
+    return true;
+  if (
+    error instanceof oidc.ResponseBodyError &&
+    (error.status === 400 || error.status === 401) &&
+    oauthAuthenticationRejections.has(error.error)
+  )
+    return true;
+  return (
+    error instanceof oidc.ClientError &&
+    typeof error.code === "string" &&
+    oidcClaimFailureCodes.has(error.code)
+  );
+};
+
+const asAppError = (
+  error: unknown,
+  code: AppErrorCode,
+  stage: string,
+): AppError | OperationCleanupError =>
+  error instanceof AppError || error instanceof OperationCleanupError
+    ? error
+    : new AppError({ code, stage, cause: error });
 
 export const verifiedGoogleIdentity = (
   claims: IdentityClaims,
@@ -65,7 +119,10 @@ export const verifiedGoogleIdentity = (
     claims.email_verified !== true ||
     claims.hd !== config.hostedDomain
   ) {
-    throw new InvalidAuthenticationResponseError();
+    throw new InvalidAuthenticationResponseError(
+      "AUTH_IDENTITY_INVALID",
+      "identity_validation",
+    );
   }
   const displayName =
     typeof claims.name === "string"
@@ -149,22 +206,37 @@ export class AuthService {
 
   async begin(returnTo: string | null): Promise<URL> {
     if (this.config.authMode !== "google")
-      throw new InvalidAuthenticationResponseError();
+      throw new AppError({
+        code: "AUTH_CONFIGURATION_INVALID",
+        stage: "login_mode",
+      });
     const state = oidc.randomState();
     const nonce = oidc.randomNonce();
     const codeVerifier = oidc.randomPKCECodeVerifier();
     const now = this.now();
-    await this.repository.createLoginAttempt(sha256(state), {
-      nonce,
-      codeVerifier,
-      returnPath: safeReturnPath(returnTo, this.config.origin),
-      expiresAt: new Date(now.getTime() + this.config.loginAttemptLifetimeMs),
-    });
-    return this.oidcOperations.createAuthorizationUrl({
-      state,
-      nonce,
-      codeVerifier,
-    });
+    try {
+      await this.repository.createLoginAttempt(sha256(state), {
+        nonce,
+        codeVerifier,
+        returnPath: safeReturnPath(returnTo, this.config.origin),
+        expiresAt: new Date(now.getTime() + this.config.loginAttemptLifetimeMs),
+      });
+    } catch (error) {
+      throw asAppError(
+        error,
+        "AUTH_LOGIN_ATTEMPT_FAILED",
+        "login_attempt_store",
+      );
+    }
+    try {
+      return await this.oidcOperations.createAuthorizationUrl({
+        state,
+        nonce,
+        codeVerifier,
+      });
+    } catch (error) {
+      throw asAppError(error, "AUTH_PROVIDER_UNAVAILABLE", "authorization_url");
+    }
   }
 
   async complete(
@@ -176,32 +248,70 @@ export class AuthService {
     returnPath: string;
   }> {
     if (this.config.authMode !== "google")
-      throw new InvalidAuthenticationResponseError();
+      throw new AppError({
+        code: "AUTH_CONFIGURATION_INVALID",
+        stage: "callback_mode",
+      });
     const state = requestUrl.searchParams.get("state");
-    if (!state) throw new InvalidAuthenticationResponseError();
-    const attempt = await this.repository.consumeLoginAttempt(
-      sha256(state),
-      this.now(),
-    );
-    if (!attempt) throw new InvalidAuthenticationResponseError();
-    const claims = await this.oidcOperations.exchangeAuthorizationCode({
-      callbackUrl: requestUrl,
-      state,
-      nonce: attempt.nonce,
-      codeVerifier: attempt.codeVerifier,
-    });
+    if (!state)
+      throw new AppError({
+        code: "AUTH_STATE_MISSING",
+        stage: "state_validation",
+      });
+    let attempt: LoginAttempt | null;
+    try {
+      attempt = await this.repository.consumeLoginAttempt(
+        sha256(state),
+        this.now(),
+      );
+    } catch (error) {
+      throw asAppError(error, "UNEXPECTED_ERROR", "state_lookup");
+    }
+    if (!attempt)
+      throw new AppError({
+        code: "AUTH_STATE_INVALID",
+        stage: "state_lookup",
+      });
+    let claims: IdentityClaims;
+    try {
+      claims = await this.oidcOperations.exchangeAuthorizationCode({
+        callbackUrl: requestUrl,
+        state,
+        nonce: attempt.nonce,
+        codeVerifier: attempt.codeVerifier,
+      });
+    } catch (error) {
+      if (error instanceof AppError || error instanceof OperationCleanupError)
+        throw error;
+      throw new AppError({
+        code: isExpectedOidcRejection(error)
+          ? "AUTH_CODE_EXCHANGE_FAILED"
+          : "AUTH_PROVIDER_UNAVAILABLE",
+        stage: "code_exchange",
+        cause: error,
+      });
+    }
     const identity = verifiedGoogleIdentity(claims, this.config);
     const sessionToken = randomOpaqueToken();
     const now = this.now();
-    const user = await this.repository.createSessionForIdentity({
-      ...identity,
-      tokenHash: sha256(sessionToken),
-      rotatedTokenHash: rotatedSessionToken
-        ? sha256(rotatedSessionToken)
-        : null,
-      expiresAt: new Date(now.getTime() + this.config.sessionLifetimeMs),
-      now,
-    });
+    let user: AuthenticatedUser;
+    try {
+      user = await this.repository.createSessionForIdentity({
+        ...identity,
+        tokenHash: sha256(sessionToken),
+        rotatedTokenHash: rotatedSessionToken
+          ? sha256(rotatedSessionToken)
+          : null,
+        expiresAt: new Date(now.getTime() + this.config.sessionLifetimeMs),
+        now,
+      });
+    } catch (error) {
+      throw asAppError(
+        error,
+        "AUTH_SESSION_CREATION_FAILED",
+        "session_creation",
+      );
+    }
     return { sessionToken, user, returnPath: attempt.returnPath };
   }
 
@@ -216,29 +326,49 @@ export class AuthService {
       expectedPassword === null ||
       !localPasswordMatches(password, expectedPassword)
     ) {
-      throw new InvalidAuthenticationResponseError();
+      throw new InvalidAuthenticationResponseError(
+        "AUTH_CREDENTIALS_INVALID",
+        "local_credentials",
+      );
     }
 
     const sessionToken = randomOpaqueToken();
     const now = this.now();
-    const user = await this.repository.createSessionForLocalUser({
-      tokenHash: sha256(sessionToken),
-      rotatedTokenHash: rotatedSessionToken
-        ? sha256(rotatedSessionToken)
-        : null,
-      expiresAt: new Date(now.getTime() + this.config.sessionLifetimeMs),
-      now,
-    });
+    let user: AuthenticatedUser;
+    try {
+      user = await this.repository.createSessionForLocalUser({
+        tokenHash: sha256(sessionToken),
+        rotatedTokenHash: rotatedSessionToken
+          ? sha256(rotatedSessionToken)
+          : null,
+        expiresAt: new Date(now.getTime() + this.config.sessionLifetimeMs),
+        now,
+      });
+    } catch (error) {
+      throw asAppError(
+        error,
+        "AUTH_SESSION_CREATION_FAILED",
+        "session_creation",
+      );
+    }
     return { sessionToken, user };
   }
 
   async session(token: string | null): Promise<AuthenticatedUser | null> {
     if (!token) return null;
-    return this.repository.getActiveSession(sha256(token), this.now());
+    try {
+      return await this.repository.getActiveSession(sha256(token), this.now());
+    } catch (error) {
+      throw asAppError(error, "AUTH_SESSION_LOOKUP_FAILED", "session_lookup");
+    }
   }
 
   async logout(token: string | null): Promise<void> {
     if (!token) return;
-    await this.repository.revokeSession(sha256(token), this.now());
+    try {
+      await this.repository.revokeSession(sha256(token), this.now());
+    } catch (error) {
+      throw asAppError(error, "AUTH_LOGOUT_FAILED", "logout_revocation");
+    }
   }
 }
