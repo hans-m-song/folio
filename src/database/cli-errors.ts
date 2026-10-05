@@ -1,5 +1,11 @@
 import { ZodError } from "zod";
 
+import {
+  reportServerFailure,
+  type DiagnosticContext,
+  type LogWriter,
+} from "../server/error-handling";
+
 const databaseMessages: Record<string, string> = {
   "28P01": "Database authentication failed.",
   "42P01": "Required database table is missing; apply Folio migrations.",
@@ -17,9 +23,36 @@ const safeErrorCode = (error: unknown) => {
   if (typeof error !== "object" || error === null || !("code" in error))
     return undefined;
   const code = error.code;
-  return typeof code === "string" && /^[A-Z0-9]{2,16}$/.test(code)
+  return typeof code === "string" && Object.hasOwn(databaseMessages, code)
     ? code
     : undefined;
+};
+
+export const writeDatabaseCliFailure = (
+  error: unknown,
+  context: DiagnosticContext,
+  writer: LogWriter,
+) => {
+  let eventLine: string | undefined;
+  const capture: LogWriter = (line) => {
+    eventLine = line;
+  };
+  const reported = reportServerFailure(error, context, {
+    info: capture,
+    warn: capture,
+    error: capture,
+  });
+  if (eventLine) {
+    const event = JSON.parse(eventLine) as Record<string, unknown>;
+    try {
+      writer(
+        JSON.stringify({ ...event, message: reported.publicFailure.message }),
+      );
+    } catch {
+      return reported;
+    }
+  }
+  return reported;
 };
 
 const credentialEligibilityMessages = {

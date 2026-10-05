@@ -38,9 +38,7 @@ afterEach(() => {
 
 describe("MCP route feature flag", () => {
   it("returns 404 without constructing the MCP runtime when disabled", async () => {
-    const error = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     vi.stubEnv("FOLIO_MCP_ENABLED", "false");
     const response = await post({
       request: new Request("http://127.0.0.1:43230/mcp", {
@@ -53,11 +51,11 @@ describe("MCP route feature flag", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(dependencies.createMcpRuntime).not.toHaveBeenCalled();
     expect(dependencies.loadAuthConfig).not.toHaveBeenCalled();
-    expect(JSON.parse(error.mock.calls[0][0])).toMatchObject({
-      event: "folio.mcp_request",
+    expect(JSON.parse(info.mock.calls[0][0])).toMatchObject({
+      event: "folio.operation",
       requestMethod: "POST",
       requestPath: "/mcp",
-      status: 404,
+      httpStatus: 404,
       stage: "disabled",
     });
   });

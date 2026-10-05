@@ -1,9 +1,11 @@
 import { request as httpRequest } from "node:http";
 import { fromJsonSchema } from "@modelcontextprotocol/server";
+import type { McpHttpHandler } from "@modelcontextprotocol/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { MCP_MAX_REQUEST_BODY_BYTES } from "./server";
 import { startMcpServer, type StartMcpServerOptions } from "./start";
+import { createMcpTransport } from "./transport";
 
 const validPrincipal = {
   credentialId: "credential-test",
@@ -164,14 +166,33 @@ describe("local MCP Streamable HTTP transport", () => {
     const verifyCredential = vi.fn(async () => {
       throw new Error("synthetic verifier detail");
     });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    await withMcpServer({ verifyCredential }, async ({ address }) => {
-      const response = await send(address.port);
+    try {
+      await withMcpServer({ verifyCredential }, async ({ address }) => {
+        const response = await send(address.port);
 
-      expect(response.statusCode).toBe(503);
-      expect(response.body).not.toContain("synthetic verifier detail");
-      expect(verifyCredential).toHaveBeenCalledTimes(1);
-    });
+        expect(response.statusCode).toBe(503);
+        expect(response.headers["x-folio-error-reference"]).toMatch(
+          /^[0-9a-f-]{36}$/i,
+        );
+        expect(response.body).not.toContain("synthetic verifier detail");
+        expect(verifyCredential).toHaveBeenCalledTimes(1);
+        expect(log).toHaveBeenCalledTimes(1);
+        const event = JSON.parse(log.mock.calls[0][0] as string);
+        expect(event).toMatchObject({
+          operation: "mcp_transport",
+          stage: "credential_verification",
+          phase: "failure",
+          code: "UNEXPECTED_ERROR",
+        });
+        expect(JSON.stringify(event)).not.toContain(
+          "synthetic verifier detail",
+        );
+      });
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it("rejects unexpected Host and Origin headers before credential verification", async () => {
@@ -189,6 +210,12 @@ describe("local MCP Streamable HTTP transport", () => {
 
       expect(invalidHost.statusCode).toBe(403);
       expect(invalidOrigin.statusCode).toBe(403);
+      expect(invalidHost.headers["x-folio-error-reference"]).toMatch(
+        /^[0-9a-f-]{36}$/i,
+      );
+      expect(invalidOrigin.headers["x-folio-error-reference"]).toMatch(
+        /^[0-9a-f-]{36}$/i,
+      );
       expect(verifyCredential).not.toHaveBeenCalled();
     });
   });
@@ -249,8 +276,83 @@ describe("local MCP Streamable HTTP transport", () => {
       });
 
       expect(response.statusCode).toBe(413);
+      expect(response.headers["x-folio-error-reference"]).toMatch(
+        /^[0-9a-f-]{36}$/i,
+      );
       expect(verifyCredential).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("reports handler failures with a reference and without raw details", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handler = {
+      fetch: vi.fn(async () => {
+        throw new Error("synthetic handler detail");
+      }),
+      close: vi.fn(async () => undefined),
+    } as unknown as McpHttpHandler;
+    const transport = createMcpTransport({
+      handler,
+      verifyCredential: vi.fn(async () => validPrincipal),
+      port: 0,
+    });
+    try {
+      const address = await transport.start();
+      const response = await send(address.port);
+
+      expect(response.statusCode).toBe(500);
+      expect(response.headers["x-folio-error-reference"]).toMatch(
+        /^[0-9a-f-]{36}$/i,
+      );
+      expect(response.body).toContain("Internal server error");
+      expect(response.body).not.toContain("synthetic handler detail");
+      expect(log).toHaveBeenCalledTimes(1);
+      const event = JSON.parse(log.mock.calls[0][0] as string);
+      expect(event).toMatchObject({
+        operation: "mcp_transport",
+        stage: "handler",
+        phase: "failure",
+        code: "UNEXPECTED_ERROR",
+      });
+      expect(JSON.stringify(event)).not.toContain("synthetic handler detail");
+    } finally {
+      await transport.close();
+      log.mockRestore();
+    }
+  });
+
+  it("reports a direct transport close failure once and preserves the error", async () => {
+    const closeError = new Error("synthetic handler close detail");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handler = {
+      fetch: vi.fn(async () => new Response("ok")),
+      close: vi.fn(async () => {
+        throw closeError;
+      }),
+    } as unknown as McpHttpHandler;
+    const transport = createMcpTransport({
+      handler,
+      verifyCredential: vi.fn(async () => validPrincipal),
+      port: 0,
+    });
+
+    try {
+      await transport.start();
+      await expect(transport.close()).rejects.toBe(closeError);
+      expect(handler.close).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(log.mock.calls[0][0] as string)).toMatchObject({
+        operation: "mcp_transport",
+        stage: "close",
+        phase: "failure",
+        code: "UNEXPECTED_ERROR",
+      });
+      expect(log.mock.calls[0][0]).not.toContain(
+        "synthetic handler close detail",
+      );
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it("provides the verified credential scopes and owner context to tool registration", async () => {

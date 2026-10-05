@@ -98,6 +98,11 @@ describe("MCP web route boundary", () => {
       expect(
         (await endpoint(request({ origin: "https://other.example" }))).status,
       ).toBe(403);
+      expect(
+        (await endpoint(request({ host: "other.example" }))).headers.get(
+          "x-folio-error-reference",
+        ),
+      ).toMatch(/^[0-9a-f-]{36}$/i);
       expect(verifyCredential).not.toHaveBeenCalled();
     } finally {
       await handler.close();
@@ -120,14 +125,59 @@ describe("MCP web route boundary", () => {
       );
       expect(unauthorized.status).toBe(401);
       expect(unauthorized.headers.get("www-authenticate")).toBe("Bearer");
+      expect(unauthorized.headers.get("x-folio-error-reference")).toMatch(
+        /^[0-9a-f-]{36}$/i,
+      );
       const get = await endpoint(request({ method: "GET" }));
       expect(get.status).toBe(405);
       expect(get.headers.get("allow")).toBe("POST");
+      expect(get.headers.get("x-folio-error-reference")).toMatch(
+        /^[0-9a-f-]{36}$/i,
+      );
       const large = await endpoint(
         request({ body: " ".repeat(MCP_MAX_REQUEST_BODY_BYTES + 1) }),
       );
       expect(large.status).toBe(413);
+      expect(large.headers.get("x-folio-error-reference")).toMatch(
+        /^[0-9a-f-]{36}$/i,
+      );
     } finally {
+      await handler.close();
+    }
+  });
+
+  it("logs credential verifier failures without exposing the thrown message", async () => {
+    const error = new Error("private verifier details");
+    const verifyCredential = vi.fn(async () => {
+      throw error;
+    });
+    const handler = createFolioMcpHandler();
+    const endpoint = createMcpWebEndpoint({
+      expectedOrigin: origin,
+      verifyCredential,
+      handler,
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await endpoint(request());
+      expect(response.status).toBe(503);
+      expect(response.headers.get("x-folio-error-reference")).toMatch(
+        /^[0-9a-f-]{36}$/i,
+      );
+      expect(log).toHaveBeenCalledTimes(1);
+      const event = JSON.parse(log.mock.calls[0][0] as string) as Record<
+        string,
+        unknown
+      >;
+      expect(event).toMatchObject({
+        operation: "mcp_http_request",
+        stage: "credential_verification",
+        phase: "failure",
+        code: "UNEXPECTED_ERROR",
+      });
+      expect(JSON.stringify(event)).not.toContain("private verifier details");
+    } finally {
+      log.mockRestore();
       await handler.close();
     }
   });

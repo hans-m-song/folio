@@ -6,14 +6,20 @@ import { Pool } from "pg";
 import { z } from "zod";
 
 import { loadConfig } from "../config";
+import { OperationCleanupError } from "../domain/errors";
 import {
   expandCredentialScopes,
   generateCredentialSecret,
   proposalCredentialInputSchema,
   proposalCredentialIssuanceScopeSchema,
 } from "../domain/proposals";
-import { formatDatabaseCliFailure } from "./cli-errors";
+import { writeDatabaseCliFailure } from "./cli-errors";
 import { ProposalRepository } from "./proposal-repository";
+import {
+  writeServerSuccess,
+  type DiagnosticWriters,
+  type LogWriter,
+} from "../server/error-handling";
 
 const uuidSchema = z.string().uuid();
 
@@ -94,34 +100,92 @@ export const credentialScopeHelp = () =>
 
 export { generateCredentialSecret } from "../domain/proposals";
 
-const run = async () => {
+type CredentialRepository = Pick<
+  ProposalRepository,
+  "createCredential" | "revokeCredential"
+>;
+
+export type ManageCredentialCliOptions = Readonly<{
+  arguments_?: string[];
+  environment?: Parameters<typeof loadConfig>[0];
+  configLoader?: typeof loadConfig;
+  poolFactory?: (options: { connectionString: string; max: number }) => Pool;
+  repositoryFactory?: (
+    pool: Pool,
+    schema: string,
+    gstRegistered: boolean,
+  ) => CredentialRepository;
+  secretGenerator?: typeof generateCredentialSecret;
+  output?: (text: string) => void;
+  error?: LogWriter;
+  successWriters?: DiagnosticWriters;
+}>;
+
+export const runManageMcpCredential = async ({
+  arguments_ = process.argv.slice(2),
+  environment = process.env,
+  configLoader = loadConfig,
+  poolFactory = (options) => new Pool(options),
+  repositoryFactory = (pool, schema, gstRegistered) =>
+    new ProposalRepository(pool, schema, gstRegistered),
+  secretGenerator = generateCredentialSecret,
+  output = (text) => process.stdout.write(text),
+  error: writeError = (line) => process.stderr.write(`${line}\n`),
+  successWriters,
+}: ManageCredentialCliOptions = {}): Promise<number> => {
   let stage = "arguments";
+  let mutation = false;
+  let ids: {
+    actorId?: string;
+    userId?: string;
+    credentialId?: string;
+  } = {};
+  let pool: Pool | undefined;
+  let failure: { error: unknown; stage: string } | undefined;
   try {
-    const command = parseCredentialCommand(process.argv.slice(2));
+    const command = parseCredentialCommand(arguments_);
     if (command.action === "scopes") {
-      process.stdout.write(`${credentialScopeHelp()}\n`);
-      return;
+      output(`${credentialScopeHelp()}\n`);
+      return 0;
     }
+    if (command.action === "revoke")
+      ids = {
+        actorId: command.administratorId,
+        credentialId: command.credentialId,
+      };
+    else
+      ids = {
+        actorId: command.administratorId,
+        userId: command.actorUserId,
+      };
     stage = "configuration";
-    const config = loadConfig(process.env);
-    const pool = new Pool({ connectionString: config.databaseUrl, max: 1 });
-    try {
-      const repository = new ProposalRepository(
-        pool,
-        config.databaseSchema,
-        config.gstRegistered,
+    const config = configLoader(environment);
+    pool = poolFactory({ connectionString: config.databaseUrl, max: 1 });
+    const repository = repositoryFactory(
+      pool,
+      config.databaseSchema,
+      config.gstRegistered,
+    );
+    if (command.action === "revoke") {
+      stage = "revoke";
+      mutation = true;
+      await repository.revokeCredential(
+        command.administratorId,
+        command.credentialId,
       );
-      if (command.action === "revoke") {
-        stage = "revoke";
-        await repository.revokeCredential(
-          command.administratorId,
-          command.credentialId,
-        );
-        process.stdout.write("MCP credential revoked.\n");
-        return;
-      }
+      writeServerSuccess(
+        {
+          operation: "mcp_credential_revoke",
+          stage,
+          mutation,
+          ids,
+        },
+        successWriters,
+      );
+      output("MCP credential revoked.\n");
+    } else {
       stage = "create";
-      const secret = generateCredentialSecret();
+      const secret = secretGenerator();
       const input = proposalCredentialInputSchema.parse({
         label: command.label,
         tokenHash: secret.tokenHash,
@@ -129,27 +193,64 @@ const run = async () => {
         defaultOwnerId: command.defaultOwnerId,
         scopes: command.scopes,
       });
+      mutation = true;
       const credential = await repository.createCredential(
         command.administratorId,
         input,
       );
-      process.stdout.write(
+      ids = { ...ids, credentialId: credential.id };
+      mutation = true;
+      writeServerSuccess(
+        {
+          operation: "mcp_credential_create",
+          stage,
+          mutation,
+          ids,
+          metadata: { count: command.scopes.length },
+        },
+        successWriters,
+      );
+      output(
         `Credential ID: ${credential.id}\nToken (shown once): ${secret.token}\nStore this token securely; Folio cannot display it again.\n`,
       );
-    } finally {
-      await pool.end();
     }
   } catch (error) {
-    process.stderr.write(
-      `${formatDatabaseCliFailure("mcp_credential", stage, error)}\n`,
-    );
-    process.exitCode = 1;
+    failure = { error, stage };
+  } finally {
+    if (pool) {
+      try {
+        await pool.end();
+      } catch (error) {
+        failure = failure
+          ? {
+              error: new OperationCleanupError(failure.error, error, "close"),
+              stage: failure.stage,
+            }
+          : { error, stage: "close" };
+      }
+    }
   }
+  if (failure) {
+    writeDatabaseCliFailure(
+      failure.error,
+      {
+        operation: "mcp_credential",
+        stage: failure.stage,
+        mutation,
+        ids,
+      },
+      writeError,
+    );
+    return 1;
+  }
+  return 0;
 };
 
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  void run();
+  void runManageMcpCredential().then((exitCode) => {
+    if (exitCode !== 0) process.exitCode = exitCode;
+  });
 }

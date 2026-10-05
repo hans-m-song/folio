@@ -23,6 +23,11 @@ import {
   type ProposalRepository,
 } from "../database/proposal-repository";
 import { ArtifactUploadIdempotencyConflictError } from "../documents/service";
+import {
+  AppError,
+  type AppErrorCode,
+  type PublicFailure,
+} from "../domain/errors";
 import { parseCommBankTransactionHistoryCsv } from "../domain/bank-profiles/commbank-transaction-history-v1";
 import {
   directBankTargetSchema,
@@ -33,6 +38,12 @@ import {
 import { transactionInputSchema, transactionKindSchema } from "../domain/types";
 import type { DocumentService } from "../documents/service";
 import type { FolioConfig } from "../config";
+import {
+  reportServerFailure,
+  runWithDiagnosticContext,
+  setDiagnosticContext,
+  writeServerSuccess,
+} from "../server/error-handling";
 import {
   type McpPrincipal,
   type McpScope,
@@ -75,12 +86,13 @@ type McpPublicErrorCode =
   | "TRANSACTION_NOT_FOUND"
   | "REQUEST_FAILED";
 
-class McpToolError extends Error {
+class McpToolError extends AppError {
   constructor(
     readonly code: McpPublicErrorCode,
     message: string,
   ) {
-    super(message);
+    super({ code: code as AppErrorCode, stage: "tool_call" });
+    this.message = message;
   }
 }
 
@@ -144,18 +156,71 @@ const safeError = (
   };
 };
 
-const failed = (error: unknown) => ({
+const failed = (
+  error: unknown,
+  diagnostic?: Pick<PublicFailure, "reference" | "recovery">,
+) => ({
   isError: true,
-  content: [{ type: "text" as const, text: JSON.stringify(safeError(error)) }],
+  content: [
+    {
+      type: "text" as const,
+      text: JSON.stringify({
+        ...safeError(error),
+        ...(diagnostic
+          ? {
+              reference: diagnostic.reference,
+              recovery: diagnostic.recovery,
+            }
+          : {}),
+      }),
+    },
+  ],
 });
 
-const runTool = async (action: () => Promise<unknown>) => {
-  try {
-    return output(await action());
-  } catch (error) {
-    return failed(error);
-  }
-};
+type McpToolName =
+  | "list_unresolved_bank_rows"
+  | "search_transactions"
+  | "list_artifacts"
+  | "begin_artifact_upload"
+  | "confirm_artifact_upload"
+  | "submit_draft_transaction"
+  | "edit_transaction"
+  | "suggest_existing_match";
+
+const runTool = async (
+  operation: McpToolName,
+  actorId: string,
+  mutation: boolean,
+  action: () => Promise<unknown>,
+) =>
+  runWithDiagnosticContext(
+    { operation, stage: "tool_call", mutation, ids: { actorId } },
+    async () => {
+      try {
+        const result = await action();
+        if (mutation)
+          writeServerSuccess({ operation, stage: "tool_call", mutation });
+        return output(result);
+      } catch (error) {
+        const publicError = safeError(error);
+        const diagnosticError =
+          publicError.code === "REQUEST_FAILED"
+            ? error
+            : new AppError({
+                code: publicError.code as AppErrorCode,
+                stage: "tool_call",
+                cause: error,
+              });
+        const reported = reportServerFailure(diagnosticError, {
+          operation,
+          stage: "tool_call",
+          mutation,
+          ids: { actorId },
+        });
+        return failed(error, reported.publicFailure);
+      }
+    },
+  );
 
 const hasScope = (principal: McpPrincipal, required: McpScope) =>
   principal.scopes.includes(required);
@@ -406,33 +471,40 @@ const registerToolsForPrincipal = (
         },
       },
       async (input) =>
-        runTool(async () => {
-          const request = bankRowsInput.parse(input);
-          const rows = await dependencies.bankRepository.listTransactions(
-            principal.actorUserId,
-            {
-              limit: request.limit,
-              offset: request.offset,
-              state: "unresolved",
-              ...(request.artifactId ? { artifactId: request.artifactId } : {}),
-            },
-          );
-          return {
-            rows: rows.map((row) => ({
-              id: row.id,
-              postedDate: row.postedDate,
-              amountAud: row.amountAud,
-              description: row.description,
-              state: row.reviewState,
-              revision: row.revision,
-              artifactIds: row.artifactIds,
-            })),
-            nextOffset:
-              rows.length === request.limit
-                ? request.offset + rows.length
-                : null,
-          };
-        }),
+        runTool(
+          "list_unresolved_bank_rows",
+          principal.actorUserId,
+          false,
+          async () => {
+            const request = bankRowsInput.parse(input);
+            const rows = await dependencies.bankRepository.listTransactions(
+              principal.actorUserId,
+              {
+                limit: request.limit,
+                offset: request.offset,
+                state: "unresolved",
+                ...(request.artifactId
+                  ? { artifactId: request.artifactId }
+                  : {}),
+              },
+            );
+            return {
+              rows: rows.map((row) => ({
+                id: row.id,
+                postedDate: row.postedDate,
+                amountAud: row.amountAud,
+                description: row.description,
+                state: row.reviewState,
+                revision: row.revision,
+                artifactIds: row.artifactIds,
+              })),
+              nextOffset:
+                rows.length === request.limit
+                  ? request.offset + rows.length
+                  : null,
+            };
+          },
+        ),
     );
   }
 
@@ -458,42 +530,47 @@ const registerToolsForPrincipal = (
         },
       },
       async (input) =>
-        runTool(async () => {
-          const request = searchInput.parse(input);
-          const page = await dependencies.repository.listTransactionPage(
-            principal.actorUserId,
-            {
-              search: request.search,
-              filters: [],
-              sort: { key: "date", direction: "desc" },
-              page: request.page,
-              reportingTimezone: dependencies.config.reportingTimezone,
-            },
-          );
-          return {
-            total: page.total,
-            page: page.page,
-            pageSize: page.pageSize,
-            rows: page.rows.map((row) => ({
-              id: row.id,
-              kind: row.kind,
-              status: row.status,
-              sourceSystem: row.sourceSystem,
-              invoiceDate: row.invoiceDate,
-              occurredAt: row.occurredAt,
-              settledAt: row.settledAt,
-              counterparty: row.counterparty,
-              reference: row.reference,
-              description: row.description,
-              category: row.category,
-              documentCurrency: row.documentCurrency,
-              documentAmount: row.documentAmount,
-              settlementCurrency: row.settlementCurrency,
-              settlementAmount: row.settlementAmount,
-              updatedAt: row.updatedAt,
-            })),
-          };
-        }),
+        runTool(
+          "search_transactions",
+          principal.actorUserId,
+          false,
+          async () => {
+            const request = searchInput.parse(input);
+            const page = await dependencies.repository.listTransactionPage(
+              principal.actorUserId,
+              {
+                search: request.search,
+                filters: [],
+                sort: { key: "date", direction: "desc" },
+                page: request.page,
+                reportingTimezone: dependencies.config.reportingTimezone,
+              },
+            );
+            return {
+              total: page.total,
+              page: page.page,
+              pageSize: page.pageSize,
+              rows: page.rows.map((row) => ({
+                id: row.id,
+                kind: row.kind,
+                status: row.status,
+                sourceSystem: row.sourceSystem,
+                invoiceDate: row.invoiceDate,
+                occurredAt: row.occurredAt,
+                settledAt: row.settledAt,
+                counterparty: row.counterparty,
+                reference: row.reference,
+                description: row.description,
+                category: row.category,
+                documentCurrency: row.documentCurrency,
+                documentAmount: row.documentAmount,
+                settlementCurrency: row.settlementCurrency,
+                settlementAmount: row.settlementAmount,
+                updatedAt: row.updatedAt,
+              })),
+            };
+          },
+        ),
     );
   }
 
@@ -532,7 +609,7 @@ const registerToolsForPrincipal = (
         },
       },
       async (input) =>
-        runTool(async () => {
+        runTool("list_artifacts", principal.actorUserId, false, async () => {
           const request = listArtifactsInput.parse(input);
           const page = await dependencies.repository.listArtifacts(
             principal.actorUserId,
@@ -597,34 +674,47 @@ const registerToolsForPrincipal = (
         },
       },
       async (input) =>
-        runTool(async () => {
-          const request = beginUploadInput.parse(input);
-          const profile = getArtifactProfile(request.profile);
-          const result = await dependencies.documents.startIdempotentUpload({
-            credentialId: principal.credentialId,
-            idempotencyKey: request.idempotencyKey,
-            actorId: principal.actorUserId,
-            ownerId: principal.defaultOwnerId,
-            artifactProfile: request.profile,
-            filename: request.filename,
-            mediaType: profile.mediaType,
-            byteSize: request.byteSize,
-            checksumSha256: request.checksumSha256,
-          });
-          if (result.status === "intent_not_uploadable")
+        runTool(
+          "begin_artifact_upload",
+          principal.actorUserId,
+          true,
+          async () => {
+            const request = beginUploadInput.parse(input);
+            const profile = getArtifactProfile(request.profile);
+            const result = await dependencies.documents.startIdempotentUpload({
+              credentialId: principal.credentialId,
+              idempotencyKey: request.idempotencyKey,
+              actorId: principal.actorUserId,
+              ownerId: principal.defaultOwnerId,
+              artifactProfile: request.profile,
+              filename: request.filename,
+              mediaType: profile.mediaType,
+              byteSize: request.byteSize,
+              checksumSha256: request.checksumSha256,
+            });
+            setDiagnosticContext({
+              ids: {
+                artifactId:
+                  result.status === "intent_not_uploadable"
+                    ? result.artifactId
+                    : result.artifact.id,
+              },
+            });
+            if (result.status === "intent_not_uploadable")
+              return {
+                status: result.status,
+                artifactId: result.artifactId,
+                artifactState: result.artifactState,
+                replayed: true,
+              };
             return {
               status: result.status,
-              artifactId: result.artifactId,
-              artifactState: result.artifactState,
-              replayed: true,
+              artifact: publicArtifact(result.artifact),
+              uploadUrl: result.uploadUrl,
+              replayed: result.replayed,
             };
-          return {
-            status: result.status,
-            artifact: publicArtifact(result.artifact),
-            uploadUrl: result.uploadUrl,
-            replayed: result.replayed,
-          };
-        }),
+          },
+        ),
     );
 
     server.registerTool(
@@ -645,61 +735,77 @@ const registerToolsForPrincipal = (
         },
       },
       async (input) =>
-        runTool(async () => {
-          const request = confirmUploadInput.parse(input);
-          const creatorId = await dependencies.repository.getArtifactCreatorId(
-            request.artifactId,
-          );
-          if (creatorId !== principal.actorUserId)
-            throw new McpToolError(
-              "ARTIFACT_NOT_CONFIRMABLE",
-              "Only the credential actor may confirm this upload.",
+        runTool(
+          "confirm_artifact_upload",
+          principal.actorUserId,
+          true,
+          async () => {
+            const request = confirmUploadInput.parse(input);
+            setDiagnosticContext({ ids: { artifactId: request.artifactId } });
+            const creatorId =
+              await dependencies.repository.getArtifactCreatorId(
+                request.artifactId,
+              );
+            if (creatorId !== principal.actorUserId)
+              throw new McpToolError(
+                "ARTIFACT_NOT_CONFIRMABLE",
+                "Only the credential actor may confirm this upload.",
+              );
+            const artifact = await dependencies.repository.getArtifact(
+              request.artifactId,
             );
-          const artifact = await dependencies.repository.getArtifact(
-            request.artifactId,
-          );
-          if (
-            !artifact ||
-            !uploadProfiles.includes(
-              artifact.artifactProfile as (typeof uploadProfiles)[number],
+            if (
+              !artifact ||
+              !uploadProfiles.includes(
+                artifact.artifactProfile as (typeof uploadProfiles)[number],
+              )
             )
-          )
-            throw new McpToolError(
-              "ARTIFACT_NOT_CONFIRMABLE",
-              "The artifact is not in a supported upload profile.",
+              throw new McpToolError(
+                "ARTIFACT_NOT_CONFIRMABLE",
+                "The artifact is not in a supported upload profile.",
+              );
+            const confirmed = await dependencies.documents.confirmUpload(
+              principal.actorUserId,
+              request.artifactId,
             );
-          const confirmed = await dependencies.documents.confirmUpload(
-            principal.actorUserId,
-            request.artifactId,
-          );
-          let duplicateWarnings:
-            | { status: "available"; report: CsvDuplicateWarningReport }
-            | { status: "unavailable" }
-            | null = null;
-          if (
-            artifact.artifactProfile === "stripe_balance_itemised_csv_v1" ||
-            artifact.artifactProfile === "commbank_transaction_history_csv_v1"
-          ) {
-            duplicateWarnings = { status: "unavailable" };
-            if (dependencies.getCsvDuplicateWarnings) {
-              try {
-                duplicateWarnings = {
-                  status: "available",
-                  report: await dependencies.getCsvDuplicateWarnings(
-                    principal.actorUserId,
-                    request.artifactId,
-                  ),
-                };
-              } catch {
-                duplicateWarnings = { status: "unavailable" };
+            let duplicateWarnings:
+              | { status: "available"; report: CsvDuplicateWarningReport }
+              | { status: "unavailable" }
+              | null = null;
+            if (
+              artifact.artifactProfile === "stripe_balance_itemised_csv_v1" ||
+              artifact.artifactProfile === "commbank_transaction_history_csv_v1"
+            ) {
+              duplicateWarnings = { status: "unavailable" };
+              if (dependencies.getCsvDuplicateWarnings) {
+                try {
+                  duplicateWarnings = {
+                    status: "available",
+                    report: await dependencies.getCsvDuplicateWarnings(
+                      principal.actorUserId,
+                      request.artifactId,
+                    ),
+                  };
+                } catch (error) {
+                  reportServerFailure(error, {
+                    operation: "confirm_artifact_upload",
+                    stage: "duplicate_warnings",
+                    mutation: false,
+                    ids: {
+                      actorId: principal.actorUserId,
+                      artifactId: request.artifactId,
+                    },
+                  });
+                  duplicateWarnings = { status: "unavailable" };
+                }
               }
             }
-          }
-          return {
-            artifact: publicArtifact(confirmed),
-            duplicateWarnings,
-          };
-        }),
+            return {
+              artifact: publicArtifact(confirmed),
+              duplicateWarnings,
+            };
+          },
+        ),
     );
   }
 
@@ -750,74 +856,92 @@ const registerToolsForPrincipal = (
         },
       },
       async (input) =>
-        runTool(async () => {
-          const request = draftInput.parse(input);
-          const validatedTransaction = transactionInputSchema.parse({
-            ...request.transaction,
-            ownerId: null,
-            sourceArtifactId: null,
-            status: "draft",
-          });
-          const submission = parseProposalSubmission({
-            kind: "draft_transaction",
-            idempotencyKey: request.idempotencyKey,
-            transaction: validatedTransaction,
-            bankTarget: request.bankTarget ?? null,
-            proposedEvidenceArtifactId:
-              request.proposedEvidenceArtifactId ?? null,
-            note: request.note ?? null,
-          });
-          let commBankLocator;
-          if (submission.bankTarget?.kind === "commbank_artifact_row") {
-            const artifact = await dependencies.repository.getArtifact(
-              submission.bankTarget.artifactId,
-            );
-            if (
-              !artifact ||
-              artifact.artifactProfile !==
-                "commbank_transaction_history_csv_v1" ||
-              artifact.state !== "awaiting_review"
-            )
-              throw new McpToolError(
-                "INVALID_BANK_ROW_LOCATOR",
-                "The pinned CommBank artifact is not awaiting review.",
+        runTool(
+          "submit_draft_transaction",
+          principal.actorUserId,
+          true,
+          async () => {
+            const request = draftInput.parse(input);
+            const validatedTransaction = transactionInputSchema.parse({
+              ...request.transaction,
+              ownerId: null,
+              sourceArtifactId: null,
+              status: "draft",
+            });
+            const submission = parseProposalSubmission({
+              kind: "draft_transaction",
+              idempotencyKey: request.idempotencyKey,
+              transaction: validatedTransaction,
+              bankTarget: request.bankTarget ?? null,
+              proposedEvidenceArtifactId:
+                request.proposedEvidenceArtifactId ?? null,
+              note: request.note ?? null,
+            });
+            setDiagnosticContext({
+              ids:
+                submission.bankTarget?.kind === "bank_transaction"
+                  ? {
+                      bankTransactionId:
+                        submission.bankTarget.bankTransactionId,
+                    }
+                  : submission.bankTarget?.kind === "commbank_artifact_row"
+                    ? { artifactId: submission.bankTarget.artifactId }
+                    : request.proposedEvidenceArtifactId
+                      ? { artifactId: request.proposedEvidenceArtifactId }
+                      : undefined,
+            });
+            let commBankLocator;
+            if (submission.bankTarget?.kind === "commbank_artifact_row") {
+              const artifact = await dependencies.repository.getArtifact(
+                submission.bankTarget.artifactId,
               );
-            const review = await dependencies.documents.readReviewText(
-              principal.actorUserId,
-              artifact.id,
-              "commbank_transaction_history_csv_v1",
-            );
-            const parsed = parseCommBankTransactionHistoryCsv(review.text);
-            if (parsed.errors.length > 0 || parsed.rows.length === 0)
-              throw new McpToolError(
-                "INVALID_BANK_ROW_LOCATOR",
-                "The pinned CommBank CSV must parse cleanly before row submission.",
+              if (
+                !artifact ||
+                artifact.artifactProfile !==
+                  "commbank_transaction_history_csv_v1" ||
+                artifact.state !== "awaiting_review"
+              )
+                throw new McpToolError(
+                  "INVALID_BANK_ROW_LOCATOR",
+                  "The pinned CommBank artifact is not awaiting review.",
+                );
+              const review = await dependencies.documents.readReviewText(
+                principal.actorUserId,
+                artifact.id,
+                "commbank_transaction_history_csv_v1",
               );
-            try {
-              commBankLocator = validatePreImportCommBankLocator({
-                locator: submission.bankTarget,
-                artifact: review.artifact,
-                parsedRows: parsed.rows,
-              });
-            } catch {
-              throw new McpToolError(
-                "INVALID_BANK_ROW_LOCATOR",
-                "The source row was not found in the pinned CommBank CSV.",
-              );
+              const parsed = parseCommBankTransactionHistoryCsv(review.text);
+              if (parsed.errors.length > 0 || parsed.rows.length === 0)
+                throw new McpToolError(
+                  "INVALID_BANK_ROW_LOCATOR",
+                  "The pinned CommBank CSV must parse cleanly before row submission.",
+                );
+              try {
+                commBankLocator = validatePreImportCommBankLocator({
+                  locator: submission.bankTarget,
+                  artifact: review.artifact,
+                  parsedRows: parsed.rows,
+                });
+              } catch {
+                throw new McpToolError(
+                  "INVALID_BANK_ROW_LOCATOR",
+                  "The source row was not found in the pinned CommBank CSV.",
+                );
+              }
             }
-          }
-          const result = await dependencies.proposalRepository.submit(
-            principal.credentialId,
-            submission,
-            commBankLocator ? { commBankLocator } : {},
-          );
-          return {
-            submissionId: result.submissionId,
-            kind: result.kind,
-            linkedId: result.linkedId,
-            replayed: result.replayed,
-          };
-        }),
+            const result = await dependencies.proposalRepository.submit(
+              principal.credentialId,
+              submission,
+              commBankLocator ? { commBankLocator } : {},
+            );
+            return {
+              submissionId: result.submissionId,
+              kind: result.kind,
+              linkedId: result.linkedId,
+              replayed: result.replayed,
+            };
+          },
+        ),
     );
   }
 
@@ -856,8 +980,11 @@ const registerToolsForPrincipal = (
         },
       },
       async (input) =>
-        runTool(async () => {
+        runTool("edit_transaction", principal.actorUserId, true, async () => {
           const request = editDraftInput.parse(input);
+          setDiagnosticContext({
+            ids: { transactionId: request.transactionId },
+          });
           if (
             Object.keys(request.changes).length === 1 &&
             "category" in request.changes &&
@@ -915,26 +1042,37 @@ const registerToolsForPrincipal = (
         },
       },
       async (input) =>
-        runTool(async () => {
-          const request = suggestMatchInput.parse(input);
-          const submission = parseProposalSubmission({
-            kind: "existing_match",
-            idempotencyKey: request.idempotencyKey,
-            existingTransactionId: request.existingTransactionId,
-            bankTarget: request.bankTarget,
-            note: request.note ?? null,
-          });
-          const result = await dependencies.proposalRepository.submit(
-            principal.credentialId,
-            submission,
-          );
-          return {
-            submissionId: result.submissionId,
-            kind: result.kind,
-            linkedId: result.linkedId,
-            replayed: result.replayed,
-          };
-        }),
+        runTool(
+          "suggest_existing_match",
+          principal.actorUserId,
+          true,
+          async () => {
+            const request = suggestMatchInput.parse(input);
+            setDiagnosticContext({
+              ids: {
+                transactionId: request.existingTransactionId,
+                bankTransactionId: request.bankTarget.bankTransactionId,
+              },
+            });
+            const submission = parseProposalSubmission({
+              kind: "existing_match",
+              idempotencyKey: request.idempotencyKey,
+              existingTransactionId: request.existingTransactionId,
+              bankTarget: request.bankTarget,
+              note: request.note ?? null,
+            });
+            const result = await dependencies.proposalRepository.submit(
+              principal.credentialId,
+              submission,
+            );
+            return {
+              submissionId: result.submissionId,
+              kind: result.kind,
+              linkedId: result.linkedId,
+              replayed: result.replayed,
+            };
+          },
+        ),
     );
   }
 };

@@ -133,21 +133,33 @@ describe("MCP request logging", () => {
   });
 
   it("logs HTTP failures with a fixed stage", async () => {
+    const info = vi.fn();
+    const warn = vi.fn();
     const error = vi.fn();
-    await withMcpRequestLogging(
+    const response = await withMcpRequestLogging(
       request(),
       () => Response.json({ error: "sensitive detail" }, { status: 401 }),
-      { error },
+      { info, warn, error },
     );
 
-    const event = JSON.parse(error.mock.calls[0][0]);
+    expect(response.status).toBe(401);
+    expect(response.headers.get("x-folio-error-reference")).toMatch(
+      /^[0-9a-f-]{36}$/i,
+    );
+    expect(info).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    const event = JSON.parse(warn.mock.calls[0][0]);
     expect(event).toMatchObject({
-      status: 401,
+      event: "folio.operation",
+      operation: "mcp_http_request",
+      httpStatus: 401,
       stage: "credential",
+      phase: "failure",
+      code: "UNAUTHENTICATED",
     });
     expect(event).not.toHaveProperty("mcpMethod");
     expect(event).not.toHaveProperty("mcpTool");
-    expect(error.mock.calls[0][0]).not.toContain("sensitive detail");
+    expect(warn.mock.calls[0][0]).not.toContain("sensitive detail");
   });
 
   it("identifies a tool call when the authenticated handler fails", async () => {
@@ -159,12 +171,15 @@ describe("MCP request logging", () => {
     );
 
     expect(JSON.parse(error.mock.calls[0][0])).toMatchObject({
-      status: 500,
+      event: "folio.operation",
+      operation: "folio_ping",
+      httpStatus: 500,
       stage: "handler",
-      mcpMethod: "tools/call",
-      mcpTool: "folio_ping",
+      phase: "failure",
+      code: "REQUEST_FAILED",
     });
     expect(error.mock.calls[0][0]).not.toContain("synthetic-private-value");
+    expect(error.mock.calls[0][0]).not.toContain("synthetic-secret");
   });
 
   it("logs route exceptions and preserves their behavior", async () => {
@@ -180,9 +195,34 @@ describe("MCP request logging", () => {
     ).rejects.toThrow("synthetic secret error");
 
     expect(JSON.parse(error.mock.calls[0][0])).toMatchObject({
-      status: 500,
+      event: "folio.operation",
+      operation: "mcp_http_request",
+      httpStatus: 500,
       stage: "route_exception",
+      phase: "failure",
+      code: "UNEXPECTED_ERROR",
     });
     expect(error.mock.calls[0][0]).not.toContain("synthetic secret error");
+  });
+
+  it("does not log or replace an HTTP failure already carrying a reference", async () => {
+    const error = vi.fn();
+    const response = await withMcpRequestLogging(
+      request(),
+      () =>
+        Response.json(
+          { error: "Authentication required" },
+          {
+            status: 401,
+            headers: { "x-folio-error-reference": "known-reference" },
+          },
+        ),
+      { error },
+    );
+
+    expect(response.headers.get("x-folio-error-reference")).toBe(
+      "known-reference",
+    );
+    expect(error).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -8,6 +8,7 @@ import {
 import {
   formatDatabaseCliFailure,
   MigrationPreconditionError,
+  writeDatabaseCliFailure,
 } from "./cli-errors";
 
 describe("database CLI errors", () => {
@@ -95,6 +96,48 @@ describe("database CLI errors", () => {
     );
     expect(formatted).toContain("code=UNEXPECTED_ERROR");
     expect(formatted).not.toContain("secret");
+  });
+
+  it("does not print unrecognized database error codes", () => {
+    const formatted = formatDatabaseCliFailure("mcp_credential", "create", {
+      code: "PRIVATE_PROVIDER_CODE",
+      message: "private provider detail",
+    });
+
+    expect(formatted).toContain("code=UNEXPECTED_ERROR");
+    expect(formatted).not.toContain("PRIVATE_PROVIDER_CODE");
+    expect(formatted).not.toContain("private provider detail");
+  });
+
+  it("writes a structured CLI failure with validated context only", () => {
+    const writer = vi.fn();
+    const reported = writeDatabaseCliFailure(
+      new Error("postgres://private connection detail"),
+      {
+        operation: "mcp_credential",
+        stage: "create",
+        mutation: true,
+        ids: {
+          actorId: "11111111-1111-4111-8111-111111111111",
+          credentialId: "not-a-uuid",
+        },
+      },
+      writer,
+    );
+
+    expect(writer).toHaveBeenCalledTimes(1);
+    const event = JSON.parse(writer.mock.calls[0][0] as string);
+    expect(event).toMatchObject({
+      event: "folio.operation",
+      phase: "failure",
+      operation: "mcp_credential",
+      stage: "create",
+      code: "UNEXPECTED_ERROR",
+      actorId: "11111111-1111-4111-8111-111111111111",
+      correlationId: reported.publicFailure.reference,
+    });
+    expect(event).not.toHaveProperty("credentialId");
+    expect(JSON.stringify(event)).not.toContain("private connection detail");
   });
 
   it("reports invalid credential arguments without echoing input", () => {

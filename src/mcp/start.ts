@@ -3,6 +3,8 @@ import {
   type McpCredentialVerifier,
   type McpToolRegistrar,
 } from "./server";
+import { OperationCleanupError } from "../domain/errors";
+import { reportServerFailure } from "../server/error-handling";
 import { createMcpTransport, MCP_DEFAULT_PORT } from "./transport";
 
 export type StartMcpServerOptions = Readonly<{
@@ -21,9 +23,35 @@ export const startMcpServer = async ({
 
   try {
     const address = await transport.start();
-    return { address, close: () => transport.close() };
+    return {
+      address,
+      close: async () => {
+        try {
+          await transport.close();
+        } catch (error) {
+          reportServerFailure(error, {
+            operation: "mcp_transport",
+            stage: "close",
+          });
+          throw error;
+        }
+      },
+    };
   } catch (error) {
-    await transport.close();
+    let operationError = error;
+    try {
+      await transport.close({ reportFailure: false });
+    } catch (cleanupError) {
+      operationError = new OperationCleanupError(
+        error,
+        cleanupError,
+        "startup_cleanup",
+      );
+    }
+    reportServerFailure(operationError, {
+      operation: "mcp_startup",
+      stage: "listen",
+    });
     throw error;
   }
 };

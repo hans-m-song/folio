@@ -1,10 +1,13 @@
 import { MCP_MAX_REQUEST_BODY_BYTES } from "./server";
+import { AppError } from "../domain/errors";
+import { reportServerFailure } from "../server/error-handling";
 
 type LogWriter = (message: string) => void;
 
 type RequestLogOptions = Readonly<{
   logSuccess?: boolean;
   info?: LogWriter;
+  warn?: LogWriter;
   error?: LogWriter;
 }>;
 
@@ -104,6 +107,16 @@ const writeSafely = (writer: LogWriter, event: Record<string, unknown>) => {
   }
 };
 
+const attachFailureReference = (response: Response, reference: string) => {
+  const headers = new Headers(response.headers);
+  headers.set("x-folio-error-reference", reference);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+};
+
 export const withMcpRequestLogging = async (
   request: Request,
   action: () => Response | Promise<Response>,
@@ -124,31 +137,59 @@ export const withMcpRequestLogging = async (
       const identity = mayInspectBody(response.status)
         ? await requestIdentity(logRequest)
         : {};
-      writeSafely(
-        response.status >= 400
-          ? (options.error ?? console.error)
-          : (options.info ?? console.log),
-        {
-          ...common,
-          ...identity,
-          timestamp: new Date().toISOString(),
-          status: response.status,
-          ...(response.status >= 400
-            ? { stage: responseStage(response.status) }
-            : {}),
-          durationMs: Math.round(performance.now() - startedAt),
-        },
-      );
+      const durationMs = Math.round(performance.now() - startedAt);
+      if (response.status >= 400) {
+        if (response.headers.has("x-folio-error-reference")) return response;
+        const stage = responseStage(response.status);
+        const tool = "mcpTool" in identity ? identity.mcpTool : undefined;
+        const reported = reportServerFailure(
+          new AppError({
+            code:
+              response.status === 401
+                ? "UNAUTHENTICATED"
+                : response.status === 403
+                  ? "REQUEST_FORBIDDEN"
+                  : response.status < 500
+                    ? "INPUT_INVALID"
+                    : "REQUEST_FAILED",
+            stage,
+          }),
+          {
+            operation: tool ?? "mcp_http_request",
+            stage,
+            metadata: { httpStatus: response.status, ...identity },
+            request,
+            durationMs,
+          },
+          options,
+        );
+        return attachFailureReference(
+          response,
+          reported.publicFailure.reference,
+        );
+      }
+
+      writeSafely(options.info ?? console.log, {
+        ...common,
+        ...identity,
+        timestamp: new Date().toISOString(),
+        status: response.status,
+        durationMs,
+      });
     }
     return response;
   } catch (error) {
-    writeSafely(options.error ?? console.error, {
-      ...common,
-      timestamp: new Date().toISOString(),
-      status: 500,
-      stage: "route_exception",
-      durationMs: Math.round(performance.now() - startedAt),
-    });
+    reportServerFailure(
+      error,
+      {
+        operation: "mcp_http_request",
+        stage: "route_exception",
+        metadata: { httpStatus: 500 },
+        request,
+        durationMs: Math.round(performance.now() - startedAt),
+      },
+      options,
+    );
     throw error;
   }
 };

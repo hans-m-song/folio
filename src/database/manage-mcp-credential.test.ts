@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   credentialScopeHelp,
   generateCredentialSecret,
   parseCredentialCommand,
+  runManageMcpCredential,
 } from "./manage-mcp-credential";
 
 const administratorId = "11111111-1111-4111-8111-111111111111";
@@ -125,5 +126,124 @@ describe("MCP credential administration", () => {
       administratorId,
       credentialId: actorUserId,
     });
+  });
+
+  it("logs successful mutations with safe contextual IDs", async () => {
+    const pool = { end: vi.fn(async () => undefined) };
+    const repository = {
+      createCredential: vi.fn(async () => ({
+        id: "44444444-4444-4444-8444-444444444444",
+      })),
+      revokeCredential: vi.fn(),
+    };
+    const info = vi.fn();
+    const output = vi.fn();
+    const exitCode = await runManageMcpCredential({
+      arguments_: [
+        "create",
+        "--administrator-id",
+        administratorId,
+        "--actor-user-id",
+        actorUserId,
+        "--default-owner-id",
+        defaultOwnerId,
+        "--label",
+        "Synthetic intake",
+        "--scope",
+        "transactions:draft",
+      ],
+      environment: {},
+      configLoader: () =>
+        ({
+          databaseUrl: "postgres://synthetic.invalid/folio",
+          databaseSchema: "folio",
+          gstRegistered: false,
+        }) as never,
+      poolFactory: () => pool as never,
+      repositoryFactory: () => repository as never,
+      secretGenerator: () => ({
+        token: "synthetic-token-not-for-logs",
+        tokenHash: "a".repeat(64),
+      }),
+      output,
+      successWriters: { info },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(repository.createCredential).toHaveBeenCalledTimes(1);
+    expect(pool.end).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledTimes(1);
+    const event = JSON.parse(info.mock.calls[0][0] as string);
+    expect(event).toMatchObject({
+      event: "folio.operation",
+      operation: "mcp_credential_create",
+      stage: "create",
+      phase: "success",
+      mutation: true,
+      actorId: administratorId,
+      userId: actorUserId,
+      credentialId: "44444444-4444-4444-8444-444444444444",
+      count: 1,
+    });
+    expect(JSON.stringify(event)).not.toContain("synthetic-token");
+    expect(JSON.stringify(event)).not.toContain("Synthetic intake");
+  });
+
+  it("links database and close failures into one sanitized event", async () => {
+    const error = vi.fn();
+    const pool = {
+      end: vi.fn(async () => {
+        throw new Error("private close details");
+      }),
+    };
+    const repository = {
+      createCredential: vi.fn(async () => {
+        throw new Error("private database details");
+      }),
+      revokeCredential: vi.fn(),
+    };
+    const exitCode = await runManageMcpCredential({
+      arguments_: [
+        "create",
+        "--administrator-id",
+        administratorId,
+        "--actor-user-id",
+        actorUserId,
+        "--default-owner-id",
+        defaultOwnerId,
+        "--label",
+        "Synthetic intake",
+        "--scope",
+        "transactions:draft",
+      ],
+      environment: {},
+      configLoader: () =>
+        ({
+          databaseUrl: "postgres://synthetic.invalid/folio",
+          databaseSchema: "folio",
+          gstRegistered: false,
+        }) as never,
+      poolFactory: () => pool as never,
+      repositoryFactory: () => repository as never,
+      secretGenerator: () => ({
+        token: "synthetic-token-not-for-logs",
+        tokenHash: "a".repeat(64),
+      }),
+      error,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(pool.end).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledTimes(1);
+    const event = JSON.parse(error.mock.calls[0][0] as string);
+    expect(event).toMatchObject({
+      operation: "mcp_credential",
+      stage: "create",
+      mutation: true,
+      code: "UNEXPECTED_ERROR",
+      cleanupFailures: [{ stage: "close", code: "UNEXPECTED_ERROR" }],
+    });
+    expect(JSON.stringify(event)).not.toContain("private");
+    expect(JSON.stringify(event)).not.toContain("synthetic-token");
   });
 });

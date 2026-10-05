@@ -480,42 +480,58 @@ describe("Folio MCP tools", () => {
 
   it("requires the creator actor to confirm and returns non-blocking CSV warnings", async () => {
     const fakes = createDependencies();
-    await withServer(fakes.dependencies, principal(), async ({ address }) => {
-      fakes.repository.getArtifactCreatorId.mockResolvedValueOnce(ids.owner);
-      const denied = await call(address.port, "confirm_artifact_upload", {
-        artifactId: ids.artifact,
-      });
-      expect(toolValue(denied).value?.code).toBe("ARTIFACT_NOT_CONFIRMABLE");
-      expect(fakes.documents.confirmUpload).not.toHaveBeenCalled();
-
-      const confirmed = await call(address.port, "confirm_artifact_upload", {
-        artifactId: ids.artifact,
-      });
-      const confirmedValue = toolValue(confirmed).value;
-      expect(fakes.documents.confirmUpload).toHaveBeenCalledWith(
-        ids.actor,
-        ids.artifact,
-      );
-      expect(confirmedValue?.duplicateWarnings).toEqual({
-        status: "available",
-        report: csvWarningReport,
-      });
-
-      fakes.getCsvDuplicateWarnings.mockRejectedValueOnce(
-        new Error("synthetic"),
-      );
-      const warningFailure = await call(
-        address.port,
-        "confirm_artifact_upload",
-        {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await withServer(fakes.dependencies, principal(), async ({ address }) => {
+        fakes.repository.getArtifactCreatorId.mockResolvedValueOnce(ids.owner);
+        const denied = await call(address.port, "confirm_artifact_upload", {
           artifactId: ids.artifact,
-        },
-      );
-      expect(toolValue(warningFailure).value?.duplicateWarnings).toEqual({
-        status: "unavailable",
+        });
+        expect(toolValue(denied).value?.code).toBe("ARTIFACT_NOT_CONFIRMABLE");
+        expect(fakes.documents.confirmUpload).not.toHaveBeenCalled();
+
+        const confirmed = await call(address.port, "confirm_artifact_upload", {
+          artifactId: ids.artifact,
+        });
+        const confirmedValue = toolValue(confirmed).value;
+        expect(fakes.documents.confirmUpload).toHaveBeenCalledWith(
+          ids.actor,
+          ids.artifact,
+        );
+        expect(confirmedValue?.duplicateWarnings).toEqual({
+          status: "available",
+          report: csvWarningReport,
+        });
+
+        fakes.getCsvDuplicateWarnings.mockRejectedValueOnce(
+          new Error("synthetic"),
+        );
+        const warningFailure = await call(
+          address.port,
+          "confirm_artifact_upload",
+          {
+            artifactId: ids.artifact,
+          },
+        );
+        expect(toolValue(warningFailure).value?.duplicateWarnings).toEqual({
+          status: "unavailable",
+        });
+        expect(toolValue(warningFailure).result?.isError).toBeFalsy();
+        expect(errorLog).toHaveBeenCalledTimes(1);
+        const event = JSON.parse(errorLog.mock.calls[0][0] as string);
+        expect(event).toMatchObject({
+          operation: "confirm_artifact_upload",
+          stage: "duplicate_warnings",
+          mutation: false,
+          phase: "failure",
+          artifactId: ids.artifact,
+          actorId: ids.actor,
+        });
+        expect(JSON.stringify(event)).not.toContain("synthetic");
       });
-      expect(toolValue(warningFailure).result?.isError).toBeFalsy();
-    });
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it("submits drafts only and validates a CommBank locator against its pinned CSV", async () => {
@@ -671,10 +687,12 @@ describe("Folio MCP tools", () => {
         expectedUpdatedAt: "2026-09-27T00:00:00.123456Z",
         changes: { reference: "INV-43" },
       });
-      expect(toolValue(response).value).toEqual({
+      expect(toolValue(response).value).toMatchObject({
         code: "REVISION_CONFLICT",
         message: "The transaction changed after it was read.",
+        recovery: "refresh",
       });
+      expect(toolValue(response).value?.reference).toMatch(/^[0-9a-f-]{36}$/i);
     });
   });
 
@@ -716,31 +734,98 @@ describe("Folio MCP tools", () => {
         note: "Synthetic private note must not be echoed",
       });
       const value = toolValue(response).value;
-      expect(value).toEqual({
+      expect(value).toMatchObject({
         code: "IDEMPOTENCY_CONFLICT",
         message: "This idempotency key was used with a different request.",
+        recovery: "refresh",
       });
+      expect(value?.reference).toMatch(/^[0-9a-f-]{36}$/i);
       expect(JSON.stringify(value)).not.toContain("Synthetic private note");
     });
   });
 
+  it("logs successful mutations without logging successful reads", async () => {
+    const fakes = createDependencies();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await withServer(fakes.dependencies, principal(), async ({ address }) => {
+        const read = await call(address.port, "search_transactions", {
+          search: "",
+          page: 1,
+        });
+        expect(toolValue(read).value?.isError).toBeUndefined();
+        expect(log).not.toHaveBeenCalled();
+
+        const mutation = await call(address.port, "begin_artifact_upload", {
+          idempotencyKey: "upload:diagnostic-test",
+          profile: "commbank_transaction_history_csv_v1",
+          filename: "statement.csv",
+          byteSize: 42,
+          checksumSha256: `${"A".repeat(43)}=`,
+        });
+        expect(toolValue(mutation).value?.isError).toBeUndefined();
+        expect(log).toHaveBeenCalledTimes(1);
+        const event = JSON.parse(log.mock.calls[0][0] as string) as Record<
+          string,
+          unknown
+        >;
+        expect(event).toMatchObject({
+          operation: "begin_artifact_upload",
+          stage: "tool_call",
+          phase: "success",
+          actorId: ids.actor,
+          artifactId: ids.artifact,
+        });
+        expect(event).not.toHaveProperty("filename");
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("reports domain validation without echoing submitted financial values", async () => {
     const fakes = createDependencies();
-    await withServer(fakes.dependencies, principal(), async ({ address }) => {
-      const response = await call(address.port, "submit_draft_transaction", {
-        idempotencyKey: "draft:invalid-value",
-        transaction: {
-          kind: "sale",
-          counterparty: "Synthetic customer detail",
-          documentAmount: "not-a-decimal",
-        },
-      });
-      const value = toolValue(response).value;
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await withServer(fakes.dependencies, principal(), async ({ address }) => {
+        const response = await call(address.port, "submit_draft_transaction", {
+          idempotencyKey: "draft:invalid-value",
+          transaction: {
+            kind: "sale",
+            counterparty: "Synthetic customer detail",
+            documentAmount: "not-a-decimal",
+          },
+        });
+        const value = toolValue(response).value;
 
-      expect(value?.code).toBe("INVALID_ARGUMENTS");
-      expect(JSON.stringify(value)).not.toContain("Synthetic customer detail");
-      expect(JSON.stringify(value)).not.toContain("not-a-decimal");
-      expect(fakes.proposalRepository.submit).not.toHaveBeenCalled();
-    });
+        expect(value?.code).toBe("INVALID_ARGUMENTS");
+        expect(value?.recovery).toBe("fix_input");
+        expect(value?.reference).toMatch(/^[0-9a-f-]{36}$/i);
+        expect(JSON.stringify(value)).not.toContain(
+          "Synthetic customer detail",
+        );
+        expect(JSON.stringify(value)).not.toContain("not-a-decimal");
+        expect(fakes.proposalRepository.submit).not.toHaveBeenCalled();
+        expect(info).toHaveBeenCalledTimes(1);
+        const event = JSON.parse(info.mock.calls[0][0] as string) as Record<
+          string,
+          unknown
+        >;
+        expect(event).toMatchObject({
+          operation: "submit_draft_transaction",
+          stage: "tool_call",
+          phase: "failure",
+          code: "INVALID_ARGUMENTS",
+          actorId: ids.actor,
+        });
+        expect(value?.reference).toBe(event.correlationId);
+        expect(JSON.stringify(event)).not.toContain(
+          "Synthetic customer detail",
+        );
+        expect(JSON.stringify(event)).not.toContain("not-a-decimal");
+      });
+    } finally {
+      info.mockRestore();
+    }
   });
 });
