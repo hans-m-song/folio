@@ -3,6 +3,7 @@ import { setResponseHeader } from "@tanstack/react-start/server";
 import { Pool } from "pg";
 
 import { AuthService, createGoogleOidcOperations } from "../auth/service";
+import { createS3CredentialsProvider } from "../aws/credentials";
 import { loadAuthConfig, loadConfig } from "../config";
 import { AuthRepository } from "../database/auth-repository";
 import { BankRepository } from "../database/bank-repository";
@@ -24,8 +25,13 @@ function createRuntime() {
     config.databaseSchema,
     config.gstRegistered,
   );
+  const credentials = createS3CredentialsProvider(
+    config.awsAssumeRoleArn,
+    config.s3Region,
+  );
   const internalStorageClient = new S3Client({
     region: config.s3Region,
+    ...(credentials ? { credentials } : {}),
     ...(config.s3InternalEndpoint
       ? { endpoint: config.s3InternalEndpoint, forcePathStyle: true }
       : {}),
@@ -33,6 +39,7 @@ function createRuntime() {
   const publicPresignClient = config.s3PublicEndpoint
     ? new S3Client({
         region: config.s3Region,
+        ...(credentials ? { credentials } : {}),
         endpoint: config.s3PublicEndpoint,
         forcePathStyle: true,
       })

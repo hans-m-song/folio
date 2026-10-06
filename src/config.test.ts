@@ -18,7 +18,24 @@ const valid = {
 
 describe("Folio configuration", () => {
   it("accepts an isolated private deployment", () => {
-    expect(loadConfig(valid).databaseSchema).toBe("folio_test");
+    expect(loadConfig(valid)).toMatchObject({
+      databaseSchema: "folio_test",
+      awsAssumeRoleArn: null,
+    });
+  });
+
+  it("trims a configured AWS role ARN and treats whitespace as unset", () => {
+    expect(
+      loadConfig({
+        ...valid,
+        AWS_ASSUME_ROLE_ARN: "  arn:aws:iam::123456789012:role/folio  ",
+      }),
+    ).toMatchObject({
+      awsAssumeRoleArn: "arn:aws:iam::123456789012:role/folio",
+    });
+    expect(
+      loadConfig({ ...valid, AWS_ASSUME_ROLE_ARN: "  " }).awsAssumeRoleArn,
+    ).toBeNull();
   });
 
   it("fails closed on unsafe namespaces and exposure", () => {

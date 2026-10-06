@@ -1,5 +1,20 @@
 # Folio delivery roadmap
 
+## AWS-ASSUME-ROLE — Optional AWS role credentials
+
+Status: implemented on 7 October 2026; focused verification complete.
+
+- [x] Inspect web, MCP, and reconciliation AWS client boundaries.
+- [x] Confirm optional `AWS_ASSUME_ROLE_ARN` and default-chain source identity.
+- [x] Implement refreshing role credentials across S3 and presigning clients.
+- [x] Verify focused unit tests, TypeScript, and scoped lint/format.
+- [x] Document configuration and verified handoff.
+
+Scope: optional role assumption using the SDK temporary credential provider.
+No MFA/external ID support or live AWS/integration checks in this slice.
+TypeScript and scoped lint/format pass. Focused tests: 38 passed, one skipped,
+one existing cleanup-diagnostics privacy assertion failed; new role tests pass.
+
 ## BILL-T94 — Standard error handling and operational diagnostics
 
 Status: complete on 5 October 2026; verified application slices committed.

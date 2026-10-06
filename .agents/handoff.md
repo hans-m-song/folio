@@ -1,5 +1,21 @@
 # Handoff
 
+## AWS assumed role implemented — 2026-10-07
+
+- Approved optional `AWS_ASSUME_ROLE_ARN` is wired into web, MCP, presigning, and
+  upload reconciliation. Blank/unset retains SDK default credential resolution.
+- Shared provider per runtime uses SDK temporary credentials, session `folio`,
+  and `FOLIO_S3_REGION` for STS. README documents configuration and limitations.
+- TypeScript passes after fixing the reconciliation client factory options type.
+- Scoped lint/format pass. Focused tests: 38 passed, one skipped, one existing
+  cleanup-diagnostics privacy failure. New role tests pass; the failing case and
+  cleanup handling were not edited in this task.
+- Preserve all pre-existing database, Compose, and diagnostics edits. No live
+  AWS or integration checks were authorized or performed.
+- Operator questioned duplicate clients. Web `/mcp` creates a separate cached
+  runtime in the same process; consolidating storage ownership is a possible
+  follow-up, not part of this approved implementation.
+
 ## Standard error handling verified — 2026-10-05
 
 - BILL-T94 confirmed: browser-safe public code/message/recovery/reference;

@@ -1,5 +1,19 @@
 # Folio standalone decisions
 
+## 2026-10-07 — Optional AWS assumed role
+
+- Operator approved `AWS_ASSUME_ROLE_ARN` using the SDK default source identity.
+- `src/aws/credentials.ts` uses `fromTemporaryCredentials` with session name
+  `folio` and the configured S3 region for STS; custom S3 endpoints stay separate.
+- Web/MCP internal and presigning clients use the same provider per runtime;
+  reconciliation uses it too. Unset/blank preserves the default credential chain.
+- MFA/external ID support and live AWS verification are outside this slice.
+- TypeScript and scoped lint/format pass. Focused tests: 38 passed, one skipped,
+  one existing cleanup-diagnostics privacy failure; new role tests pass.
+- Client construction remains duplicated between web and MCP runtimes. The web
+  `/mcp` endpoint caches a separate runtime in the same process; endpoint-specific
+  clients are needed for distinct internal and browser-visible endpoints.
+
 ## 2026-10-05 — Safe error contract and default operation diagnostics
 
 - BILL-T94 uses a domain policy catalog and framework-independent server logger.

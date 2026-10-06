@@ -21,6 +21,11 @@ const timezone = z.string().refine((value) => {
     return false;
   }
 }, "Expected a valid IANA timezone name");
+const optionalTrimmedString = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().trim().min(1).optional(),
+);
 
 const authConfigSchema = z
   .object({
@@ -108,6 +113,7 @@ const configSchema = z
     FOLIO_DATABASE_SCHEMA: identifier,
     FOLIO_DATABASE_APP_ROLE: identifier.default("folio_app"),
     FOLIO_S3_REGION: z.string().min(1),
+    AWS_ASSUME_ROLE_ARN: optionalTrimmedString,
     FOLIO_S3_BUCKET: z.string().min(3),
     FOLIO_S3_KEY_PREFIX: prefix,
     FOLIO_S3_INTERNAL_ENDPOINT: z.string().url().optional(),
@@ -163,6 +169,7 @@ export function loadConfig(environment: Record<string, string | undefined>) {
     databaseSchema: value.FOLIO_DATABASE_SCHEMA,
     databaseAppRole: value.FOLIO_DATABASE_APP_ROLE,
     s3Region: value.FOLIO_S3_REGION,
+    awsAssumeRoleArn: value.AWS_ASSUME_ROLE_ARN ?? null,
     s3Bucket: value.FOLIO_S3_BUCKET,
     s3KeyPrefix: value.FOLIO_S3_KEY_PREFIX,
     s3InternalEndpoint: value.FOLIO_S3_INTERNAL_ENDPOINT ?? null,

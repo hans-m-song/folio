@@ -73,6 +73,22 @@ AWS_PROFILE=folio-local pnpm dev
 
 Do not configure `FOLIO_AWS_PROFILE`; it is not a Folio setting. A profile must already be available to the process through the normal AWS SDK configuration. Folio does not read, copy, or display AWS credential files, presigned URLs, or document contents.
 
+To assume a role using the identity resolved by that chain, set
+`AWS_ASSUME_ROLE_ARN`:
+
+```sh
+AWS_PROFILE=folio-local AWS_ASSUME_ROLE_ARN=arn:aws:iam::123456789012:role/folio pnpm dev
+```
+
+This optional Folio setting applies to web and MCP S3 operations, presigned
+upload/download URLs, and the upload reconciliation command. When omitted or
+blank, the SDK uses its default credential chain. Role credentials refresh through
+the SDK temporary credential provider, with session name `folio` and STS region
+`FOLIO_S3_REGION`. Custom S3 endpoints do not change the STS endpoint.
+The source identity needs permission to assume the role, and the role must trust
+that identity. This setting does not supply an MFA token or external ID. See
+[AWS credential provider documentation](https://docs.aws.amazon.com/sdk-for-javascript/v3/developer-guide/migrate-credential-providers.html).
+
 ## Server diagnostics
 
 Server operations emit one-line JSON completion records to the development terminal.

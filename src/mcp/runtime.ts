@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { S3Client } from "@aws-sdk/client-s3";
 import { Pool } from "pg";
 
+import { createS3CredentialsProvider } from "../aws/credentials";
 import { loadConfig } from "../config";
 import { BankRepository } from "../database/bank-repository";
 import { ProposalRepository } from "../database/proposal-repository";
@@ -56,8 +57,13 @@ export const createMcpRuntime = (
     config.databaseSchema,
     config.gstRegistered,
   );
+  const credentials = createS3CredentialsProvider(
+    config.awsAssumeRoleArn,
+    config.s3Region,
+  );
   const internalStorageClient = new S3Client({
     region: config.s3Region,
+    ...(credentials ? { credentials } : {}),
     ...(config.s3InternalEndpoint
       ? { endpoint: config.s3InternalEndpoint, forcePathStyle: true }
       : {}),
@@ -65,6 +71,7 @@ export const createMcpRuntime = (
   const publicPresignClient = config.s3PublicEndpoint
     ? new S3Client({
         region: config.s3Region,
+        ...(credentials ? { credentials } : {}),
         endpoint: config.s3PublicEndpoint,
         forcePathStyle: true,
       })

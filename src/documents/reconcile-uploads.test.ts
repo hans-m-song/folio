@@ -75,4 +75,40 @@ describe("upload reconciliation CLI", () => {
     expect(JSON.stringify(event)).not.toContain("private query detail");
     expect(JSON.stringify(event)).not.toContain("private close detail");
   });
+
+  it("passes the assumed-role provider to its S3 client without resolving it", async () => {
+    const client = { destroy: vi.fn() };
+    const pool = {
+      query: vi.fn(async () => ({ rows: [] })),
+      end: vi.fn(async () => undefined),
+    };
+    const s3ClientFactory = vi.fn((_options: unknown) => client as never);
+    const exitCode = await runReconcileUploads({
+      arguments_: [],
+      environment: {},
+      configLoader: () =>
+        ({
+          databaseUrl: "postgres://synthetic.invalid/folio",
+          databaseSchema: "folio",
+          gstRegistered: false,
+          s3Region: "ap-southeast-2",
+          awsAssumeRoleArn: "arn:aws:iam::123456789012:role/folio",
+          s3Bucket: "folio-test",
+        }) as never,
+      poolFactory: () => pool as never,
+      s3ClientFactory,
+      storageFactory: () => ({}) as never,
+      output: () => undefined,
+      error: () => undefined,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(s3ClientFactory).toHaveBeenCalledTimes(1);
+    expect(s3ClientFactory.mock.calls[0]?.[0]).toMatchObject({
+      region: "ap-southeast-2",
+      credentials: expect.any(Function),
+    });
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(client.destroy).toHaveBeenCalledTimes(1);
+  });
 });

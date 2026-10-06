@@ -2,10 +2,11 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import { S3Client } from "@aws-sdk/client-s3";
+import { S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
 import { Pool } from "pg";
 import { z } from "zod";
 
+import { createS3CredentialsProvider } from "../aws/credentials";
 import { loadConfig } from "../config";
 import { OperationCleanupError } from "../domain/errors";
 import { writeDatabaseCliFailure } from "../database/cli-errors";
@@ -26,6 +27,7 @@ type ReconciliationOptions = Readonly<{
   environment?: Parameters<typeof loadConfig>[0];
   configLoader?: typeof loadConfig;
   poolFactory?: (options: { connectionString: string; max: number }) => Pool;
+  s3ClientFactory?: (options: S3ClientConfig) => S3Client;
   storageFactory?: (client: S3Client) => S3ObjectStorage;
   output?: (text: string) => void;
   error?: (line: string) => void;
@@ -37,6 +39,7 @@ export const runReconcileUploads = async ({
   environment = process.env,
   configLoader = loadConfig,
   poolFactory = (options) => new Pool(options),
+  s3ClientFactory = (options) => new S3Client(options),
   storageFactory = (client) => new S3ObjectStorage(client),
   output = (text) => process.stdout.write(text),
   error: writeError = (line) => process.stderr.write(`${line}\n`),
@@ -76,7 +79,14 @@ export const runReconcileUploads = async ({
       config.databaseSchema,
       config.gstRegistered,
     );
-    s3Client = new S3Client({ region: config.s3Region });
+    const credentials = createS3CredentialsProvider(
+      config.awsAssumeRoleArn,
+      config.s3Region,
+    );
+    s3Client = s3ClientFactory({
+      region: config.s3Region,
+      ...(credentials ? { credentials } : {}),
+    });
     const storage = storageFactory(s3Client);
 
     output(

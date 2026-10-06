@@ -10,6 +10,7 @@ independently verified on 23 September 2026
 folio/
 |-- src/
 |   |-- auth/            server-only OIDC, claims, sessions, and cookie helpers
+|   |-- aws/             optional SDK role credential provider
 |   |-- browser/         browser-compatible upload checksums and secure UUIDs
 |   |-- domain/          transaction rules, money, periods, reports, Stripe CSV, and planned bank activity
 |   |-- components/      reusable UI controls and the managed manual transaction form
