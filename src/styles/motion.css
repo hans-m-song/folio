@@ -1,0 +1,68 @@
+.banking-create-overlay[data-entering] {
+  animation: banking-create-overlay-enter 150ms ease-out both;
+}
+
+.banking-create-overlay[data-exiting] {
+  animation: banking-create-overlay-exit 150ms ease-in both;
+}
+
+.banking-create-modal[data-entering] {
+  animation: banking-create-drawer-enter 150ms ease-out both;
+}
+
+.banking-create-modal[data-exiting] {
+  animation: banking-create-drawer-exit 150ms ease-in both;
+}
+
+@keyframes banking-create-overlay-enter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes banking-create-overlay-exit {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes banking-create-drawer-enter {
+  from {
+    opacity: 0.92;
+    transform: translateX(1rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes banking-create-drawer-exit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  to {
+    opacity: 0.92;
+    transform: translateX(1rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .banking-create-overlay[data-entering],
+  .banking-create-overlay[data-exiting],
+  .banking-create-modal[data-entering],
+  .banking-create-modal[data-exiting] {
+    animation: none;
+  }
+}
