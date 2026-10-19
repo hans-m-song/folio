@@ -14,6 +14,22 @@
   animation: banking-create-drawer-exit 150ms ease-in both;
 }
 
+.bank-invoice-upload-overlay[data-entering] {
+  animation: banking-create-overlay-enter 150ms ease-out both;
+}
+
+.bank-invoice-upload-overlay[data-exiting] {
+  animation: banking-create-overlay-exit 150ms ease-in both;
+}
+
+.bank-invoice-upload-modal[data-entering] {
+  animation: banking-create-drawer-enter 150ms ease-out both;
+}
+
+.bank-invoice-upload-modal[data-exiting] {
+  animation: banking-create-drawer-exit 150ms ease-in both;
+}
+
 @keyframes banking-create-overlay-enter {
   from {
     opacity: 0;
@@ -62,7 +78,11 @@
   .banking-create-overlay[data-entering],
   .banking-create-overlay[data-exiting],
   .banking-create-modal[data-entering],
-  .banking-create-modal[data-exiting] {
+  .banking-create-modal[data-exiting],
+  .bank-invoice-upload-overlay[data-entering],
+  .bank-invoice-upload-overlay[data-exiting],
+  .bank-invoice-upload-modal[data-entering],
+  .bank-invoice-upload-modal[data-exiting] {
     animation: none;
   }
 }
