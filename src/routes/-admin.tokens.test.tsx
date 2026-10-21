@@ -2,11 +2,13 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { createElement } from "react";
 import { selectAutocompleteOption } from "../components/autocomplete-test-helpers";
@@ -62,6 +64,53 @@ const mocks = vi.hoisted(() => ({
   revokeMcpCredential: vi.fn(),
 }));
 
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(
+  navigator,
+  "clipboard",
+);
+const originalExecCommandDescriptor = Object.getOwnPropertyDescriptor(
+  document,
+  "execCommand",
+);
+
+const setClipboard = (clipboard: unknown) =>
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: clipboard,
+  });
+
+const setExecCommand = (copy: () => boolean) => {
+  const execCommand = vi.fn(copy);
+  Object.defineProperty(document, "execCommand", {
+    configurable: true,
+    value: execCommand,
+  });
+  return execCommand;
+};
+
+const selectedText = () => window.getSelection()?.toString() ?? "";
+const copyFeedbackText = () =>
+  within(screen.getByRole("group", { name: "New token" })).queryByRole("status")
+    ?.textContent ?? "";
+
+const createToken = async (token: string) => {
+  mocks.createMcpCredential.mockResolvedValue({ token, credential });
+  fireEvent.change(screen.getByRole("textbox", { name: "Label" }), {
+    target: { value: "Synthetic integration" },
+  });
+  await selectAutocompleteOption(
+    screen.getByRole("combobox", { name: "Dedicated actor" }),
+    "Dedicated actor (member)",
+  );
+  await selectAutocompleteOption(
+    screen.getByRole("combobox", { name: "Default owner" }),
+    "Default owner (member)",
+  );
+  fireEvent.click(screen.getByLabelText("Search transactions"));
+  fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+  await waitFor(() => expect(screen.getByText(token)).toBeTruthy());
+};
+
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (options: unknown) => ({
     options,
@@ -115,7 +164,24 @@ beforeEach(() => {
   mocks.listMcpCredentials.mockResolvedValue([credential]);
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  window.getSelection()?.removeAllRanges();
+  if (originalClipboardDescriptor) {
+    Object.defineProperty(navigator, "clipboard", originalClipboardDescriptor);
+  } else {
+    Reflect.deleteProperty(navigator, "clipboard");
+  }
+  if (originalExecCommandDescriptor) {
+    Object.defineProperty(
+      document,
+      "execCommand",
+      originalExecCommandDescriptor,
+    );
+  } else {
+    Reflect.deleteProperty(document, "execCommand");
+  }
+});
 
 describe("access token administration", () => {
   it("does not load credential metadata for a non-administrator", async () => {
@@ -184,4 +250,126 @@ describe("access token administration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss token" }));
     expect(screen.queryByText(token)).toBeNull();
   });
+
+  it("copies with the modern clipboard API and reports success beside the button", async () => {
+    const token = "synthetic-modern-copy-token";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const legacyCopy = setExecCommand(() => true);
+    render(createElement(AccessTokensPage));
+    await createToken(token);
+    setClipboard({ writeText });
+    expect(navigator.clipboard?.writeText).toBe(writeText);
+    expect(document.execCommand).toBe(legacyCopy);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
+
+    await waitFor(() =>
+      expect(copyFeedbackText()).toBe("Token copied. Store it securely."),
+    );
+    expect(writeText).toHaveBeenCalledWith(token);
+    expect(legacyCopy).not.toHaveBeenCalled();
+  });
+
+  it("uses selected visible token fallback when the modern API is absent", async () => {
+    const token = "synthetic-legacy-copy-token";
+    const legacyCopy = setExecCommand(() => true);
+    render(createElement(AccessTokensPage));
+    await createToken(token);
+    setClipboard(undefined);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
+
+    await waitFor(() => expect(legacyCopy).toHaveBeenCalledWith("copy"));
+    await waitFor(() =>
+      expect(copyFeedbackText()).toBe("Token copied. Store it securely."),
+    );
+    expect(selectedText()).toBe(token);
+  });
+
+  it("falls back to selected visible token when modern clipboard access is denied", async () => {
+    const token = "synthetic-denied-copy-token";
+    const writeText = vi.fn().mockRejectedValue(new Error("permission denied"));
+    const legacyCopy = setExecCommand(() => true);
+    render(createElement(AccessTokensPage));
+    await createToken(token);
+    setClipboard({ writeText });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(token));
+    await waitFor(() => expect(legacyCopy).toHaveBeenCalledWith("copy"));
+    await waitFor(() =>
+      expect(copyFeedbackText()).toBe("Token copied. Store it securely."),
+    );
+    expect(selectedText()).toBe(token);
+  });
+
+  it.each([
+    ["returns false", () => false],
+    [
+      "throws",
+      () => {
+        throw new Error("copy unavailable");
+      },
+    ],
+  ])(
+    "leaves the token selected and gives manual instructions when legacy copy %s",
+    async (_case, copy) => {
+      const token = "synthetic-manual-copy-token";
+      const legacyCopy = setExecCommand(copy);
+      render(createElement(AccessTokensPage));
+      await createToken(token);
+      setClipboard(undefined);
+
+      fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
+
+      await waitFor(() =>
+        expect(copyFeedbackText()).toBe(
+          "Could not copy automatically. The token is selected; press Cmd/Ctrl+C to copy it.",
+        ),
+      );
+      expect(legacyCopy).toHaveBeenCalledWith("copy");
+      expect(selectedText()).toBe(token);
+      expect(screen.queryByText("Token copied. Store it securely.")).toBeNull();
+    },
+  );
+
+  it.each(["fulfills", "rejects"] as const)(
+    "does not let a pending copy that later %s affect its replacement",
+    async (outcome) => {
+      const firstToken = "synthetic-first-copy-token";
+      const secondToken = "synthetic-second-copy-token";
+      let resolveCopy: (() => void) | undefined;
+      let rejectCopy: ((reason?: unknown) => void) | undefined;
+      const legacyCopy = setExecCommand(() => true);
+      render(createElement(AccessTokensPage));
+      await createToken(firstToken);
+      setClipboard({
+        writeText: vi.fn(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              resolveCopy = resolve;
+              rejectCopy = reject;
+            }),
+        ),
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
+      await waitFor(() =>
+        expect(outcome === "fulfills" ? resolveCopy : rejectCopy).toBeDefined(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss token" }));
+      await createToken(secondToken);
+
+      await act(async () => {
+        if (outcome === "fulfills") resolveCopy?.();
+        else rejectCopy?.(new Error("permission denied"));
+        await Promise.resolve();
+      });
+      expect(screen.getByText(secondToken)).toBeTruthy();
+      expect(copyFeedbackText()).toBe("");
+      expect(selectedText()).toBe("");
+      expect(legacyCopy).not.toHaveBeenCalled();
+    },
+  );
 });

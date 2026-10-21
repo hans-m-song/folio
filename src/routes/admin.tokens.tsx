@@ -1,6 +1,6 @@
 import { AutocompleteSelect } from "../components/autocomplete";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 
 import { getCurrentSession } from "../auth/session-server";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
@@ -71,6 +71,12 @@ export function AccessTokensPage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [created, setCreated] = useState<CreatedCredential | null>(null);
+  const [copyFeedback, setCopyFeedback] = useState<{
+    credential: CreatedCredential;
+    message: string;
+  } | null>(null);
+  const createdRef = useRef<CreatedCredential | null>(null);
+  const tokenElementRef = useRef<HTMLElement | null>(null);
   const [revoking, setRevoking] = useState<ProposalCredentialRecord | null>(
     null,
   );
@@ -104,7 +110,9 @@ export function AccessTokensPage() {
     }
     setBusy(true);
     setMessage("");
+    createdRef.current = null;
     setCreated(null);
+    setCopyFeedback(null);
     try {
       const result = await createMcpCredential({
         data: {
@@ -114,6 +122,7 @@ export function AccessTokensPage() {
           scopes,
         },
       });
+      createdRef.current = result;
       setCreated(result);
       form.reset();
       await router.invalidate();
@@ -127,12 +136,57 @@ export function AccessTokensPage() {
 
   const copyToken = async () => {
     if (!created) return;
+    setCopyFeedback(null);
+
     try {
-      await navigator.clipboard.writeText(created.token);
-      setMessage("Token copied. Store it securely.");
+      const clipboard = navigator.clipboard;
+      if (clipboard?.writeText) {
+        await clipboard.writeText(created.token);
+        if (createdRef.current !== created) return;
+        setCopyFeedback({
+          credential: created,
+          message: "Token copied. Store it securely.",
+        });
+        return;
+      }
     } catch {
-      setMessage("Could not copy the token. Copy it from this page now.");
+      if (createdRef.current !== created) return;
     }
+
+    if (createdRef.current !== created) return;
+
+    let tokenSelected = false;
+    let copied = false;
+    try {
+      const tokenElement = tokenElementRef.current;
+      const selection = window.getSelection();
+      if (tokenElement?.isConnected && selection) {
+        const range = document.createRange();
+        range.selectNodeContents(tokenElement);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        tokenSelected = true;
+        copied = document.execCommand("copy");
+      }
+    } catch {
+      copied = false;
+    }
+
+    if (createdRef.current !== created) return;
+    setCopyFeedback({
+      credential: created,
+      message: copied
+        ? "Token copied. Store it securely."
+        : tokenSelected
+          ? "Could not copy automatically. The token is selected; press Cmd/Ctrl+C to copy it."
+          : "Could not copy automatically. Select the token and press Cmd/Ctrl+C to copy it.",
+    });
+  };
+
+  const dismissCreated = () => {
+    createdRef.current = null;
+    setCreated(null);
+    setCopyFeedback(null);
   };
 
   const revoke = async () => {
@@ -230,15 +284,20 @@ export function AccessTokensPage() {
             aria-label="New token"
           >
             <p>Copy this token now. Folio will not display it again.</p>
-            <code>{created.token}</code>
+            <code ref={tokenElementRef}>{created.token}</code>
             <div className="admin-token-reveal-actions">
               <button type="button" onClick={() => void copyToken()}>
                 Copy token
               </button>
+              {copyFeedback?.credential === created && (
+                <span role="status" aria-live="polite">
+                  {copyFeedback.message}
+                </span>
+              )}
               <button
                 type="button"
                 className="secondary"
-                onClick={() => setCreated(null)}
+                onClick={dismissCreated}
               >
                 Dismiss token
               </button>
