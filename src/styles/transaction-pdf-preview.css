@@ -1,0 +1,92 @@
+.transaction-form-preview-layout {
+  display: grid;
+  min-width: 0;
+  gap: 1rem;
+}
+
+.transaction-workflow-page:has(.transaction-form-preview-layout--with-preview),
+.app-content
+  > main.transaction-workflow-page:has(
+    .transaction-form-preview-layout--with-preview
+  ) {
+  width: 100%;
+  max-width: none;
+}
+
+.transaction-pdf-preview {
+  order: -1;
+  display: grid;
+  align-content: start;
+  min-width: 0;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.85rem;
+  background: var(--surface);
+  box-shadow:
+    0 1px 2px rgb(20 32 43 / 3%),
+    0 8px 24px rgb(20 32 43 / 4%);
+}
+
+.transaction-pdf-preview h2,
+.transaction-pdf-preview p {
+  margin: 0;
+}
+
+.transaction-pdf-preview__header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0;
+}
+
+.transaction-pdf-preview__header > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 0.35rem;
+}
+
+.transaction-pdf-preview__header p {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.transaction-pdf-preview__header .actions {
+  align-items: center;
+}
+
+.transaction-pdf-preview__frame {
+  display: block;
+  width: 100%;
+  height: min(72vh, 58rem);
+  min-height: 30rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-muted);
+}
+
+@media (min-width: 76rem) {
+  .transaction-pdf-preview {
+    order: 0;
+    position: sticky;
+    top: 1rem;
+  }
+  .transaction-form-preview-layout--with-preview {
+    grid-template-columns: minmax(28rem, 34rem) minmax(0, 1fr);
+    align-items: start;
+  }
+  .transaction-pdf-preview__frame {
+    height: calc(100dvh - 11rem);
+  }
+}
+
+@media (max-width: 40rem) {
+  .transaction-pdf-preview__frame {
+    height: min(72vh, 48rem);
+    min-height: 26rem;
+  }
+}

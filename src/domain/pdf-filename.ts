@@ -18,7 +18,7 @@ export interface PdfSuggestionApplication {
 const pdfFilenamePattern =
   /^(.+?)\s*-+\s*(\d{4}-\d{2}-\d{2})(?:\s*-+\s*(.+))?\.pdf$/i;
 
-function isValidIsoDate(value: string): boolean {
+export function isValidIsoDate(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return false;
   const year = Number(match[1]);
