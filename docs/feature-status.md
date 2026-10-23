@@ -4,6 +4,11 @@ Updated22October2026 from direct operator feedback. Functional confirmation is
 recorded at feature level; it does not imply every edge case, operational gate or
 later change was tested. TaskView retains live task status and remaining criteria.
 
+23 October 2026: operator confirms disabled confirmation state, ordered next-file
+review and shared Confirm / Confirm and next / Skip controls work as expected.
+Moving metadata editing into the header and matching invoice-link button sizing
+are a separate presentation follow-up; prior general feature acceptance is preserved.
+
 | Feature                          | Operator confirmation                                               | Remaining work                                                                                                                                                        |
 | -------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | File uploads                     | Works                                                               | No new upload issue reported.                                                                                                                                         |
