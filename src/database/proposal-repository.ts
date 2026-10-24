@@ -44,6 +44,13 @@ export class ProposalTransactionConflictError extends Error {
   }
 }
 
+export class ProposalTransactionRevisionRequiredError extends Error {
+  constructor() {
+    super("Draft match suggestions require the current transaction revision");
+    this.name = "ProposalTransactionRevisionRequiredError";
+  }
+}
+
 export class ProposalTransactionNotFoundError extends Error {
   constructor() {
     super("Transaction was not found");
@@ -344,18 +351,33 @@ export class ProposalRepository {
   private async validateExistingMatch(
     client: PoolClient,
     transactionId: string,
+    credentialScopes: readonly ProposalCredentialScope[],
+    expectedUpdatedAt?: string,
   ): Promise<void> {
     const result = await client.query(
-      `SELECT source_system, status FROM ${this.transactionsTable} WHERE id=$1 FOR SHARE`,
+      `SELECT source_system, status, ${updatedAtTokenProjection("updated_at")} FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
       [transactionId],
     );
     const transaction = result.rows[0];
     if (
       !transaction ||
       transaction.source_system !== "manual" ||
-      transaction.status !== "recorded"
+      !["draft", "recorded"].includes(String(transaction.status))
     )
       throw new Error("Proposed match transaction is not recorded and manual");
+
+    if (transaction.status === "draft") {
+      if (!credentialScopes.includes("transactions:draft"))
+        throw new ProposalAuthorizationError();
+      if (expectedUpdatedAt === undefined)
+        throw new ProposalTransactionRevisionRequiredError();
+    }
+
+    if (
+      expectedUpdatedAt !== undefined &&
+      String(transaction.updated_at_token) !== expectedUpdatedAt
+    )
+      throw new ProposalTransactionConflictError();
   }
 
   private async createDraft(
@@ -649,7 +671,12 @@ export class ProposalRepository {
         );
       } else {
         proposedTransactionId = submission.existingTransactionId;
-        await this.validateExistingMatch(client, proposedTransactionId);
+        await this.validateExistingMatch(
+          client,
+          proposedTransactionId,
+          credential.scopes as ProposalCredentialScope[],
+          submission.expectedUpdatedAt,
+        );
       }
 
       const submissionId = randomUUID();

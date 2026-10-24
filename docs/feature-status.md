@@ -1,5 +1,9 @@
 # Feature acceptance
 
+25 October 2026: operator confirms existing-draft bank suggestions work. A follow-up
+attached-PDF layout defect is separate: its approved top-preview correction is
+implemented locally and awaits operator verification. Existing acceptance stands.
+
 Updated22October2026 from direct operator feedback. Functional confirmation is
 recorded at feature level; it does not imply every edge case, operational gate or
 later change was tested. TaskView retains live task status and remaining criteria.

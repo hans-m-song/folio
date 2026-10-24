@@ -44,6 +44,37 @@ describe("proposal domain", () => {
     expect(proposalPayloadHash(first)).toBe(proposalPayloadHash(retry));
   });
 
+  it("preserves legacy existing-match hashes when the optional revision is absent", () => {
+    const legacy = parseProposalSubmission({
+      kind: "existing_match",
+      idempotencyKey: "match-legacy",
+      existingTransactionId: "77777777-7777-4777-8777-777777777777",
+      bankTarget: {
+        kind: "bank_transaction",
+        bankTransactionId: "66666666-6666-4666-8666-666666666666",
+        expectedRevision: "7",
+      },
+    });
+    const versioned = parseProposalSubmission({
+      ...legacy,
+      idempotencyKey: "match-versioned",
+      expectedUpdatedAt: "2026-09-26T00:00:00.123456Z",
+    });
+
+    expect(proposalPayloadHash(legacy)).toBe(
+      "42fa04fe1d4712d26aa8cad1b06c0e43b9fc524eb46e4d9e0909b8abf2a89ece",
+    );
+    expect(proposalPayloadHash(versioned)).not.toBe(
+      proposalPayloadHash(legacy),
+    );
+    expect(() =>
+      parseProposalSubmission({
+        ...legacy,
+        expectedUpdatedAt: "2026-09-26T00:00:00.123Z",
+      }),
+    ).toThrow();
+  });
+
   it("rejects oversized, recorded, owner-selected, and approved-link drafts", () => {
     expect(() =>
       parseProposalSubmission({

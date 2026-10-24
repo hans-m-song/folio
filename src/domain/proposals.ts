@@ -176,6 +176,7 @@ const existingMatchProposalSchema = z
     ...commonSubmissionFields,
     kind: z.literal("existing_match"),
     existingTransactionId: z.string().uuid(),
+    expectedUpdatedAt: z.string().datetime({ precision: 6 }).optional(),
     bankTarget: directBankTargetSchema,
   })
   .strict();

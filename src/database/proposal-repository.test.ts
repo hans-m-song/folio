@@ -11,6 +11,7 @@ import {
   ProposalIdempotencyConflictError,
   ProposalRepository,
   ProposalTransactionConflictError,
+  ProposalTransactionRevisionRequiredError,
 } from "./proposal-repository";
 
 const credentialId = "11111111-1111-4111-8111-111111111111";
@@ -533,7 +534,13 @@ describe("proposal repository", () => {
         ],
       })
       .mockResolvedValueOnce({
-        rows: [{ source_system: "manual", status: "recorded" }],
+        rows: [
+          {
+            source_system: "manual",
+            status: "recorded",
+            updated_at_token: "2026-09-26T00:00:00.123456Z",
+          },
+        ],
       })
       .mockResolvedValueOnce({ rowCount: 1 })
       .mockResolvedValueOnce({});
@@ -547,9 +554,421 @@ describe("proposal repository", () => {
       replayed: false,
     });
     expect(query.mock.calls[6]?.[0]).toContain("mcp_submissions");
+    expect(query.mock.calls[5]?.[0]).toContain("FOR UPDATE");
     expect(
       query.mock.calls.some(([statement]) =>
         /^UPDATE .*bank_transactions/.test(String(statement)),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    { label: "a missing bank row", row: null },
+    {
+      label: "a bank row with a stale revision",
+      row: {
+        revision: "6",
+        matched_transaction_id: null,
+        classification: null,
+      },
+    },
+    {
+      label: "an already-matched bank row",
+      row: {
+        revision: "7",
+        matched_transaction_id: transactionId,
+        classification: null,
+      },
+    },
+    {
+      label: "a classified bank row",
+      row: {
+        revision: "7",
+        matched_transaction_id: null,
+        classification: "private",
+      },
+    },
+  ])(
+    "rejects an existing-match suggestion for $label before candidate checks",
+    async ({ row }) => {
+      const submission = parseProposalSubmission({
+        kind: "existing_match",
+        idempotencyKey: "invalid-bank-target",
+        existingTransactionId: transactionId,
+        bankTarget: {
+          kind: "bank_transaction",
+          bankTransactionId: bankId,
+          expectedRevision: "7",
+        },
+      });
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({
+          rows: [{ ...credentialRow, scopes: ["bank_matches:suggest"] }],
+        })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: row ? [row] : [] })
+        .mockResolvedValueOnce({});
+      const { repository } = repositoryWithClients(query);
+
+      await expect(repository.submit(credentialId, submission)).rejects.toThrow(
+        "Intended bank row is stale or already resolved",
+      );
+      expect(query).toHaveBeenCalledTimes(6);
+      expect(query.mock.calls[4]?.[0]).toContain("FOR SHARE");
+      expect(query.mock.calls[5]?.[0]).toBe("ROLLBACK");
+      const statements = query.mock.calls.map(([statement]) =>
+        String(statement),
+      );
+      expect(
+        statements.some((statement) =>
+          statement.includes('INSERT INTO "folio"."mcp_submissions"'),
+        ),
+      ).toBe(false);
+      expect(
+        statements.some((statement) =>
+          /^(INSERT|UPDATE|DELETE) .*"(transactions|bank_transactions)"/.test(
+            statement,
+          ),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    { label: "a missing transaction", row: null },
+    {
+      label: "a non-manual transaction",
+      row: { source_system: "commbank", status: "recorded" },
+    },
+    {
+      label: "a void manual transaction",
+      row: { source_system: "manual", status: "void" },
+    },
+  ])(
+    "rejects an existing-match suggestion for $label without writes",
+    async ({ row }) => {
+      const submission = parseProposalSubmission({
+        kind: "existing_match",
+        idempotencyKey: "invalid-match-target",
+        existingTransactionId: transactionId,
+        bankTarget: {
+          kind: "bank_transaction",
+          bankTransactionId: bankId,
+          expectedRevision: "7",
+        },
+      });
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({
+          rows: [{ ...credentialRow, scopes: ["bank_matches:suggest"] }],
+        })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              revision: "7",
+              matched_transaction_id: null,
+              classification: null,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: row ? [row] : [] })
+        .mockResolvedValueOnce({});
+      const { repository } = repositoryWithClients(query);
+
+      await expect(repository.submit(credentialId, submission)).rejects.toThrow(
+        "Proposed match transaction is not recorded and manual",
+      );
+      const statements = query.mock.calls.map(([statement]) =>
+        String(statement),
+      );
+      expect(
+        statements.some((statement) =>
+          statement.includes('INSERT INTO "folio"."mcp_submissions"'),
+        ),
+      ).toBe(false);
+      expect(
+        statements.some((statement) =>
+          /^(INSERT|UPDATE|DELETE) .*"(transactions|bank_transactions)"/.test(
+            statement,
+          ),
+        ),
+      ).toBe(false);
+      expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    },
+  );
+
+  it("replays legacy existing-match requests and conflicts when a revision is added", async () => {
+    const legacy = parseProposalSubmission({
+      kind: "existing_match",
+      idempotencyKey: "match-replay-legacy",
+      existingTransactionId: transactionId,
+      bankTarget: {
+        kind: "bank_transaction",
+        bankTransactionId: bankId,
+        expectedRevision: "7",
+      },
+    });
+    const existing = {
+      id: "88888888-8888-4888-8888-888888888888",
+      kind: "existing_match",
+      draft_transaction_id: null,
+      proposed_transaction_id: transactionId,
+      payload_sha256: proposalPayloadHash(legacy),
+    };
+    const replayQuery = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [{ ...credentialRow, scopes: ["bank_matches:suggest"] }],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [existing] })
+      .mockResolvedValueOnce({});
+    const conflictQuery = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [{ ...credentialRow, scopes: ["bank_matches:suggest"] }],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [existing] })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(replayQuery, conflictQuery);
+    const withRevision = parseProposalSubmission({
+      ...legacy,
+      expectedUpdatedAt: "2026-09-26T00:00:00.123456Z",
+    });
+
+    await expect(repository.submit(credentialId, legacy)).resolves.toEqual({
+      submissionId: existing.id,
+      kind: "existing_match",
+      linkedId: transactionId,
+      replayed: true,
+    });
+    await expect(
+      repository.submit(credentialId, withRevision),
+    ).rejects.toBeInstanceOf(ProposalIdempotencyConflictError);
+    expect(replayQuery).toHaveBeenCalledTimes(5);
+    expect(conflictQuery).toHaveBeenCalledTimes(5);
+    expect(
+      [...replayQuery.mock.calls, ...conflictQuery.mock.calls].some(
+        ([statement]) =>
+          /bank_transactions|transactions".*FOR UPDATE/.test(String(statement)),
+      ),
+    ).toBe(false);
+  });
+
+  it("suggests an existing manual draft at its exact revision without changing either record", async () => {
+    const expectedUpdatedAt = "2026-09-26T00:00:00.123456Z";
+    const submission = parseProposalSubmission({
+      kind: "existing_match",
+      idempotencyKey: "draft-match-request-1",
+      existingTransactionId: draftId,
+      expectedUpdatedAt,
+      bankTarget: {
+        kind: "bank_transaction",
+        bankTransactionId: bankId,
+        expectedRevision: "7",
+      },
+    });
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          { revision: "7", matched_transaction_id: null, classification: null },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            source_system: "manual",
+            status: "draft",
+            updated_at_token: expectedUpdatedAt,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(repository.submit(credentialId, submission)).resolves.toEqual({
+      submissionId: expect.any(String),
+      kind: "existing_match",
+      linkedId: draftId,
+      replayed: false,
+    });
+    expect(query.mock.calls[5]?.[0]).toContain("FOR UPDATE");
+    expect(query.mock.calls[5]?.[0]).toContain("updated_at_token");
+    expect(query.mock.calls[6]?.[0]).toContain("mcp_submissions");
+    expect(query.mock.calls[6]?.[1]).toEqual([
+      expect.any(String),
+      credentialId,
+      "draft-match-request-1",
+      proposalPayloadHash(submission),
+      "existing_match",
+      null,
+      draftId,
+      bankId,
+      "7",
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(
+      query.mock.calls.some(
+        ([statement]) =>
+          /^INSERT INTO "folio"\."transactions"/.test(String(statement)) ||
+          /^UPDATE .*bank_transactions/.test(String(statement)) ||
+          /^UPDATE "folio"\."transactions"/.test(String(statement)),
+      ),
+    ).toBe(false);
+  });
+
+  it("requires draft scope and an exact revision before suggesting a manual draft", async () => {
+    const submission = parseProposalSubmission({
+      kind: "existing_match",
+      idempotencyKey: "draft-match-request-2",
+      existingTransactionId: draftId,
+      bankTarget: {
+        kind: "bank_transaction",
+        bankTransactionId: bankId,
+        expectedRevision: "7",
+      },
+    });
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          { revision: "7", matched_transaction_id: null, classification: null },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            source_system: "manual",
+            status: "draft",
+            updated_at_token: "2026-09-26T00:00:00.123456Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.submit(credentialId, submission),
+    ).rejects.toBeInstanceOf(ProposalTransactionRevisionRequiredError);
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).includes('INSERT INTO "folio"."mcp_submissions"'),
+      ),
+    ).toBe(false);
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it("rejects a draft suggestion when the credential lacks draft authority", async () => {
+    const submission = parseProposalSubmission({
+      kind: "existing_match",
+      idempotencyKey: "draft-match-request-3",
+      existingTransactionId: draftId,
+      expectedUpdatedAt: "2026-09-26T00:00:00.123456Z",
+      bankTarget: {
+        kind: "bank_transaction",
+        bankTransactionId: bankId,
+        expectedRevision: "7",
+      },
+    });
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [{ ...credentialRow, scopes: ["bank_matches:suggest"] }],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          { revision: "7", matched_transaction_id: null, classification: null },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            source_system: "manual",
+            status: "draft",
+            updated_at_token: "2026-09-26T00:00:00.123456Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.submit(credentialId, submission),
+    ).rejects.toBeInstanceOf(ProposalAuthorizationError);
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).includes('INSERT INTO "folio"."mcp_submissions"'),
+      ),
+    ).toBe(false);
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it("rejects a stale supplied revision for a recorded match candidate", async () => {
+    const submission = parseProposalSubmission({
+      kind: "existing_match",
+      idempotencyKey: "recorded-match-request-2",
+      existingTransactionId: transactionId,
+      expectedUpdatedAt: "2026-09-26T00:00:00.123456Z",
+      bankTarget: {
+        kind: "bank_transaction",
+        bankTransactionId: bankId,
+        expectedRevision: "7",
+      },
+    });
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          { revision: "7", matched_transaction_id: null, classification: null },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            source_system: "manual",
+            status: "recorded",
+            updated_at_token: "2026-09-26T00:00:00.123457Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.submit(credentialId, submission),
+    ).rejects.toBeInstanceOf(ProposalTransactionConflictError);
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).includes('INSERT INTO "folio"."mcp_submissions"'),
       ),
     ).toBe(false);
   });

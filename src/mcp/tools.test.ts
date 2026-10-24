@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import {
   ProposalIdempotencyConflictError,
   ProposalTransactionConflictError,
+  ProposalTransactionRevisionRequiredError,
 } from "../database/proposal-repository";
 import type { ArtifactRecord } from "../documents/service";
 import { describe, expect, it, vi } from "vitest";
@@ -290,6 +291,47 @@ const toolValue = (response: HttpResponse) => {
 };
 
 describe("Folio MCP tools", () => {
+  it("advertises six-digit transaction revisions for existing-match suggestions", async () => {
+    const fakes = createDependencies();
+    await withServer(
+      fakes.dependencies,
+      principal(["bank_matches:suggest"]),
+      async ({ address }) => {
+        const listing = await send(
+          address.port,
+          rpcBody("tools/list"),
+          "tools/list",
+        );
+        const listingResult = JSON.parse(listing.body) as {
+          result?: {
+            tools: {
+              name: string;
+              inputSchema?: {
+                properties?: Record<string, { pattern?: string }>;
+                required?: string[];
+              };
+            }[];
+          };
+        };
+        const suggestion = listingResult.result?.tools.find(
+          ({ name }) => name === "suggest_existing_match",
+        );
+        const revisionSchema =
+          suggestion?.inputSchema?.properties?.expectedUpdatedAt;
+
+        expect(revisionSchema?.pattern).toBe(
+          "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$",
+        );
+        expect(suggestion?.inputSchema?.required).not.toContain(
+          "expectedUpdatedAt",
+        );
+        const revisionPattern = new RegExp(revisionSchema!.pattern!);
+        expect(revisionPattern.test("2026-09-27T00:00:00.123456Z")).toBe(true);
+        expect(revisionPattern.test("2026-09-27T00:00:00.123Z")).toBe(false);
+      },
+    );
+  });
+
   it("registers only tools authorized by the exact credential scopes", async () => {
     const scopeTools = [
       ["bank_rows:read", ["list_unresolved_bank_rows"]],
@@ -714,6 +756,54 @@ describe("Folio MCP tools", () => {
         expect.objectContaining({ kind: "existing_match" }),
       );
       expect(fakes.bankRepository.reconcile).not.toHaveBeenCalled();
+    });
+  });
+
+  it("passes an optional transaction revision through existing-match suggestions", async () => {
+    const fakes = createDependencies();
+    const expectedUpdatedAt = "2026-09-27T00:00:00.123456Z";
+    await withServer(fakes.dependencies, principal(), async ({ address }) => {
+      await call(address.port, "suggest_existing_match", {
+        idempotencyKey: "match:synthetic-revision",
+        existingTransactionId: ids.transaction,
+        expectedUpdatedAt,
+        bankTarget: {
+          kind: "bank_transaction",
+          bankTransactionId: ids.bankRow,
+          expectedRevision: "3",
+        },
+      });
+      expect(fakes.proposalRepository.submit).toHaveBeenCalledWith(
+        ids.credential,
+        expect.objectContaining({
+          kind: "existing_match",
+          expectedUpdatedAt,
+        }),
+      );
+    });
+  });
+
+  it("returns a safe argument error when a draft suggestion omits its revision", async () => {
+    const fakes = createDependencies();
+    fakes.proposalRepository.submit.mockRejectedValueOnce(
+      new ProposalTransactionRevisionRequiredError(),
+    );
+    await withServer(fakes.dependencies, principal(), async ({ address }) => {
+      const response = await call(address.port, "suggest_existing_match", {
+        idempotencyKey: "match:missing-revision",
+        existingTransactionId: ids.transaction,
+        bankTarget: {
+          kind: "bank_transaction",
+          bankTransactionId: ids.bankRow,
+          expectedRevision: "3",
+        },
+      });
+
+      expect(toolValue(response).value).toMatchObject({
+        code: "INVALID_ARGUMENTS",
+        message:
+          "A manual draft match requires its current transaction revision.",
+      });
     });
   });
 

@@ -18,6 +18,7 @@ import {
   ProposalAuthorizationError,
   ProposalDraftNotEditableError,
   ProposalIdempotencyConflictError,
+  ProposalTransactionRevisionRequiredError,
   ProposalTransactionConflictError,
   ProposalTransactionNotFoundError,
   type ProposalRepository,
@@ -116,6 +117,12 @@ const safeError = (
       code: "REVISION_CONFLICT",
       message: "The transaction changed after it was read.",
     };
+  if (error instanceof ProposalTransactionRevisionRequiredError)
+    return {
+      code: "INVALID_ARGUMENTS",
+      message:
+        "A manual draft match requires its current transaction revision.",
+    };
   if (error instanceof ProposalTransactionNotFoundError)
     return {
       code: "TRANSACTION_NOT_FOUND",
@@ -142,7 +149,8 @@ const safeError = (
     )
       return {
         code: "MATCH_CANDIDATE_NOT_ELIGIBLE",
-        message: "The match candidate must be a recorded manual transaction.",
+        message:
+          "The match candidate must be a manual draft or recorded transaction.",
       };
     if (error.message === "Proposed invoice evidence not found")
       return {
@@ -359,6 +367,7 @@ const suggestMatchInput = z
   .object({
     idempotencyKey: z.string().min(1).max(200),
     existingTransactionId: z.string().uuid(),
+    expectedUpdatedAt: z.string().datetime({ precision: 6 }).optional(),
     bankTarget: directBankTargetInput,
     note: z.string().trim().max(2_000).nullable().optional(),
   })
@@ -1013,10 +1022,11 @@ const registerToolsForPrincipal = (
       "suggest_existing_match",
       {
         description:
-          "Suggest one recorded manual transaction for an unresolved bank row; this never creates a match.",
+          "Suggest one manual draft or recorded transaction for an unresolved bank row; manual drafts require their current revision. This never creates a match.",
         inputSchema: fromJsonSchema<{
           idempotencyKey: string;
           existingTransactionId: string;
+          expectedUpdatedAt?: string;
           bankTarget: {
             kind: "bank_transaction";
             bankTransactionId: string;
@@ -1028,6 +1038,11 @@ const registerToolsForPrincipal = (
             {
               idempotencyKey: stringSchema(200),
               existingTransactionId: { type: "string", format: "uuid" },
+              expectedUpdatedAt: {
+                type: "string",
+                pattern:
+                  "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$",
+              },
               bankTarget: directBankTargetJsonSchema,
               note: nullable(stringSchema(2_000)),
             },
@@ -1058,6 +1073,7 @@ const registerToolsForPrincipal = (
               kind: "existing_match",
               idempotencyKey: request.idempotencyKey,
               existingTransactionId: request.existingTransactionId,
+              expectedUpdatedAt: request.expectedUpdatedAt,
               bankTarget: request.bankTarget,
               note: request.note ?? null,
             });

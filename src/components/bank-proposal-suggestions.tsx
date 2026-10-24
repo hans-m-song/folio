@@ -11,12 +11,21 @@ export const BankProposalSuggestions = ({
   suggestions,
   onEditDraft,
 }: BankProposalSuggestionsProps) => {
-  const active = suggestions.filter((suggestion) =>
-    suggestion.kind === "draft_transaction"
-      ? suggestion.transaction.status === "draft"
-      : suggestion.actionability === "actionable" ||
-        suggestion.actionability === "stale",
-  );
+  const active = suggestions.filter((suggestion) => {
+    if (
+      suggestion.transaction.status === "void" ||
+      suggestion.actionability === "void"
+    )
+      return false;
+
+    if (suggestion.transaction.status === "draft") return true;
+    if (suggestion.kind === "draft_transaction") return false;
+
+    return (
+      suggestion.actionability === "actionable" ||
+      suggestion.actionability === "stale"
+    );
+  });
   if (active.length === 0) return null;
 
   return (
@@ -27,7 +36,7 @@ export const BankProposalSuggestions = ({
       </p>
       <div className="banking-proposal-list">
         {active.map((suggestion) => {
-          const draft = suggestion.kind === "draft_transaction";
+          const draft = suggestion.transaction.status === "draft";
           const transactionHref = draft
             ? `/transactions/${suggestion.transaction.id}/edit?bank=${bankTransactionId}`
             : `/transactions/${suggestion.transaction.id}`;
