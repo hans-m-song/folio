@@ -6,6 +6,7 @@ import { transactionInvoiceLabel } from "../domain/invoice-status";
 import {
   transactionKindLabels,
   transactionSourceLabels,
+  type TransactionRecord,
 } from "../domain/types";
 import { downloadArtifact, getTransaction } from "../server/operations";
 import "../styles/transaction-detail.css";
@@ -29,18 +30,24 @@ const show = (value: string | Date | null | undefined) => {
   return value?.trim() || "—";
 };
 
-function TransactionDetailPage() {
-  const transaction = Route.useLoaderData();
+export const TransactionDetailContent = ({
+  transaction,
+  embedded = false,
+}: {
+  transaction: TransactionRecord | null;
+  embedded?: boolean;
+}) => {
   const [message, setMessage] = useState("");
+  const Page = embedded ? "div" : "main";
   if (!transaction)
     return (
-      <main>
+      <Page>
         <header>
           <h1>Transaction not found</h1>
           <p>This record may have been removed or is unavailable.</p>
           <a href="/transactions">Back to Transactions</a>
         </header>
-      </main>
+      </Page>
     );
 
   const artifacts = transaction.sourceArtifacts ?? [];
@@ -57,7 +64,7 @@ function TransactionDetailPage() {
   };
 
   return (
-    <main className="transaction-detail-page">
+    <Page className="transaction-detail-page">
       <a className="transaction-detail-back" href="/transactions">
         ← Transactions
       </a>
@@ -182,6 +189,10 @@ function TransactionDetailPage() {
           </ul>
         )}
       </section>
-    </main>
+    </Page>
   );
+};
+
+function TransactionDetailPage() {
+  return <TransactionDetailContent transaction={Route.useLoaderData()} />;
 }

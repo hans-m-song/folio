@@ -704,7 +704,7 @@ describe("File library deletion controls", () => {
     expect(
       screen.queryByRole("link", { name: "Upload PDF evidence" }),
     ).toBeNull();
-    expect(screen.getByText(/upload is still in progress/i)).toBeTruthy();
+    expect(screen.getByText(/upload is still active/i)).toBeTruthy();
     expect(operations.deleteArtifact).not.toHaveBeenCalled();
   });
 
@@ -712,13 +712,13 @@ describe("File library deletion controls", () => {
     let finishDeletion: (() => void) | undefined;
     operations.deleteArtifact.mockImplementationOnce(
       ({ data }: { data: { id: string } }) =>
-        new Promise<void>((resolve) => {
+        new Promise<{ status: "deleted" }>((resolve) => {
           finishDeletion = () => {
             const current = mocks.data as ReturnType<typeof pageData>;
             mocks.data = pageData(
               current.result.rows.filter((row) => row.id !== data.id),
             );
-            resolve();
+            resolve({ status: "deleted" });
           };
         }),
     );
@@ -783,6 +783,7 @@ describe("File library deletion controls", () => {
         mocks.data = pageData(
           current.result.rows.filter((row) => row.id !== data.id),
         );
+        return { status: "deleted" as const };
       });
     renderFileLibrary();
 
@@ -798,20 +799,22 @@ describe("File library deletion controls", () => {
     );
     expect(
       screen.getByRole("button", {
-        name: "Retry deletion of pending-import.csv",
+        name: "Retry cleanup of pending-import.csv",
       }).textContent,
-    ).toBe("Retry deletion");
+    ).toBe("Retry cleanup");
     expect(
-      screen.getByText("Deleting", { selector: ".artifact-library-state" }),
+      screen.getByText("Cleanup pending", {
+        selector: ".artifact-library-state",
+      }),
     ).toBeTruthy();
     expect(mocks.invalidate).toHaveBeenCalledOnce();
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Retry deletion of pending-import.csv",
+        name: "Retry cleanup of pending-import.csv",
       }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry cleanup" }));
 
     await waitFor(() =>
       expect(operations.deleteArtifact).toHaveBeenCalledTimes(2),
@@ -819,5 +822,71 @@ describe("File library deletion controls", () => {
     expect(
       await screen.findByText("Artifact pending-import.csv deleted."),
     ).toBeTruthy();
+  });
+
+  it("keeps a tombstone listed when storage cleanup is deferred and allows retry", async () => {
+    operations.deleteArtifact
+      .mockImplementationOnce(async ({ data }: { data: { id: string } }) => {
+        const current = mocks.data as ReturnType<typeof pageData>;
+        mocks.data = pageData(
+          current.result.rows.map((row) =>
+            row.id === data.id ? { ...row, state: "deleting" as const } : row,
+          ),
+        );
+        return {
+          status: "deferred" as const,
+          retryAfter: "2026-10-07T12:00:00.000Z",
+        };
+      })
+      .mockImplementationOnce(async ({ data }: { data: { id: string } }) => {
+        const current = mocks.data as ReturnType<typeof pageData>;
+        mocks.data = pageData(
+          current.result.rows.filter((row) => row.id !== data.id),
+        );
+        return { status: "deleted" as const };
+      });
+    renderFileLibrary();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Delete artifact pending-import.csv",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+
+    expect(
+      await screen.findByText(
+        /Storage cleanup for pending-import\.csv is pending/,
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Cleanup pending", {
+        selector: ".artifact-library-state",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", {
+        name: "Retry cleanup of pending-import.csv",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("Artifact pending-import.csv deleted."),
+    ).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Retry cleanup of pending-import.csv",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry cleanup" }));
+
+    expect(
+      await screen.findByText("Artifact pending-import.csv deleted."),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", {
+        name: "Retry cleanup of pending-import.csv",
+      }),
+    ).toBeNull();
   });
 });

@@ -1,0 +1,198 @@
+.file-upload-page {
+  width: 100%;
+  max-width: 68rem;
+  margin: 0;
+  padding: 0;
+}
+
+.file-upload-panel {
+  display: grid;
+  gap: 1.35rem;
+  padding: 1.4rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+.file-upload-panel__heading h2 {
+  margin: 0.3rem 0;
+}
+
+.file-upload-panel__heading > p:last-child {
+  max-width: 48rem;
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.file-upload-kicker {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.file-upload-form {
+  display: grid;
+  gap: 0.65rem;
+  padding: 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: var(--surface-muted);
+}
+
+.file-upload-form > label,
+.file-upload-form legend {
+  font-weight: 650;
+}
+
+.file-upload-form > input,
+.file-upload-form > select,
+.file-upload-form > textarea,
+.file-upload-form fieldset input,
+.file-upload-form fieldset textarea {
+  width: 100%;
+  min-width: 0;
+}
+
+.file-upload-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.file-upload-form fieldset {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.6rem 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--surface);
+}
+
+.file-upload-form fieldset legend {
+  padding: 0 0.3rem;
+}
+
+.file-upload-date-grid,
+.file-upload-invoice-metadata {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.35fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.65rem 0.9rem;
+}
+
+.file-upload-coverage-actions,
+.file-upload-filename-suggestion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.7rem;
+}
+
+.file-upload-coverage-actions {
+  grid-column: 1 / -1;
+}
+
+.file-upload-coverage-actions button,
+.file-upload-filename-suggestion-actions button,
+.bank-invoice-evidence__preview-size button {
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.8rem;
+}
+
+.file-upload-message {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.file-upload-message[role="alert"] {
+  color: var(--danger);
+}
+
+.file-upload-recovery,
+.file-upload-previous {
+  display: grid;
+  justify-items: start;
+  gap: 0.6rem;
+  padding: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--surface);
+}
+
+.file-upload-recovery h3,
+.file-upload-previous h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.file-upload-recovery p,
+.file-upload-previous p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.file-upload-recovery a,
+.file-upload-previous a {
+  color: var(--accent-strong);
+  font-weight: 650;
+  text-underline-offset: 0.15em;
+}
+
+.file-upload-previous ul {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.file-upload-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.file-upload-progress progress {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.file-upload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.file-upload-actions button {
+  min-height: 2.45rem;
+  padding-inline: 0.9rem;
+}
+
+@media (max-width: 600px) {
+  .file-upload-panel {
+    padding: 1rem;
+  }
+
+  .file-upload-form {
+    padding: 0.85rem;
+  }
+
+  .file-upload-date-grid,
+  .file-upload-invoice-metadata {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.45rem;
+  }
+}

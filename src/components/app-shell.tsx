@@ -17,9 +17,7 @@ const bankingLinks = [
 ] as const;
 
 const sourceLinks = [
-  { href: "/imports/stripe", label: "Stripe CSV" },
-  { href: "/imports/commbank", label: "CommBank CSV" },
-  { href: "/imports/pdf", label: "PDF evidence" },
+  { href: "/imports/upload", label: "Upload file" },
   { href: "/imports/library", label: "File library" },
 ] as const;
 
@@ -42,6 +40,18 @@ const routeCurrentState = (
     : routeIsActive(pathname, href)
       ? "location"
       : undefined;
+
+const sourceRouteIsActive = (pathname: string, href: string): boolean =>
+  routeIsActive(pathname, href) ||
+  (href === "/imports/library" && pathname.startsWith("/imports/files/"));
+
+const sourceRouteCurrentState = (
+  pathname: string,
+  href: string,
+): "page" | "location" | undefined =>
+  pathname.startsWith("/imports/files/") && href === "/imports/library"
+    ? "location"
+    : routeCurrentState(pathname, href);
 
 const PrimaryNavigation = ({
   pathname,
@@ -161,8 +171,8 @@ const PrimaryNavigation = ({
                 <a
                   className="app-nav-link app-nav-link--child"
                   href={href}
-                  aria-current={routeCurrentState(pathname, href)}
-                  data-active={routeIsActive(pathname, href) || undefined}
+                  aria-current={sourceRouteCurrentState(pathname, href)}
+                  data-active={sourceRouteIsActive(pathname, href) || undefined}
                 >
                   {label}
                 </a>
@@ -267,14 +277,11 @@ export const AppShell = ({
               <a href="/transactions/new" onClick={closeAddMenu}>
                 Manual transaction
               </a>
-              <a href="/imports/stripe" onClick={closeAddMenu}>
-                Import Stripe CSV
+              <a href="/imports/upload" onClick={closeAddMenu}>
+                Upload file
               </a>
-              <a href="/imports/commbank" onClick={closeAddMenu}>
-                Import CommBank CSV
-              </a>
-              <a href="/imports/pdf" onClick={closeAddMenu}>
-                Upload PDF evidence
+              <a href="/imports/library" onClick={closeAddMenu}>
+                File library
               </a>
             </div>
           </details>

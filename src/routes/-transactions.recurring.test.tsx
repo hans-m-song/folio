@@ -322,7 +322,28 @@ const deferred = <T,>() => {
   return { promise, resolve, reject };
 };
 
+const originalShowModal = Object.getOwnPropertyDescriptor(
+  HTMLDialogElement.prototype,
+  "showModal",
+);
+const originalClose = Object.getOwnPropertyDescriptor(
+  HTMLDialogElement.prototype,
+  "close",
+);
+
 beforeEach(() => {
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value(this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    },
+  });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value(this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    },
+  });
   vi.clearAllMocks();
   routeState.workspace = workspace();
   routeState.getWorkspace.mockResolvedValue(workspace());
@@ -335,9 +356,102 @@ beforeEach(() => {
   routeState.unlink.mockResolvedValue(undefined);
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  if (originalShowModal)
+    Object.defineProperty(
+      HTMLDialogElement.prototype,
+      "showModal",
+      originalShowModal,
+    );
+  else Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+  if (originalClose)
+    Object.defineProperty(HTMLDialogElement.prototype, "close", originalClose);
+  else Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
+});
 
 describe("Recurring bills workspace", () => {
+  it("keeps the schedule pane open while a save is pending", async () => {
+    const saving = deferred<void>();
+    routeState.save.mockReturnValue(saving.promise);
+    renderRecurringBills();
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Edit schedule" })[0],
+    );
+    const pane = screen.getByRole("dialog", {
+      name: "Recurring bill schedule",
+    });
+    fireEvent.change(within(pane).getByLabelText("Schedule name"), {
+      target: { value: "Reviewed schedule" },
+    });
+    fireEvent.click(within(pane).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(routeState.save).toHaveBeenCalledTimes(1));
+    expect(
+      (
+        within(pane).getByRole("button", {
+          name: "Close Recurring bill schedule",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      (
+        within(pane).getByRole("button", {
+          name: "Cancel",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    fireEvent.keyDown(pane, { key: "Escape" });
+    expect(
+      screen.getByRole("dialog", { name: "Recurring bill schedule" }),
+    ).toBeTruthy();
+    await act(async () => saving.resolve());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Recurring bill schedule" }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("heading", { name: "Schedules" })).toBeTruthy();
+    expect(routeState.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a schedule pane and confirms before discarding edited fields", async () => {
+    renderRecurringBills();
+    fireEvent.click(screen.getByRole("button", { name: "Add schedule" }));
+    const pane = screen.getByRole("dialog", {
+      name: "Recurring bill schedule",
+    });
+    fireEvent.change(within(pane).getByLabelText("Schedule name"), {
+      target: { value: "Unsaved schedule" },
+    });
+    fireEvent.click(within(pane).getByRole("button", { name: "Cancel" }));
+    const confirmation = await screen.findByRole("alertdialog", {
+      name: "Discard unsaved changes?",
+    });
+    fireEvent.click(
+      within(confirmation).getByRole("button", { name: "Cancel" }),
+    );
+    expect(
+      (within(pane).getByLabelText("Schedule name") as HTMLInputElement).value,
+    ).toBe("Unsaved schedule");
+    fireEvent.click(
+      within(pane).getByRole("button", {
+        name: "Close Recurring bill schedule",
+      }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", {
+        name: "Discard changes",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Recurring bill schedule" }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("heading", { name: "Schedules" })).toBeTruthy();
+    expect(routeState.save).not.toHaveBeenCalled();
+  });
+
   it("uses the standalone transactions route and seeds a schedule from an explicit source", async () => {
     const sourceTransactionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const initialSchedule = {

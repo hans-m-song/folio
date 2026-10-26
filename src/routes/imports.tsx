@@ -10,23 +10,17 @@ const SourcesPage = () => {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const active: SourceTab = pathname.endsWith("/stripe")
-    ? "stripe"
-    : pathname.endsWith("/pdf")
-      ? "pdf"
-      : pathname.endsWith("/library")
-        ? "library"
-        : "commbank";
+  const active: SourceTab =
+    pathname.endsWith("/library") || pathname.startsWith("/imports/files/")
+      ? "library"
+      : "upload";
 
   return (
     <div className="imports-workspace">
       <header>
         <p className="eyebrow">Sources</p>
         <h1>Sources</h1>
-        <p>
-          Import CSVs, upload reusable PDF evidence, and manage source files in
-          one workspace.
-        </p>
+        <p>Upload supported files and manage them in one library.</p>
       </header>
       <SourceTabs active={active} />
       <Outlet />

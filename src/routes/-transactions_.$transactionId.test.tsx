@@ -18,7 +18,10 @@ vi.mock("../server/operations", () => ({
   getTransaction: vi.fn(),
 }));
 
-import { Route } from "./transactions_.$transactionId";
+import {
+  Route,
+  TransactionDetailContent,
+} from "./transactions_.$transactionId";
 import type { TransactionRecord } from "../domain/types";
 
 const transactionRoute = Route as unknown as { component: ComponentType };
@@ -126,6 +129,25 @@ describe("Transaction detail page", () => {
       "/transactions/123e4567-e89b-42d3-a456-426614174000/edit",
     );
     expect(editLink.classList.contains("transaction-detail-edit")).toBe(true);
+  });
+
+  it("renders reusable embedded detail content with canonical route links", () => {
+    const view = render(
+      createElement(TransactionDetailContent, {
+        transaction,
+        embedded: true,
+      }),
+    );
+
+    expect(view.container.querySelector("main")).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "← Transactions" }).getAttribute("href"),
+    ).toBe("/transactions");
+    expect(
+      screen
+        .getByRole("link", { name: "Edit transaction" })
+        .getAttribute("href"),
+    ).toBe(`/transactions/${transaction.id}/edit`);
   });
 
   it("marks document and settlement amounts while preserving their display strings", () => {

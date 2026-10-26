@@ -193,7 +193,7 @@ describe("application navigation", () => {
     }
   });
 
-  it("shows the four Sources destinations under the active Sources item", () => {
+  it("shows the two file destinations under the active Sources item", () => {
     routeState.pathname = "/imports/library";
     render(
       <AppShell userRole="member">
@@ -211,16 +211,10 @@ describe("application navigation", () => {
       expect(sources).toHaveProperty("pathname", "/imports");
       expect(sources.getAttribute("aria-current")).toBe("location");
       expect(sources.getAttribute("data-active")).toBe("true");
-      expect(primary.getByRole("link", { name: "Stripe CSV" })).toHaveProperty(
+      expect(primary.getByRole("link", { name: "Upload file" })).toHaveProperty(
         "pathname",
-        "/imports/stripe",
+        "/imports/upload",
       );
-      expect(
-        primary.getByRole("link", { name: "CommBank CSV" }),
-      ).toHaveProperty("pathname", "/imports/commbank");
-      expect(
-        primary.getByRole("link", { name: "PDF evidence" }),
-      ).toHaveProperty("pathname", "/imports/pdf");
       expect(
         primary.getByRole("link", { name: "File library" }),
       ).toHaveProperty("pathname", "/imports/library");
@@ -235,13 +229,16 @@ describe("application navigation", () => {
   });
 
   it.each([
-    { pathname: "/imports/stripe", label: "Stripe CSV" },
-    { pathname: "/imports/commbank", label: "CommBank CSV" },
-    { pathname: "/imports/pdf", label: "PDF evidence" },
-    { pathname: "/imports/library", label: "File library" },
+    { pathname: "/imports/upload", label: "Upload file", current: "page" },
+    { pathname: "/imports/library", label: "File library", current: "page" },
+    {
+      pathname: "/imports/files/synthetic-artifact",
+      label: "File library",
+      current: "location",
+    },
   ])(
     "marks $label current in desktop and mobile navigation",
-    ({ pathname, label }) => {
+    ({ pathname, label, current }) => {
       routeState.pathname = pathname;
       render(
         <AppShell userRole="member">
@@ -261,7 +258,7 @@ describe("application navigation", () => {
             .getAttribute("aria-current"),
         ).toBe("location");
         const selectedTab = primary.getByRole("link", { name: label });
-        expect(selectedTab.getAttribute("aria-current")).toBe("page");
+        expect(selectedTab.getAttribute("aria-current")).toBe(current);
         expect(selectedTab.getAttribute("data-active")).toBe("true");
       }
     },
@@ -329,9 +326,7 @@ describe("application navigation", () => {
     expect(menu).not.toBeNull();
     const navigation = within(menu as HTMLDetailsElement);
     await user.click(navigation.getByText("Menu"));
-    const sourceLink = navigation.getByRole("link", {
-      name: "Stripe CSV",
-    });
+    const sourceLink = navigation.getByRole("link", { name: "Upload file" });
     sourceLink.addEventListener("click", (event) => event.preventDefault(), {
       once: true,
     });
@@ -341,7 +336,7 @@ describe("application navigation", () => {
     expect(menu?.open).toBe(false);
   });
 
-  it("sends Add imports to their Sources tabs", () => {
+  it("sends Add file actions to the unified upload and file library", () => {
     render(
       <AppShell userRole="member">
         <h1>Sources</h1>
@@ -352,15 +347,14 @@ describe("application navigation", () => {
     expect(addMenu).not.toBeNull();
     (addMenu as HTMLDetailsElement).open = true;
     const links = within(addMenu as HTMLDetailsElement);
-    expect(
-      links.getByRole("link", { name: "Import Stripe CSV" }),
-    ).toHaveProperty("pathname", "/imports/stripe");
-    expect(
-      links.getByRole("link", { name: "Import CommBank CSV" }),
-    ).toHaveProperty("pathname", "/imports/commbank");
-    expect(
-      links.getByRole("link", { name: "Upload PDF evidence" }),
-    ).toHaveProperty("pathname", "/imports/pdf");
+    expect(links.getByRole("link", { name: "Upload file" })).toHaveProperty(
+      "pathname",
+      "/imports/upload",
+    );
+    expect(links.getByRole("link", { name: "File library" })).toHaveProperty(
+      "pathname",
+      "/imports/library",
+    );
   });
 
   it("copies one monetary amount through AppShell and removes its listener on unmount", () => {

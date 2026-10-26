@@ -12,6 +12,11 @@ import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
 import { getCurrentSession } from "../auth/session-server";
 import { safeReturnPath } from "../auth/http";
 import { AppShell } from "../components/app-shell";
+import {
+  ContextPaneProvider,
+  parseContextPaneSearch,
+} from "../components/context-pane";
+import { ContextPaneHost } from "../components/context-pane-host";
 import { sanitizeClientRenderFailure } from "../domain/diagnostics";
 import { publicFailureFrom } from "../domain/public-failure";
 import appCss from "../styles/app.css?url";
@@ -29,6 +34,7 @@ const isAuthenticationPath = (pathname: string): boolean =>
   pathname === "/auth" || pathname.startsWith("/auth/");
 
 export const Route = createRootRoute({
+  validateSearch: parseContextPaneSearch,
   beforeLoad: async ({ location }) => {
     if (location.pathname === "/health")
       return { session: { authenticated: false as const } };
@@ -38,8 +44,7 @@ export const Route = createRootRoute({
     if (!session.authenticated && !isAuthenticationPath(location.pathname)) {
       const returnTo = safeReturnPath(location.href, "http://folio.invalid");
       throw redirect({
-        to: "/auth/login",
-        search: { return_to: returnTo },
+        href: `/auth/login?return_to=${encodeURIComponent(returnTo)}`,
         replace: true,
       });
     }
@@ -90,9 +95,12 @@ function RootLayout() {
     return <Outlet />;
 
   return (
-    <AppShell userRole={session.user.role}>
-      <Outlet />
-    </AppShell>
+    <ContextPaneProvider>
+      <AppShell userRole={session.user.role}>
+        <Outlet />
+      </AppShell>
+      <ContextPaneHost />
+    </ContextPaneProvider>
   );
 }
 

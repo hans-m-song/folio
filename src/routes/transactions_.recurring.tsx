@@ -11,6 +11,7 @@ import {
   CreatableAutocomplete,
 } from "../components/autocomplete";
 import { MoneyText } from "../components/money-text";
+import { SidePane } from "../components/context-pane";
 import type {
   RecurringBillAmountEstimate,
   RecurringBillCandidate,
@@ -296,6 +297,15 @@ const RecurringBillsPage = () => {
   const [candidateSelections, setCandidateSelections] = useState<
     Record<string, string>
   >({});
+  const editorBaseline = useRef(JSON.stringify(editor?.schedule ?? null));
+  const beginEditor = (next: ScheduleEditor) => {
+    editorBaseline.current = JSON.stringify(next.schedule);
+    setEditor(next);
+  };
+  const closeEditor = () => {
+    setEditor(null);
+    setPreview(null);
+  };
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{
     tone: "status" | "error";
@@ -418,7 +428,7 @@ const RecurringBillsPage = () => {
     setPreview(null);
     const schedule = blankSchedule();
     schedule.responsibleUserId = workspace.currentActorId ?? null;
-    setEditor({
+    beginEditor({
       mode: "create",
       schedule,
       sourceTransactionIds: [],
@@ -429,7 +439,7 @@ const RecurringBillsPage = () => {
   const openEdit = (view: RecurringBillView) => {
     setFeedback(null);
     setPreview(null);
-    setEditor({
+    beginEditor({
       mode: "edit",
       id: view.schedule.id,
       expectedUpdatedAt: view.schedule.updatedAt,
@@ -442,7 +452,7 @@ const RecurringBillsPage = () => {
   const openSuggestion = (suggestion: Workspace["suggestions"][number]) => {
     setFeedback(null);
     setPreview(null);
-    setEditor({
+    beginEditor({
       mode: "suggestion",
       schedule: {
         ...suggestion.schedule,
@@ -726,7 +736,7 @@ const RecurringBillsPage = () => {
         </button>
       </header>
 
-      {feedback ? (
+      {feedback && !editor ? (
         <p
           className={`recurring-bills-feedback recurring-bills-feedback--${feedback.tone}`}
           role={feedback.tone === "error" ? "alert" : "status"}
@@ -745,24 +755,43 @@ const RecurringBillsPage = () => {
         </p>
       ) : null}
 
-      {editor ? (
-        <ScheduleEditorForm
-          editor={editor}
-          responsibleUserOptions={workspace.responsibleUserOptions}
-          counterparties={workspace.counterparties}
-          disabled={disabled}
-          descriptionPatternError={descriptionPatternError}
-          preview={currentPreview}
-          previewValid={previewValidation?.success ?? false}
-          onRetryPreview={() => setPreviewRetry((current) => current + 1)}
-          onChange={updateScheduleField}
-          onCancel={() => {
-            setEditor(null);
-            setPreview(null);
-          }}
-          onSubmit={submitEditor}
-        />
-      ) : null}
+      <SidePane
+        title="Recurring bill schedule"
+        isOpen={editor !== null}
+        onClose={closeEditor}
+        pending={disabled}
+        dirty={Boolean(
+          editor && JSON.stringify(editor.schedule) !== editorBaseline.current,
+        )}
+      >
+        {({ requestClose }) =>
+          editor ? (
+            <>
+              {feedback && (
+                <p
+                  className={`recurring-bills-feedback recurring-bills-feedback--${feedback.tone}`}
+                  role={feedback.tone === "error" ? "alert" : "status"}
+                >
+                  {feedback.text}
+                </p>
+              )}
+              <ScheduleEditorForm
+                editor={editor}
+                responsibleUserOptions={workspace.responsibleUserOptions}
+                counterparties={workspace.counterparties}
+                disabled={disabled}
+                descriptionPatternError={descriptionPatternError}
+                preview={currentPreview}
+                previewValid={previewValidation?.success ?? false}
+                onRetryPreview={() => setPreviewRetry((current) => current + 1)}
+                onChange={updateScheduleField}
+                onCancel={requestClose}
+                onSubmit={submitEditor}
+              />
+            </>
+          ) : null
+        }
+      </SidePane>
 
       <section aria-labelledby="recurring-bills-schedules-heading">
         <div className="recurring-bills-section-heading">

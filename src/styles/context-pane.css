@@ -1,0 +1,121 @@
+.context-pane-root {
+  display: contents;
+}
+.context-pane-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  background: rgb(16 30 42 / 35%);
+  display: flex;
+  justify-content: flex-end;
+}
+.context-pane-modal {
+  width: 89vw;
+  height: 100dvh;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: -12px 0 40px rgb(20 32 43 / 22%);
+  overflow: auto;
+}
+.context-pane-dialog {
+  width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
+}
+.context-pane-overlay[data-nested="true"] .context-pane-modal {
+  width: 78vw;
+}
+.context-pane-overlay[data-exiting] {
+  pointer-events: none;
+}
+.context-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.context-pane-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+.context-pane-content {
+  padding: 1.5rem;
+}
+.context-pane-content > main {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+.context-pane-overlay[data-entering] {
+  animation: context-pane-overlay-enter 150ms ease-out both;
+}
+.context-pane-overlay[data-exiting] {
+  animation: context-pane-overlay-exit 150ms ease-in both;
+}
+.context-pane-modal[data-entering] {
+  animation: context-pane-enter 150ms ease-out both;
+}
+.context-pane-modal[data-exiting] {
+  animation: context-pane-exit 150ms ease-in both;
+}
+@keyframes context-pane-overlay-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes context-pane-overlay-exit {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes context-pane-enter {
+  from {
+    transform: translateX(1rem);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes context-pane-exit {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(1rem);
+  }
+}
+@media (max-width: 640px) {
+  .context-pane-modal,
+  .context-pane-overlay[data-nested="true"] .context-pane-modal {
+    width: 100%;
+  }
+  .context-pane-content {
+    padding: 1rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .context-pane-overlay[data-entering],
+  .context-pane-overlay[data-exiting],
+  .context-pane-modal[data-entering],
+  .context-pane-modal[data-exiting] {
+    animation: none;
+  }
+}

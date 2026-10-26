@@ -29,6 +29,23 @@ vi.mock("../auth/session-server", () => ({
 
 import { Route } from "./__root";
 
+const captureLoginRedirect = async (action: Promise<unknown>): Promise<URL> => {
+  let failure: unknown;
+  try {
+    await action;
+  } catch (error) {
+    failure = error;
+  }
+  if (!(failure instanceof Response))
+    throw new Error("Expected an authentication redirect response.");
+  expect(failure.status).toBe(307);
+  const location = failure.headers.get("location");
+  if (!location) throw new Error("Expected a redirect Location header.");
+  const destination = new URL(location, "https://folio.invalid");
+  expect(destination.pathname).toBe("/auth/login");
+  return destination;
+};
+
 const ErrorBoundary = (
   Route as unknown as {
     options: {
@@ -77,17 +94,12 @@ describe("root error logging", () => {
     expect(mocks.privateGate).not.toHaveBeenCalled();
     expect(mocks.getCurrentSession).not.toHaveBeenCalled();
 
-    await expect(
+    const redirect = await captureLoginRedirect(
       beforeLoad({
         location: { pathname: "/transactions", href: "/transactions" },
       }),
-    ).rejects.toMatchObject({
-      options: {
-        to: "/auth/login",
-        search: { return_to: "/transactions" },
-        replace: true,
-      },
-    });
+    );
+    expect(redirect.searchParams.get("return_to")).toBe("/transactions");
     expect(mocks.privateGate).toHaveBeenCalledTimes(1);
     expect(mocks.getCurrentSession).toHaveBeenCalledTimes(1);
   });
@@ -103,33 +115,27 @@ describe("root error logging", () => {
       }
     ).options.beforeLoad;
 
-    await expect(
+    const redirect = await captureLoginRedirect(
       beforeLoad({
         location: {
           pathname: "/reports",
           href: "/reports?period=2026&view=month#gst",
         },
       }),
-    ).rejects.toMatchObject({
-      options: {
-        to: "/auth/login",
-        search: { return_to: "/reports?period=2026&view=month#gst" },
-      },
-    });
+    );
+    expect(redirect.searchParams.get("return_to")).toBe(
+      "/reports?period=2026&view=month#gst",
+    );
 
-    await expect(
+    const unsafeRedirect = await captureLoginRedirect(
       beforeLoad({
         location: {
           pathname: "/reports",
           href: "//attacker.example/private",
         },
       }),
-    ).rejects.toMatchObject({
-      options: {
-        to: "/auth/login",
-        search: { return_to: "/" },
-      },
-    });
+    );
+    expect(unsafeRedirect.searchParams.get("return_to")).toBe("/");
   });
 
   it.each(["/auth", "/auth/login"])(

@@ -4,16 +4,14 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { z } from "zod";
 
-import { artifactProfiles, artifactProfileSchema } from "../artifacts/profiles";
+import { artifactProfiles } from "../artifacts/profiles";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
 import {
   QueryChipBuilder,
   type QueryChipClause,
   type QueryChipField,
 } from "../components/query-chip-builder";
-import { enumFilterSchema } from "../domain/enum-filter";
 import {
   approveArtifact,
   deleteArtifact,
@@ -22,266 +20,40 @@ import {
   previewArtifactForReview,
   rejectArtifact,
 } from "../server/operations";
+import {
+  artifactFilterSchema,
+  artifactListInput,
+  artifactPageSize,
+  artifactSortSchema,
+  artifactStateSchema,
+  defaultArtifactQueryClauses,
+  defaultArtifactSort,
+  validateArtifactSearch,
+} from "../artifacts/library-query";
+import type {
+  ArtifactFilterField,
+  ArtifactFilterOperator,
+  ArtifactQueryClause,
+  ArtifactSearch,
+  ArtifactSearchFilter,
+  ArtifactSort,
+} from "../artifacts/library-query";
 import artifactsCss from "../styles/artifacts.css?url";
-
-export const artifactPageSize = 25;
-
-const artifactStateSchema = z.enum([
-  "pending",
-  "awaiting_review",
-  "available",
-  "superseded",
-  "abandoned",
-  "rejected",
-  "deleting",
-]);
-
-export type ArtifactFilterField =
-  | "filename"
-  | "profile"
-  | "type"
-  | "uploaded"
-  | "state"
-  | "linkage"
-  | "transactions"
-  | "bank_activity";
-
-export type ArtifactFilterOperator =
-  | "equals"
-  | "not_equals"
-  | "contains"
-  | "not_contains"
-  | "greater_than"
-  | "greater_than_or_equal"
-  | "less_than"
-  | "less_than_or_equal"
-  | "is"
-  | "is_not"
-  | "contains_any"
-  | "contains_none";
-
-const artifactComparisonOperatorSchema = z.enum([
-  "equals",
-  "not_equals",
-  "greater_than",
-  "greater_than_or_equal",
-  "less_than",
-  "less_than_or_equal",
-]);
-
-const artifactFilterSchema = z.union([
-  z
-    .object({
-      field: z.literal("filename"),
-      operator: z.enum(["equals", "not_equals", "contains", "not_contains"]),
-      value: z.string().trim().min(1).max(200),
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("uploaded"),
-      operator: artifactComparisonOperatorSchema,
-      value: z.string().date(),
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("transactions"),
-      operator: artifactComparisonOperatorSchema,
-      value: z.string().trim().min(1).max(9).regex(/^\d+$/),
-    })
-    .strict(),
-  z
-    .object({
-      field: z.literal("bank_activity"),
-      operator: artifactComparisonOperatorSchema,
-      value: z.string().trim().min(1).max(9).regex(/^\d+$/),
-    })
-    .strict(),
-  enumFilterSchema("profile", artifactProfileSchema),
-  enumFilterSchema("type", z.enum(["application/pdf", "text/csv"])),
-  enumFilterSchema("state", artifactStateSchema),
-  enumFilterSchema("linkage", z.enum(["linked", "unlinked"])),
-]);
-
-export type ArtifactSearchFilter = z.infer<typeof artifactFilterSchema>;
-
-const artifactSortSchema = z
-  .object({
-    field: z.enum([
-      "filename",
-      "profile",
-      "type",
-      "uploaded",
-      "state",
-      "transactions",
-      "bank_activity",
-    ]),
-    direction: z.enum(["asc", "desc"]),
-  })
-  .strict();
-
-export type ArtifactSort = z.infer<typeof artifactSortSchema>;
-
-const artifactQueryClauseSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("filter"),
-      clause: artifactFilterSchema,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("sort"),
-      clause: artifactSortSchema,
-    })
-    .strict(),
-]);
-
-export type ArtifactQueryClause = z.infer<typeof artifactQueryClauseSchema>;
-
-const artifactQueryClausesSchema = z
-  .array(artifactQueryClauseSchema)
-  .max(27)
-  .superRefine((clauses, context) => {
-    const filterCount = clauses.filter(({ kind }) => kind === "filter").length;
-    const sortCount = clauses.filter(({ kind }) => kind === "sort").length;
-
-    if (filterCount > 20)
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "At most 20 filter clauses are allowed.",
-      });
-    if (sortCount > 7)
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "At most 7 sort clauses are allowed.",
-      });
-  });
-
-const artifactQueryClausesSearchSchema = z.unknown().transform((input) => {
-  const parsed = artifactQueryClausesSchema.safeParse(input);
-  return parsed.success ? parsed.data : undefined;
-});
-
-export const defaultArtifactSort: ArtifactSort[] = [
-  { field: "uploaded", direction: "desc" },
-];
-
-export const defaultArtifactQueryClauses: ArtifactQueryClause[] =
-  defaultArtifactSort.map((clause) => ({ kind: "sort", clause }));
-
-const artifactSearchSchema = z
-  .object({
-    filters: z.array(artifactFilterSchema).max(20).catch([]).optional(),
-    sort: z
-      .array(artifactSortSchema)
-      .max(7)
-      .catch(defaultArtifactSort)
-      .optional(),
-    clauses: artifactQueryClausesSearchSchema.optional(),
-    filename: z.string().trim().max(200).catch("").optional(),
-    profile: z
-      .union([z.literal("all"), artifactProfileSchema])
-      .catch("all")
-      .optional(),
-    from: z.string().date().catch("").optional(),
-    to: z.string().date().catch("").optional(),
-    state: z
-      .union([z.literal("all"), artifactStateSchema])
-      .catch("all")
-      .optional(),
-    linkage: z.enum(["all", "linked", "unlinked"]).catch("all").optional(),
-    page: z.coerce.number().int().min(1).max(4_001).catch(1),
-  })
-  .transform(
-    ({
-      filters,
-      sort,
-      clauses,
-      filename,
-      profile,
-      from,
-      to,
-      state,
-      linkage,
-      page,
-    }) => {
-      const legacyFilters: ArtifactSearchFilter[] = [];
-      if (filename)
-        legacyFilters.push({
-          field: "filename",
-          operator: "contains",
-          value: filename,
-        });
-      if (profile && profile !== "all")
-        legacyFilters.push({
-          field: "profile",
-          operator: "is",
-          value: profile,
-        });
-      if (from)
-        legacyFilters.push({
-          field: "uploaded",
-          operator: "greater_than_or_equal",
-          value: from,
-        });
-      if (to)
-        legacyFilters.push({
-          field: "uploaded",
-          operator: "less_than_or_equal",
-          value: to,
-        });
-      if (state && state !== "all")
-        legacyFilters.push({ field: "state", operator: "is", value: state });
-      if (linkage && linkage !== "all")
-        legacyFilters.push({
-          field: "linkage",
-          operator: "is",
-          value: linkage,
-        });
-
-      const resolvedFilters = filters ?? legacyFilters;
-      const resolvedSort = sort ?? defaultArtifactSort;
-      const resolvedClauses = clauses ?? [
-        ...resolvedFilters.map((clause) => ({
-          kind: "filter" as const,
-          clause,
-        })),
-        ...resolvedSort.map((clause) => ({ kind: "sort" as const, clause })),
-      ];
-
-      return {
-        clauses: resolvedClauses,
-        filters:
-          clauses === undefined
-            ? resolvedFilters
-            : resolvedClauses.flatMap((item) =>
-                item.kind === "filter" ? [item.clause] : [],
-              ),
-        sort:
-          clauses === undefined
-            ? resolvedSort
-            : resolvedClauses.flatMap((item) =>
-                item.kind === "sort" ? [item.clause] : [],
-              ),
-        page,
-      };
-    },
-  );
-
-export type ArtifactSearch = z.infer<typeof artifactSearchSchema>;
-
-export const validateArtifactSearch = (
-  search: Record<string, unknown>,
-): ArtifactSearch => artifactSearchSchema.parse(search);
-
-export const artifactListInput = (search: ArtifactSearch) => ({
-  filters: search.filters,
-  sort: search.sort,
-  limit: artifactPageSize,
-  offset: (search.page - 1) * artifactPageSize,
-});
+export {
+  artifactListInput,
+  artifactPageSize,
+  defaultArtifactQueryClauses,
+  defaultArtifactSort,
+  validateArtifactSearch,
+};
+export type {
+  ArtifactFilterField,
+  ArtifactFilterOperator,
+  ArtifactQueryClause,
+  ArtifactSearch,
+  ArtifactSearchFilter,
+  ArtifactSort,
+};
 
 export type ArtifactFilterDraft = {
   id: number;
@@ -609,7 +381,12 @@ const loadArtifactPage = async (search: ArtifactSearch) => {
 
 export const Route = createFileRoute("/imports/library")({
   validateSearch: validateArtifactSearch,
-  loaderDeps: ({ search }) => search,
+  loaderDeps: ({ search }) => ({
+    filters: search.filters,
+    sort: search.sort,
+    clauses: search.clauses,
+    page: search.page,
+  }),
   loader: ({ deps }) => loadArtifactPage(deps),
   head: () => ({ links: [{ rel: "stylesheet", href: artifactsCss }] }),
   pendingComponent: ArtifactsPending,
@@ -809,11 +586,15 @@ function ArtifactLibraryPage() {
     const target = deletingArtifact;
     setDeletePending(true);
     setActionMessage({
-      text: `Deleting ${target.filename}…`,
+      text:
+        target.state === "deleting"
+          ? `Retrying storage cleanup for ${target.filename}…`
+          : `Deleting ${target.filename}…`,
       tone: "status",
     });
+    let result: Awaited<ReturnType<typeof deleteArtifact>>;
     try {
-      await deleteArtifact({ data: { id: target.id } });
+      result = await deleteArtifact({ data: { id: target.id } });
     } catch {
       setActionMessage({
         text: `Deletion failed for ${target.filename}. It remains listed so you can retry when storage is available.`,
@@ -826,11 +607,25 @@ function ArtifactLibraryPage() {
       setDeletePending(false);
     }
 
+    setDeletingArtifact(null);
+    if (result.status === "deferred") {
+      setActionMessage({
+        text: `Storage cleanup for ${target.filename} is pending. The artifact remains listed for retry after ${formatArtifactDateTime(result.retryAfter)}.`,
+        tone: "status",
+      });
+      await router.invalidate().catch(() => {
+        setActionMessage({
+          text: `Storage cleanup for ${target.filename} is pending. Reload the list to see its current state; retry after ${formatArtifactDateTime(result.retryAfter)}.`,
+          tone: "status",
+        });
+      });
+      return;
+    }
+
     setActionMessage({
       text: `Artifact ${target.filename} deleted.`,
       tone: "status",
     });
-    setDeletingArtifact(null);
     await router.invalidate().catch(() => {
       setActionMessage({
         text: `Artifact ${target.filename} was deleted, but the list could not be refreshed. Reload the page to see its current state.`,
@@ -943,7 +738,11 @@ function ArtifactLibraryPage() {
                       <tr key={artifact.id}>
                         <td data-label="Filename">
                           <span className="artifact-library-filename">
-                            {artifact.filename}
+                            <a
+                              href={`/imports/files/${encodeURIComponent(artifact.id)}`}
+                            >
+                              {artifact.filename}
+                            </a>
                           </span>
                         </td>
                         <td data-label="Profile">
@@ -1076,7 +875,7 @@ function ArtifactLibraryPage() {
                               <button
                                 type="button"
                                 className="artifact-library-action artifact-library-action--danger"
-                                aria-label={`${artifact.state === "deleting" ? "Retry deletion of" : "Delete artifact"} ${artifact.filename}`}
+                                aria-label={`${artifact.state === "deleting" ? "Retry cleanup of" : "Delete artifact"} ${artifact.filename}`}
                                 disabled={
                                   deletePending &&
                                   deletingArtifact?.id === artifact.id
@@ -1089,7 +888,7 @@ function ArtifactLibraryPage() {
                                 deletingArtifact?.id === artifact.id
                                   ? "Deleting…"
                                   : artifact.state === "deleting"
-                                    ? "Retry deletion"
+                                    ? "Retry cleanup"
                                     : "Delete"}
                               </button>
                             )}
@@ -1137,9 +936,21 @@ function ArtifactLibraryPage() {
       </section>
       {deletingArtifact && (
         <ConfirmationDialog
-          title="Permanently delete artifact?"
-          description={`Delete ${deletingArtifact.filename} and its stored file versions? This cannot be undone. No linked records will be removed. If an upload is still in progress, it may finish after deletion and leave an untracked file.`}
-          confirmLabel="Delete permanently"
+          title={
+            deletingArtifact.state === "deleting"
+              ? "Retry artifact cleanup?"
+              : "Permanently delete artifact?"
+          }
+          description={
+            deletingArtifact.state === "deleting"
+              ? `Retry storage cleanup for ${deletingArtifact.filename}. The artifact will remain listed until cleanup completes.`
+              : `Permanently delete ${deletingArtifact.filename} and its stored file? This cannot be undone. No linked records will be removed. If an upload is still active, cleanup will remain pending and the artifact will stay listed until storage confirms removal.`
+          }
+          confirmLabel={
+            deletingArtifact.state === "deleting"
+              ? "Retry cleanup"
+              : "Delete permanently"
+          }
           pending={deletePending}
           onCancel={() => setDeletingArtifact(null)}
           onConfirm={() => void handleDelete()}
@@ -1170,7 +981,7 @@ const artifactStateLabel = (state: string): string => {
   if (state === "superseded") return "Superseded";
   if (state === "abandoned") return "Abandoned";
   if (state === "rejected") return "Rejected";
-  if (state === "deleting") return "Deleting";
+  if (state === "deleting") return "Cleanup pending";
   return "Unknown";
 };
 
@@ -1185,6 +996,15 @@ const formatArtifactDate = (value: string): string => {
     day: "2-digit",
     month: "short",
     year: "numeric",
+  }).format(date);
+};
+
+const formatArtifactDateTime = (value: string): string => {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
   }).format(date);
 };
 

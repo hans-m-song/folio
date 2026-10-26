@@ -1,15 +1,9 @@
-import { createFileRoute } from "@tanstack/react-router";
-
-import {
-  loadTransactionWorkflowSession,
-  StripeImportRoute,
-} from "./-transaction-workflow";
-import "../styles/transactions.css";
-import "../styles/stripe-import.css";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/imports/stripe")({
-  loader: loadTransactionWorkflowSession,
-  component: () => (
-    <StripeImportRoute session={Route.useLoaderData()} embedded />
-  ),
+  beforeLoad: () => {
+    throw redirect({
+      href: "/imports/upload?profile=stripe_balance_itemised_csv_v1",
+    });
+  },
 });

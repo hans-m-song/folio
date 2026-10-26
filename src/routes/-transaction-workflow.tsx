@@ -1,12 +1,14 @@
 import { useRouter } from "@tanstack/react-router";
 import { sha256FileBase64 } from "../browser/crypto";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import { getCurrentSession } from "../auth/session-server";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
+import { useContextPane, usePaneGuard } from "../components/context-pane";
 import { CsvDuplicateWarnings } from "../components/csv-duplicate-warnings";
 import { MoneyText } from "../components/money-text";
 import { SourceTabs } from "../components/import-profile-tabs";
+import { TransactionPdfPreview } from "../components/transaction-pdf-preview";
 import {
   ManualTransactionForm,
   type ManualTransactionSubmission,
@@ -15,6 +17,7 @@ import type { ManualTransactionServerIssue } from "../domain/manual-transaction"
 import type { StripeImportPreview } from "../domain/stripe-csv";
 import type { CsvDuplicateWarningReport } from "../database/repository";
 import { defaultTaxTreatmentForTransaction } from "../domain/tax";
+import { parsePdfFilename } from "../domain/pdf-filename";
 import {
   expenseCategorySuggestions,
   type TransactionInput,
@@ -149,6 +152,12 @@ type ManualRouteData = Awaited<
   ReturnType<typeof loadManualTransactionRouteData>
 >;
 
+export interface ManualTransactionSavedContext {
+  transactionId: string;
+  afterSave?: "match_next";
+  refreshSucceeded: boolean;
+}
+
 interface WorkflowState {
   stage:
     | "idle"
@@ -239,6 +248,9 @@ export const ManualTransactionRoute = ({
   onCancel,
   onSaved,
   onDeleted,
+  initialArtifact,
+  allowSaveMatchNext = false,
+  onBeforeSaveMatchNext,
 }: {
   data: ManualRouteData;
   mode: "create" | "edit";
@@ -246,13 +258,33 @@ export const ManualTransactionRoute = ({
   reviewReturnTo?: string;
   embedded?: boolean;
   onCancel?: () => void;
-  onSaved?: (status: TransactionRecord["status"]) => void;
+  onSaved?: (
+    status: TransactionRecord["status"],
+    saved: ManualTransactionSavedContext,
+  ) => void;
   onDeleted?: () => void;
+  allowSaveMatchNext?: boolean;
+  onBeforeSaveMatchNext?: (transaction: TransactionInput) => Promise<boolean>;
+  initialArtifact?: {
+    id: string;
+    filename: string;
+    originalFilename?: string | null;
+    supplier?: string | null;
+    documentDate?: string | null;
+    reference?: string | null;
+    notes?: string | null;
+  } | null;
 }) => {
   const router = useRouter();
+  const pane = useContextPane();
   const transaction = data.transaction;
+  const transactionId = transaction?.id ?? null;
+  const canSaveMatchNext =
+    allowSaveMatchNext && mode === "edit" && transaction?.status === "draft";
+  const Page = embedded ? "div" : "main";
   const [workflow, setWorkflow] = useState(idleWorkflow);
   const [busy, setBusy] = useState(false);
+  const [formDirty, setFormDirty] = useState(false);
   const [voidDialogOpen, setVoidDialogOpen] = useState(false);
   const [voidPending, setVoidPending] = useState(false);
   const [voidError, setVoidError] = useState("");
@@ -263,13 +295,51 @@ export const ManualTransactionRoute = ({
   const [completedTransactionId, setCompletedTransactionId] = useState<
     string | null
   >(null);
+  const [terminalSavedDetail, setTerminalSavedDetail] = useState<string | null>(
+    null,
+  );
   const inFlight = useRef(false);
+  const workflowCompleted = completedTransactionId !== null || deleted;
+  usePaneGuard({
+    dirty: formDirty && !workflowCompleted,
+    pending:
+      (busy && !workflowCompleted) ||
+      voidDialogOpen ||
+      voidPending ||
+      (!deleted && (deleteDialogOpen || deletePending)),
+  });
   const [issues, setIssues] = useState<readonly ManualTransactionServerIssue[]>(
     [],
   );
+  const initialPreviewArtifact = (() => {
+    if (initialArtifact)
+      return { id: initialArtifact.id, filename: initialArtifact.filename };
+    const sourceArtifact = transaction?.sourceArtifacts?.[0];
+    if (sourceArtifact)
+      return { id: sourceArtifact.id, filename: sourceArtifact.filename };
+    if (transaction?.sourceArtifactId)
+      return {
+        id: transaction.sourceArtifactId,
+        filename:
+          transaction.sourceArtifactFilename ?? "Existing PDF attachment",
+      };
+    return null;
+  })();
+  const [previewArtifactState, setPreviewArtifactState] = useState(() => ({
+    transactionId,
+    artifact: initialPreviewArtifact,
+  }));
+  const previewArtifact =
+    previewArtifactState.transactionId === transactionId
+      ? previewArtifactState.artifact
+      : null;
+  const setPreviewArtifact = (
+    artifact: { id: string; filename: string } | null,
+  ) => setPreviewArtifactState({ transactionId, artifact });
   const [artifactId, setArtifactId] = useState(
     transaction?.sourceArtifacts?.[0]?.id ??
       transaction?.sourceArtifactId ??
+      initialArtifact?.id ??
       null,
   );
   const [evidence, setEvidence] = useState<{
@@ -281,6 +351,7 @@ export const ManualTransactionRoute = ({
           filename:
             transaction?.sourceArtifacts?.[0]?.filename ??
             transaction?.sourceArtifactFilename ??
+            initialArtifact?.filename ??
             "Existing PDF attachment",
           status: "attached",
         }
@@ -294,13 +365,97 @@ export const ManualTransactionRoute = ({
   const selectedEvidenceFile = useRef<File | null>(null);
   const [reviewPreviewUrl, setReviewPreviewUrl] = useState<string | null>(null);
   const [stagedPreviewOpened, setStagedPreviewOpened] = useState(false);
-  const [proposedEvidence, setProposedEvidence] = useState(
-    data.proposedDraftEvidence,
+  const [proposedEvidenceState, setProposedEvidenceState] = useState(() => ({
+    transactionId,
+    source: data.proposedDraftEvidence,
+    evidence: data.proposedDraftEvidence,
+  }));
+  const proposedEvidence =
+    proposedEvidenceState.transactionId === transactionId &&
+    proposedEvidenceState.source === data.proposedDraftEvidence
+      ? proposedEvidenceState.evidence
+      : data.proposedDraftEvidence?.transactionId === transactionId
+        ? data.proposedDraftEvidence
+        : null;
+  const setProposedEvidence = (evidence: typeof data.proposedDraftEvidence) =>
+    setProposedEvidenceState({
+      transactionId,
+      source: data.proposedDraftEvidence,
+      evidence,
+    });
+  const [shownProposedPreview, setShownProposedPreview] = useState<{
+    transactionId: string;
+    artifactId: string;
+  } | null>(null);
+  const [proposedPreview, setProposedPreview] = useState<{
+    transactionId: string;
+    artifactId: string;
+    url: string;
+    opened: boolean;
+  } | null>(null);
+  const previewableProposedEvidence =
+    proposedEvidence &&
+    transactionId !== null &&
+    proposedEvidence.transactionId === transactionId &&
+    !proposedEvidence.discardedAt &&
+    (proposedEvidence.state === "awaiting_review" ||
+      proposedEvidence.state === "available")
+      ? proposedEvidence
+      : null;
+  const proposedPreviewMatchesCurrent =
+    previewableProposedEvidence !== null &&
+    proposedPreview?.transactionId === transactionId &&
+    proposedPreview.artifactId === previewableProposedEvidence.artifactId;
+  const proposedPreviewUrl = proposedPreviewMatchesCurrent
+    ? proposedPreview.url
+    : null;
+  const proposedPreviewOpened = proposedPreviewMatchesCurrent
+    ? proposedPreview.opened
+    : false;
+  const showProposedPreview =
+    previewableProposedEvidence !== null &&
+    shownProposedPreview?.transactionId === transactionId &&
+    shownProposedPreview.artifactId === previewableProposedEvidence.artifactId;
+  const previewArtifactIsProposal =
+    previewArtifact !== null &&
+    ((proposedEvidence?.transactionId === transactionId &&
+      proposedEvidence.artifactId === previewArtifact.id) ||
+      (proposedEvidenceState.transactionId === transactionId &&
+        proposedEvidenceState.source !== data.proposedDraftEvidence &&
+        proposedEvidenceState.evidence?.transactionId === transactionId &&
+        proposedEvidenceState.evidence.artifactId === previewArtifact.id));
+  const visiblePreviewArtifact =
+    previewArtifactIsProposal || showProposedPreview ? null : previewArtifact;
+  const hasVisiblePreview = Boolean(
+    visiblePreviewArtifact || showProposedPreview,
   );
-  const [proposedPreviewUrl, setProposedPreviewUrl] = useState<string | null>(
-    null,
+  const useCompactPreview = mode === "edit";
+  const currentTransactionId = useRef(transactionId);
+  currentTransactionId.current = transactionId;
+  const currentProposedIdentity = useRef<{
+    transactionId: string | null;
+    artifactId: string | null;
+  } | null>(null);
+  currentProposedIdentity.current = proposedEvidence
+    ? {
+        transactionId: proposedEvidence.transactionId,
+        artifactId: proposedEvidence.artifactId,
+      }
+    : null;
+  const attachedArtifactIds = useMemo(
+    () =>
+      transaction?.sourceArtifacts?.map((artifact) => artifact.id) ??
+      (transaction?.sourceArtifactId
+        ? [transaction.sourceArtifactId]
+        : initialArtifact
+          ? [initialArtifact.id]
+          : []),
+    [
+      transaction?.sourceArtifacts,
+      transaction?.sourceArtifactId,
+      initialArtifact?.id,
+    ],
   );
-  const [proposedPreviewOpened, setProposedPreviewOpened] = useState(false);
 
   if (
     !data.session.authenticated ||
@@ -308,34 +463,56 @@ export const ManualTransactionRoute = ({
     !data.uiConfig ||
     !data.availableArtifacts
   )
-    return <TransactionAuthenticationRequired returnTo={returnTo} />;
+    return (
+      <TransactionAuthenticationRequired
+        returnTo={returnTo}
+        embedded={embedded}
+      />
+    );
 
   if (mode === "edit" && !transaction)
     return (
-      <main>
+      <Page>
         <h1>Transaction not found</h1>
         <p>This record is unavailable or is not a manual transaction.</p>
         <a href="/transactions">Back to Transactions</a>
-      </main>
+      </Page>
     );
 
   if (transaction?.sourceSystem === "stripe")
     return (
-      <main>
+      <Page>
         <h1>Imported transaction</h1>
         <p>
           Stripe transactions are read-only. Review this record on its detail
           page.
         </p>
         <a href={`/transactions/${transaction.id}`}>View transaction</a>
-      </main>
+      </Page>
     );
 
+  const filenameSuggestions = initialArtifact
+    ? parsePdfFilename(
+        initialArtifact.originalFilename ?? initialArtifact.filename,
+      )
+    : null;
   const current =
     transaction ??
     ({
       ...emptyTransaction,
       ownerId: data.session.authenticated ? data.session.user.id : null,
+      sourceArtifactId: initialArtifact?.id ?? null,
+      counterparty:
+        initialArtifact?.supplier?.trim() ||
+        filenameSuggestions?.supplier ||
+        null,
+      invoiceDate:
+        initialArtifact?.documentDate ??
+        filenameSuggestions?.invoiceDate ??
+        null,
+      reference:
+        initialArtifact?.reference ?? filenameSuggestions?.reference ?? null,
+      notes: initialArtifact?.notes ?? null,
     } as TransactionRecord);
   const returnHref = reviewReturnTo ?? "/transactions";
   const returnLabel = reviewReturnTo ? "Reconcile" : "Transactions";
@@ -477,14 +654,31 @@ export const ManualTransactionRoute = ({
 
   const refreshProposedEvidence = async () => {
     if (!transaction || busy) return;
+    const requestedTransactionId = transaction.id;
+    const requestedArtifactId = proposedEvidence?.artifactId ?? null;
+    setShownProposedPreview(null);
+    setProposedPreview(null);
     setBusy(true);
     try {
       const result = await getProposedDraftEvidence({
-        data: { transactionId: transaction.id },
+        data: { transactionId: requestedTransactionId },
       });
+      if (
+        currentTransactionId.current !== requestedTransactionId ||
+        currentProposedIdentity.current?.transactionId !==
+          requestedTransactionId ||
+        currentProposedIdentity.current?.artifactId !== requestedArtifactId
+      )
+        return;
       setProposedEvidence(result);
-      setProposedPreviewUrl(null);
-      setProposedPreviewOpened(false);
+      if (
+        previewArtifact?.id === requestedArtifactId &&
+        (!result ||
+          result.artifactId !== requestedArtifactId ||
+          result.discardedAt ||
+          (result.state !== "awaiting_review" && result.state !== "available"))
+      )
+        setPreviewArtifact(null);
       setWorkflow({
         stage: "preview",
         detail: "Proposed PDF review state refreshed.",
@@ -505,22 +699,42 @@ export const ManualTransactionRoute = ({
   };
 
   const previewProposedEvidence = async () => {
-    if (!proposedEvidence || busy) return;
+    if (!proposedEvidence || !transaction || busy) return;
+    const requestedTransactionId = transaction.id;
+    const requestedArtifactId = proposedEvidence.artifactId;
     setBusy(true);
     try {
       const url = await previewArtifactForReview({
-        data: { id: proposedEvidence.artifactId },
+        data: { id: requestedArtifactId },
       });
-      setProposedPreviewUrl(url);
-      setProposedPreviewOpened(false);
+      if (
+        currentTransactionId.current !== requestedTransactionId ||
+        currentProposedIdentity.current?.transactionId !==
+          requestedTransactionId ||
+        currentProposedIdentity.current?.artifactId !== requestedArtifactId
+      )
+        return;
+      setProposedPreview({
+        transactionId: requestedTransactionId,
+        artifactId: requestedArtifactId,
+        url,
+        opened: false,
+      });
     } catch (error) {
+      if (
+        currentTransactionId.current !== requestedTransactionId ||
+        currentProposedIdentity.current?.transactionId !==
+          requestedTransactionId ||
+        currentProposedIdentity.current?.artifactId !== requestedArtifactId
+      )
+        return;
       setWorkflow({
         stage: "error",
         detail: safeTransactionWorkflowError(
           error,
           "Proposed PDF preview could not be prepared.",
         ),
-        artifactId: proposedEvidence.artifactId,
+        artifactId: requestedArtifactId,
       });
     } finally {
       setBusy(false);
@@ -554,14 +768,25 @@ export const ManualTransactionRoute = ({
 
   const discardProposedEvidence = async () => {
     if (!proposedEvidence || !transaction || busy) return;
+    const requestedTransactionId = transaction.id;
+    const requestedArtifactId = proposedEvidence.artifactId;
+    setShownProposedPreview(null);
+    setProposedPreview(null);
     setBusy(true);
     try {
       const result = await discardProposedDraftEvidence({
-        data: { transactionId: transaction.id },
+        data: { transactionId: requestedTransactionId },
       });
+      if (
+        currentTransactionId.current !== requestedTransactionId ||
+        currentProposedIdentity.current?.transactionId !==
+          requestedTransactionId ||
+        currentProposedIdentity.current?.artifactId !== requestedArtifactId
+      )
+        return;
       setProposedEvidence(result);
-      setProposedPreviewUrl(null);
-      setProposedPreviewOpened(false);
+      if (previewArtifact?.id === requestedArtifactId && !result)
+        setPreviewArtifact(null);
       setWorkflow({
         stage: "preview",
         detail:
@@ -569,6 +794,13 @@ export const ManualTransactionRoute = ({
         artifactId: result?.artifactId ?? null,
       });
     } catch (error) {
+      if (
+        currentTransactionId.current !== requestedTransactionId ||
+        currentProposedIdentity.current?.transactionId !==
+          requestedTransactionId ||
+        currentProposedIdentity.current?.artifactId !== requestedArtifactId
+      )
+        return;
       setWorkflow({
         stage: "error",
         detail: safeTransactionWorkflowError(
@@ -634,6 +866,14 @@ export const ManualTransactionRoute = ({
       } else if (stagedPdf?.approved)
         linkedIds = [...new Set([...linkedIds, stagedPdf.id])];
       else if (artifactId) linkedIds = [...new Set([...linkedIds, artifactId])];
+      if (
+        canSaveMatchNext &&
+        submission.action === "save_recorded" &&
+        submission.afterSave === "match_next" &&
+        onBeforeSaveMatchNext &&
+        !(await onBeforeSaveMatchNext(submission.transaction))
+      )
+        return;
       setWorkflow({
         stage: "saving",
         detail: "Saving transaction…",
@@ -668,20 +908,72 @@ export const ManualTransactionRoute = ({
           : "Transaction saved. Return to the transaction list to review the refreshed record.",
         artifactId: confirmedId ?? artifactId,
       });
+      const afterSave =
+        canSaveMatchNext &&
+        submission.action === "save_recorded" &&
+        result.transaction.status === "recorded" &&
+        submission.afterSave === "match_next"
+          ? submission.afterSave
+          : undefined;
+      let refreshFailed = false;
       try {
-        await router.invalidate();
-        if (mode === "create")
+        await router.invalidate(
+          afterSave === "match_next" ? { sync: true } : undefined,
+        );
+      } catch {
+        refreshFailed = true;
+      }
+      if (embedded && mode === "edit" && onSaved && refreshFailed)
+        setTerminalSavedDetail(
+          afterSave === "match_next"
+            ? "Transaction saved. The bank row remains unmatched because this view could not refresh. Do not resubmit; use the saved record link below."
+            : "Transaction saved, but this view could not refresh. Do not resubmit; use the saved record link below.",
+        );
+      if (onSaved) {
+        pane?.clearGuard();
+        try {
+          onSaved(result.transaction.status, {
+            transactionId: result.transaction.id,
+            ...(afterSave ? { afterSave } : {}),
+            refreshSucceeded: !refreshFailed,
+          });
+        } catch {
+          if (embedded && mode === "edit")
+            setTerminalSavedDetail(
+              afterSave === "match_next"
+                ? "Transaction saved, but the matching handoff could not be confirmed. Do not resubmit; use the saved record link below."
+                : "Transaction saved, but the containing view could not be updated. Do not resubmit; use the saved record link below.",
+            );
+          setWorkflow({
+            stage: "complete",
+            detail:
+              "Transaction saved, but the containing view could not be updated. Do not resubmit; use the record link below.",
+            artifactId: confirmedId ?? artifactId,
+          });
+        }
+      } else if (mode === "create" && pane?.active) {
+        pane.clearGuard();
+        pane.open(`/transactions/${result.transaction.id}`);
+      } else if (mode === "create" && !refreshFailed) {
+        try {
           await router.navigate({
             to: "/transactions/$transactionId",
             params: { transactionId: result.transaction.id },
             replace: true,
           });
-        else onSaved?.(result.transaction.status);
-      } catch {
+        } catch {
+          setWorkflow({
+            stage: "complete",
+            detail:
+              "Transaction saved, but navigation failed. Do not resubmit; use the record link below.",
+            artifactId: confirmedId ?? artifactId,
+          });
+        }
+      } else if (refreshFailed) {
         setWorkflow({
           stage: "complete",
           detail:
-            "Transaction saved, but navigation failed. Do not resubmit; use the record link below.",
+            "Transaction saved, but refresh failed. Do not resubmit; reload before making further changes.",
           artifactId: confirmedId ?? artifactId,
         });
       }
@@ -770,13 +1062,16 @@ export const ManualTransactionRoute = ({
         data: { id: transaction.id, expectedUpdatedAt: transaction.updatedAt },
       });
       setDeleteDialogOpen(false);
+      setDeleted(true);
       try {
         await router.invalidate();
       } catch {
         // The database deletion succeeded; a failed refresh must not invite a retry.
       }
-      if (onDeleted) onDeleted();
-      else setDeleted(true);
+      if (onDeleted) {
+        pane?.clearGuard();
+        onDeleted();
+      }
     } catch (error) {
       setDeleteError(
         safeTransactionWorkflowError(
@@ -808,7 +1103,7 @@ export const ManualTransactionRoute = ({
   ];
   if (deleted)
     return (
-      <main className="transaction-workflow-page">
+      <Page className="transaction-workflow-page">
         <header>
           <p className="eyebrow">Transaction</p>
           <h1>Draft deleted</h1>
@@ -817,11 +1112,22 @@ export const ManualTransactionRoute = ({
         <a className="transaction-button-link" href={returnHref}>
           Return to {returnLabel}
         </a>
-      </main>
+      </Page>
+    );
+  if (completedTransactionId && terminalSavedDetail && mode === "edit")
+    return (
+      <Page className="transaction-workflow-page">
+        <header>
+          <p className="eyebrow">Transaction saved</p>
+          {embedded ? <h3>Transaction saved</h3> : <h1>Transaction saved</h1>}
+          <p>{terminalSavedDetail}</p>
+        </header>
+        <a href={`/transactions/${completedTransactionId}`}>View transaction</a>
+      </Page>
     );
   if (completedTransactionId && mode === "create")
     return (
-      <main className="transaction-workflow-page">
+      <Page className="transaction-workflow-page">
         <header>
           <p className="eyebrow">Transaction saved</p>
           <h1>Manual transaction created</h1>
@@ -833,9 +1139,8 @@ export const ManualTransactionRoute = ({
           </a>
           <a href="/transactions/new">Create another transaction</a>
         </div>
-      </main>
+      </Page>
     );
-  const Page = embedded ? "div" : "main";
   return (
     <Page className="transaction-workflow-page">
       {!embedded && (
@@ -849,7 +1154,13 @@ export const ManualTransactionRoute = ({
       <header>
         <p className="eyebrow">Transactions</p>
         {embedded ? (
-          <h3>Edit suggested draft</h3>
+          <h3>
+            {mode === "create"
+              ? "New manual transaction"
+              : transaction?.status === "draft"
+                ? "Edit draft transaction"
+                : "Edit manual transaction"}
+          </h3>
         ) : (
           <h1>
             {mode === "create"
@@ -880,6 +1191,27 @@ export const ManualTransactionRoute = ({
               : "Approve this PDF or remove the proposal before recording the draft."}
           </p>
           <div className="actions">
+            {previewableProposedEvidence && (
+              <button
+                type="button"
+                className="secondary"
+                disabled={busy}
+                aria-expanded={showProposedPreview}
+                onClick={() => {
+                  if (showProposedPreview) {
+                    setShownProposedPreview(null);
+                    return;
+                  }
+                  if (transactionId)
+                    setShownProposedPreview({
+                      transactionId,
+                      artifactId: previewableProposedEvidence.artifactId,
+                    });
+                }}
+              >
+                {showProposedPreview ? "Hide PDF" : "Show PDF"}
+              </button>
+            )}
             {proposedEvidence.state === "awaiting_review" && (
               <>
                 <button
@@ -895,7 +1227,14 @@ export const ManualTransactionRoute = ({
                     href={proposedPreviewUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    onClick={() => setProposedPreviewOpened(true)}
+                    onClick={() =>
+                      setProposedPreview((current) =>
+                        current?.transactionId === transactionId &&
+                        current.artifactId === proposedEvidence.artifactId
+                          ? { ...current, opened: true }
+                          : current,
+                      )
+                    }
                   >
                     Open PDF preview
                   </a>
@@ -928,107 +1267,154 @@ export const ManualTransactionRoute = ({
           </div>
         </section>
       )}
-      <ManualTransactionForm
-        transaction={{
-          ...current,
-          taxTreatment:
-            current.taxTreatment ??
-            defaultTaxTreatmentForTransaction(
-              current.documentCurrency,
-              current.kind,
-            ),
-        }}
-        autoDefaultTaxTreatment={mode === "create"}
-        recordButtonLabel={
-          proposedEvidence?.state === "available" &&
-          !proposedEvidence.discardedAt
-            ? "Save as recorded and attach PDF"
-            : undefined
-        }
-        users={data.formOptions.users}
-        counterparties={counterparties}
-        supplierCategories={
-          data.formOptions.entrySuggestions.supplierCategories
-        }
-        categories={categories}
-        gstRegistered={data.uiConfig.gstRegistered}
-        attachedArtifactId={artifactId}
-        attachedArtifactIds={
-          transaction?.sourceArtifacts?.map((artifact) => artifact.id) ??
-          (transaction?.sourceArtifactId ? [transaction.sourceArtifactId] : [])
-        }
-        availableArtifacts={data.availableArtifacts}
-        suggestedEvidence={
-          proposedEvidence?.state === "available" &&
-          !proposedEvidence.discardedAt
-            ? {
-                id: proposedEvidence.artifactId,
-                filename: proposedEvidence.filename,
-              }
-            : undefined
-        }
-        evidenceStatus={
-          <div>
-            <p id="pdf-evidence-status" role="status" aria-live="polite">
-              {evidence
-                ? `PDF filename: ${evidence.filename}. Status: ${evidence.status === "attached" ? "already attached" : evidence.status.replaceAll("_", " ")}.`
-                : proposedEvidence?.state === "available" &&
-                    !proposedEvidence.discardedAt
-                  ? "Proposed PDF selected for recording; not yet attached."
-                  : "No PDF selected or attached."}
-            </p>
-            {stagedPdf && !stagedPdf.approved && (
-              <div className="actions">
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={busy}
-                  onClick={() => void preparePdfPreview()}
-                >
-                  Prepare PDF preview
-                </button>
-                {reviewPreviewUrl && (
-                  <a
-                    href={reviewPreviewUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={() => setStagedPreviewOpened(true)}
-                  >
-                    Open PDF preview
-                  </a>
-                )}
-                <button
-                  type="button"
-                  disabled={busy || !stagedPreviewOpened}
-                  onClick={() => void approveStagedPdf()}
-                >
-                  Approve PDF
-                </button>
-              </div>
-            )}
-          </div>
-        }
-        busy={busy}
-        serverIssues={issues}
-        onEvidenceChange={(file) => {
-          selectedEvidenceFile.current = file;
-          setEvidence(
-            file ? { filename: file.name, status: "selected" } : null,
-          );
-          if (stagedPdf?.file !== file) {
-            setStagedPdf(null);
-            setReviewPreviewUrl(null);
-            setStagedPreviewOpened(false);
+      <div
+        className={[
+          "transaction-form-preview-layout",
+          hasVisiblePreview && "transaction-form-preview-layout--with-preview",
+          hasVisiblePreview &&
+            useCompactPreview &&
+            "transaction-form-preview-layout--peek",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
+        <ManualTransactionForm
+          allowSaveMatchNext={canSaveMatchNext}
+          transaction={{
+            ...current,
+            taxTreatment:
+              current.taxTreatment ??
+              defaultTaxTreatmentForTransaction(
+                current.documentCurrency,
+                current.kind,
+              ),
+          }}
+          autoDefaultTaxTreatment={mode === "create"}
+          recordButtonLabel={
+            proposedEvidence?.state === "available" &&
+            !proposedEvidence.discardedAt
+              ? "Save as recorded and attach PDF"
+              : undefined
           }
-        }}
-        onPrepareInvoiceForExtraction={prepareInvoiceForExtraction}
-        onSubmit={save}
-        onCancel={
-          mode === "edit"
-            ? (onCancel ?? (() => window.location.assign(returnHref)))
-            : undefined
-        }
-      />
+          users={data.formOptions.users}
+          counterparties={counterparties}
+          supplierCategories={
+            data.formOptions.entrySuggestions.supplierCategories
+          }
+          categories={categories}
+          gstRegistered={data.uiConfig.gstRegistered}
+          attachedArtifactId={artifactId}
+          attachedArtifactIds={attachedArtifactIds}
+          fileUploadHref="/imports/upload?profile=manual_invoice_pdf_v1"
+          availableArtifacts={data.availableArtifacts}
+          suggestedEvidence={
+            proposedEvidence?.state === "available" &&
+            !proposedEvidence.discardedAt
+              ? {
+                  id: proposedEvidence.artifactId,
+                  filename: proposedEvidence.filename,
+                }
+              : undefined
+          }
+          evidenceStatus={
+            <div>
+              <p id="pdf-evidence-status" role="status" aria-live="polite">
+                {evidence
+                  ? `PDF filename: ${evidence.filename}. Status: ${evidence.status === "attached" ? "already attached" : evidence.status.replaceAll("_", " ")}.`
+                  : proposedEvidence?.state === "available" &&
+                      !proposedEvidence.discardedAt
+                    ? "Proposed PDF selected for recording; not yet attached."
+                    : "No PDF selected or attached."}
+              </p>
+              {stagedPdf && !stagedPdf.approved && (
+                <div className="actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() => void preparePdfPreview()}
+                  >
+                    Prepare PDF preview
+                  </button>
+                  {reviewPreviewUrl && (
+                    <a
+                      href={reviewPreviewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => setStagedPreviewOpened(true)}
+                    >
+                      Open PDF preview
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy || !stagedPreviewOpened}
+                    onClick={() => void approveStagedPdf()}
+                  >
+                    Approve PDF
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+          busy={busy || completedTransactionId !== null}
+          onDirtyChange={setFormDirty}
+          serverIssues={issues}
+          onEvidenceChange={(file) => {
+            selectedEvidenceFile.current = file;
+            setEvidence(
+              file ? { filename: file.name, status: "selected" } : null,
+            );
+            if (stagedPdf?.file !== file) {
+              setStagedPdf(null);
+              setReviewPreviewUrl(null);
+              setStagedPreviewOpened(false);
+            }
+          }}
+          onSelectedArtifactsChange={(artifactIds) => {
+            const selectedId = artifactIds[0];
+            if (!selectedId) {
+              setPreviewArtifact(null);
+              return;
+            }
+            const selected =
+              data.availableArtifacts.find(
+                (artifact) => artifact.id === selectedId,
+              ) ??
+              transaction?.sourceArtifacts?.find(
+                (artifact) => artifact.id === selectedId,
+              ) ??
+              (initialArtifact?.id === selectedId ? initialArtifact : null);
+            setPreviewArtifact({
+              id: selectedId,
+              filename: selected?.filename ?? "Selected invoice PDF",
+            });
+          }}
+          onPrepareInvoiceForExtraction={prepareInvoiceForExtraction}
+          onSubmit={save}
+          onCancel={
+            mode === "edit"
+              ? (onCancel ?? (() => window.location.assign(returnHref)))
+              : undefined
+          }
+        />
+        {visiblePreviewArtifact && (
+          <TransactionPdfPreview
+            key={visiblePreviewArtifact.id}
+            artifactId={visiblePreviewArtifact.id}
+            filename={visiblePreviewArtifact.filename}
+            variant={useCompactPreview ? "peek" : "side"}
+          />
+        )}
+        {showProposedPreview && previewableProposedEvidence && (
+          <TransactionPdfPreview
+            key={`${transactionId}:${previewableProposedEvidence.artifactId}`}
+            artifactId={previewableProposedEvidence.artifactId}
+            filename={previewableProposedEvidence.filename}
+            variant="peek"
+          />
+        )}
+      </div>
       <WorkflowStatus
         workflow={workflow}
         label=""
@@ -1036,7 +1422,7 @@ export const ManualTransactionRoute = ({
         alertErrors
         focusErrors
       />
-      {!embedded && transaction?.status === "recorded" && (
+      {(!embedded || pane?.active) && transaction?.status === "recorded" && (
         <div className="actions transaction-workflow-page__void-actions">
           <button
             type="button"

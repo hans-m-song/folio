@@ -276,6 +276,12 @@ beforeEach(() => {
   operationMocks.startArtifactUpload.mockResolvedValue({
     artifact: { id: "artifact-1" },
     uploadUrl: "https://upload.example.test/artifact-1",
+    uploadHeaders: {
+      "Content-Type": "application/pdf",
+      "x-amz-checksum-sha256": "synthetic-checksum",
+      "x-amz-meta-folio-artifact-id": "artifact-1",
+      "If-None-Match": "*",
+    },
   });
   operationMocks.confirmArtifactUpload.mockResolvedValue({ id: "artifact-1" });
   operationMocks.downloadArtifact.mockResolvedValue(

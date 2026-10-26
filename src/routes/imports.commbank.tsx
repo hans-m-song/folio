@@ -1,9 +1,9 @@
-import { createFileRoute } from "@tanstack/react-router";
-
-import { NewBankImportPage } from "./banking.imports.new";
-import bankingCss from "../styles/banking.css?url";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/imports/commbank")({
-  head: () => ({ links: [{ rel: "stylesheet", href: bankingCss }] }),
-  component: () => <NewBankImportPage embedded />,
+  beforeLoad: () => {
+    throw redirect({
+      href: "/imports/upload?profile=commbank_transaction_history_csv_v1",
+    });
+  },
 });
