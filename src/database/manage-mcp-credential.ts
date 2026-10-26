@@ -1,3 +1,4 @@
+import { parseWithDiagnostics } from "../domain/validation-diagnostics";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -59,12 +60,18 @@ export const parseCredentialCommand = (
   if (parsed.positionals.length !== 1)
     throw new Error("Expected exactly one action: scopes, create, or revoke");
   if (action === "scopes") return { action };
-  const administratorId = uuidSchema.parse(parsed.values["administrator-id"]);
+  const administratorId = parseWithDiagnostics(
+    uuidSchema,
+    parsed.values["administrator-id"],
+  );
   if (action === "revoke")
     return {
       action,
       administratorId,
-      credentialId: uuidSchema.parse(parsed.values["credential-id"]),
+      credentialId: parseWithDiagnostics(
+        uuidSchema,
+        parsed.values["credential-id"],
+      ),
     };
   if (action !== "create")
     throw new Error("Expected scopes, create, or revoke");
@@ -73,8 +80,14 @@ export const parseCredentialCommand = (
   return {
     action,
     administratorId,
-    actorUserId: uuidSchema.parse(parsed.values["actor-user-id"]),
-    defaultOwnerId: uuidSchema.parse(parsed.values["default-owner-id"]),
+    actorUserId: parseWithDiagnostics(
+      uuidSchema,
+      parsed.values["actor-user-id"],
+    ),
+    defaultOwnerId: parseWithDiagnostics(
+      uuidSchema,
+      parsed.values["default-owner-id"],
+    ),
     label: z.string().trim().min(1).max(200).parse(parsed.values.label),
     scopes,
   };
@@ -86,11 +99,13 @@ const scopeDescriptions: Record<
 > = {
   "bank_rows:read": "Read imported bank activity metadata",
   "transactions:search": "Search transactions in every status",
-  "transactions:draft": "Create and edit this credential's drafts",
+  "transactions:draft": "Create and edit any manual transaction drafts",
   "transactions:categorize": "Categorize any transaction",
   "bank_matches:suggest": "Suggest existing matches for bank rows",
   "artifacts:read": "Read artifact metadata, not file contents",
   "artifacts:upload": "Upload artifacts for human review",
+  "artifacts:edit": "Edit artifact metadata",
+  "artifacts:extract": "Extract PDF fields (reads file contents)",
 };
 
 export const credentialScopeHelp = () =>
@@ -186,7 +201,7 @@ export const runManageMcpCredential = async ({
     } else {
       stage = "create";
       const secret = secretGenerator();
-      const input = proposalCredentialInputSchema.parse({
+      const input = parseWithDiagnostics(proposalCredentialInputSchema, {
         label: command.label,
         tokenHash: secret.tokenHash,
         actorUserId: command.actorUserId,

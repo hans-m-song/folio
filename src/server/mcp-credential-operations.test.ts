@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ProposalCredentialScopesConflictError } from "../database/proposal-repository";
+
 const administratorId = "11111111-1111-4111-8111-111111111111";
 const actorId = "22222222-2222-4222-8222-222222222222";
 const ownerId = "33333333-3333-4333-8333-333333333333";
@@ -12,11 +14,13 @@ const current = vi.hoisted(() => ({
     listCredentials: vi.fn(),
     createCredential: vi.fn(),
     revokeCredential: vi.fn(),
+    updateCredentialScopes: vi.fn(),
   },
 }));
 
 vi.mock("@tanstack/react-start/server", () => ({
   getCookie: vi.fn().mockReturnValue("synthetic-session-token"),
+  setResponseStatus: vi.fn(),
 }));
 vi.mock("@tanstack/react-start", () => ({
   createServerFn: () => {
@@ -40,6 +44,7 @@ import {
   createMcpCredential,
   listMcpCredentials,
   revokeMcpCredential,
+  updateMcpCredentialScopes,
 } from "./mcp-credential-operations";
 
 const credential = {
@@ -64,6 +69,9 @@ beforeEach(() => {
   current.proposalRepository.listCredentials.mockResolvedValue([credential]);
   current.proposalRepository.createCredential.mockResolvedValue(credential);
   current.proposalRepository.revokeCredential.mockResolvedValue(undefined);
+  current.proposalRepository.updateCredentialScopes.mockResolvedValue(
+    credential,
+  );
 });
 
 describe("access token server operations", () => {
@@ -84,9 +92,21 @@ describe("access token server operations", () => {
     await expect(
       revokeMcpCredential({ data: { credentialId } }),
     ).rejects.toThrow();
+    await expect(
+      updateMcpCredentialScopes({
+        data: {
+          credentialId,
+          scopes: ["transactions:search"],
+          expectedScopes: ["transactions:search"],
+        },
+      }),
+    ).rejects.toThrow();
     expect(current.proposalRepository.listCredentials).not.toHaveBeenCalled();
     expect(current.proposalRepository.createCredential).not.toHaveBeenCalled();
     expect(current.proposalRepository.revokeCredential).not.toHaveBeenCalled();
+    expect(
+      current.proposalRepository.updateCredentialScopes,
+    ).not.toHaveBeenCalled();
   });
 
   it("lists metadata only and expands wildcards before storing a new hash", async () => {
@@ -145,12 +165,14 @@ describe("access token server operations", () => {
         scopes: expect.arrayContaining([
           "transactions:categorize",
           "artifacts:upload",
+          "artifacts:edit",
+          "artifacts:extract",
         ]),
       }),
     );
     expect(
       current.proposalRepository.createCredential.mock.calls[0]?.[1].scopes,
-    ).toHaveLength(7);
+    ).toHaveLength(9);
   });
 
   it("accepts resource wildcards and rejects unknown scope patterns", async () => {
@@ -165,7 +187,12 @@ describe("access token server operations", () => {
     expect(current.proposalRepository.createCredential).toHaveBeenCalledWith(
       administratorId,
       expect.objectContaining({
-        scopes: ["artifacts:read", "artifacts:upload"],
+        scopes: [
+          "artifacts:read",
+          "artifacts:upload",
+          "artifacts:edit",
+          "artifacts:extract",
+        ],
       }),
     );
     current.proposalRepository.createCredential.mockClear();
@@ -205,5 +232,62 @@ describe("access token server operations", () => {
       administratorId,
       credentialId,
     );
+  });
+
+  it("updates scopes by ID with a stale-scope precondition and returns metadata only", async () => {
+    const result = await updateMcpCredentialScopes({
+      data: {
+        credentialId,
+        scopes: ["transactions:search", "submissions:read"],
+        expectedScopes: ["transactions:search"],
+      },
+    });
+
+    expect(result).toEqual(credential);
+    expect(result).not.toHaveProperty("token");
+    expect(result).not.toHaveProperty("tokenHash");
+    expect(
+      current.proposalRepository.updateCredentialScopes,
+    ).toHaveBeenCalledWith(
+      administratorId,
+      credentialId,
+      ["transactions:search", "submissions:read"],
+      ["transactions:search"],
+    );
+    const diagnostic = JSON.stringify(vi.mocked(console.log).mock.calls);
+    expect(diagnostic).toContain("update_access_token_scopes");
+    expect(diagnostic).toContain(credentialId);
+    expect(diagnostic).not.toContain("tokenHash");
+  });
+
+  it("maps a scope compare conflict to the public revision conflict", async () => {
+    current.proposalRepository.updateCredentialScopes.mockRejectedValue(
+      new ProposalCredentialScopesConflictError(),
+    );
+
+    await expect(
+      updateMcpCredentialScopes({
+        data: {
+          credentialId,
+          scopes: ["transactions:search", "transactions:draft"],
+          expectedScopes: ["transactions:search"],
+        },
+      }),
+    ).rejects.toThrow(/REVISION_CONFLICT/);
+  });
+
+  it("rejects duplicate scope values before the repository is called", () => {
+    expect(() =>
+      updateMcpCredentialScopes({
+        data: {
+          credentialId,
+          scopes: ["transactions:search", "transactions:search"],
+          expectedScopes: ["transactions:search"],
+        },
+      }),
+    ).toThrow();
+    expect(
+      current.proposalRepository.updateCredentialScopes,
+    ).not.toHaveBeenCalled();
   });
 });

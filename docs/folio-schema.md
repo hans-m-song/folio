@@ -129,25 +129,49 @@ and security settings; see the overview for their exact origins and cookie polic
 
 ## `folio.source_artifacts`
 
-| Column            | Type          | Constraint                                           |
-| ----------------- | ------------- | ---------------------------------------------------- |
-| `id`              | `uuid`        | primary key                                          |
-| `owner_id`        | `uuid`        | nullable reference to `users`                        |
-| `created_by_id`   | `uuid`        | required reference to `users`                        |
-| `kind`            | `text`        | `pdf` or `stripe_csv`                                |
-| `object_key`      | `text`        | required and unique; application generated           |
-| `version_id`      | `text`        | nullable until confirmed                             |
-| `filename`        | `text`        | required; display only                               |
-| `media_type`      | `text`        | required; allow-listed by `kind`                     |
-| `byte_size`       | `bigint`      | required and positive                                |
-| `checksum_sha256` | `text`        | required when available                              |
-| `state`           | `text`        | `pending`, `available`, `superseded`, or `abandoned` |
-| `created_at`      | `timestamptz` | required; server generated                           |
-| `confirmed_at`    | `timestamptz` | nullable                                             |
+| Column              | Type          | Constraint                                                      |
+| ------------------- | ------------- | --------------------------------------------------------------- |
+| `id`                | `uuid`        | primary key                                                     |
+| `owner_id`          | `uuid`        | nullable reference to `users`                                   |
+| `created_by_id`     | `uuid`        | required reference to `users`                                   |
+| `artifact_profile`  | `text`        | supported PDF or CSV profile                                    |
+| `object_key`        | `text`        | required and unique; application generated                      |
+| `upload_expires_at` | `timestamptz` | latest issued PUT expiry; nullable before issuance              |
+| `filename`          | `text`        | required; chosen inline/download Content-Disposition filename   |
+| `original_filename` | `text`        | optional original upload filename provenance                    |
+| `period_start`      | `date`        | optional descriptive coverage start                             |
+| `period_end`        | `date`        | optional descriptive coverage end; not before start             |
+| `document_date`     | `date`        | optional invoice/document date                                  |
+| `supplier`          | `text`        | optional document supplier, maximum 200 characters              |
+| `reference`         | `text`        | optional reference, maximum 200 characters                      |
+| `notes`             | `text`        | optional notes, maximum 2000 characters                         |
+| `media_type`        | `text`        | required; allow-listed by profile                               |
+| `byte_size`         | `bigint`      | required and positive                                           |
+| `checksum_sha256`   | `text`        | required base64 SHA-256 checksum                                |
+| `state`             | `text`        | pending/review/available/rejected/superseded/abandoned/deleting |
+| `created_at`        | `timestamptz` | required; server generated                                      |
+| `confirmed_at`      | `timestamptz` | nullable                                                        |
+
+Migration 0020 adds coverage/document dates, reference and notes. Migration 0021
+adds nullable supplier with no backfill; old documents retain null. This metadata
+does not establish or automatically change a transaction's counterparty.
 
 The browser uploads directly to S3 using a short-lived presigned request. The server
-confirms object metadata before changing `pending` to `available`. Failed or expired
+confirms checksum and object metadata before changing `pending` to `awaiting_review`.
+Human review/import then promotes the artifact to `available`. Failed or expired
 uploads become `abandoned`; available objects are never overwritten in place.
+
+Migration 0019 removes `version_id` and requires an empty artifact table. Confirmed
+states require `confirmed_at`, independent of provider version IDs. Deleting rows
+retain metadata until the recorded upload expiry plus grace has passed and exact-key
+storage cleanup succeeds. See [unversioned storage](./unversioned-storage.md).
+
+## MCP scope constraint — migration 0022
+
+Migration 0022 extends the credential scope constraint to permit `artifacts:edit`
+and `artifacts:extract` and raises its maximum length to ten. It changes no issued
+credential rows. Newly issued wildcard credentials expand to the current concrete
+scopes; existing credentials retain their materialized scope arrays.
 
 ## `folio.transactions`
 

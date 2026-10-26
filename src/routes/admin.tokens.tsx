@@ -1,32 +1,65 @@
 import { AutocompleteSelect } from "../components/autocomplete";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { getCurrentSession } from "../auth/session-server";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
 import type { ProposalCredentialRecord } from "../database/proposal-repository";
+import type { ProposalCredentialScope } from "../domain/proposals";
 import type { User } from "../domain/types";
 import { hasPermission, permissions } from "../server/authorization";
 import {
   createMcpCredential,
   listMcpCredentials,
   revokeMcpCredential,
+  updateMcpCredentialScopes,
 } from "../server/mcp-credential-operations";
 import { listUsers } from "../server/operations";
 import "../styles/admin.css";
 
-const scopeOptions = [
-  { value: "*", label: "All current scopes" },
-  { value: "transactions:*", label: "All current transaction scopes" },
-  { value: "artifacts:*", label: "All current artifact scopes" },
+const concreteScopeOptions = [
   { value: "transactions:search", label: "Search transactions" },
-  { value: "transactions:draft", label: "Create and edit own drafts" },
+  {
+    value: "transactions:draft",
+    label: "Create and edit any manual transaction drafts",
+  },
   { value: "transactions:categorize", label: "Categorize any transaction" },
   { value: "bank_rows:read", label: "Read bank rows" },
   { value: "bank_matches:suggest", label: "Suggest bank matches" },
   { value: "artifacts:read", label: "Read artifact metadata" },
   { value: "artifacts:upload", label: "Upload artifacts for review" },
+  { value: "artifacts:edit", label: "Edit artifact metadata" },
+  {
+    value: "artifacts:extract",
+    label: "Extract PDF fields (reads file contents)",
+  },
+] as const satisfies readonly {
+  value: ProposalCredentialScope;
+  label: string;
+}[];
+
+const scopeOptions = [
+  {
+    value: "*",
+    label:
+      "All current scopes, including PDF field extraction (reads file contents)",
+  },
+  { value: "transactions:*", label: "All current transaction scopes" },
+  {
+    value: "artifacts:*",
+    label:
+      "All artifact scopes, including PDF field extraction (reads file contents)",
+  },
+  ...concreteScopeOptions,
 ] as const;
+
+const legacySubmissionScopeOption = {
+  value: "submissions:read",
+  label: "Read submission outcomes (legacy: submissions:read)",
+} as const satisfies {
+  value: ProposalCredentialScope;
+  label: string;
+};
 
 type CreatedCredential = {
   token: string;
@@ -81,6 +114,10 @@ export function AccessTokensPage() {
     null,
   );
   const [revokeError, setRevokeError] = useState("");
+  const [editingScopes, setEditingScopes] =
+    useState<ProposalCredentialRecord | null>(null);
+  const [scopeUpdateError, setScopeUpdateError] = useState("");
+  const [scopeUpdateBlocked, setScopeUpdateBlocked] = useState(false);
 
   if (!allowed)
     return (
@@ -145,7 +182,7 @@ export function AccessTokensPage() {
         if (createdRef.current !== created) return;
         setCopyFeedback({
           credential: created,
-          message: "Token copied. Store it securely.",
+          message: "Token copied",
         });
         return;
       }
@@ -176,7 +213,7 @@ export function AccessTokensPage() {
     setCopyFeedback({
       credential: created,
       message: copied
-        ? "Token copied. Store it securely."
+        ? "Token copied"
         : tokenSelected
           ? "Could not copy automatically. The token is selected; press Cmd/Ctrl+C to copy it."
           : "Could not copy automatically. Select the token and press Cmd/Ctrl+C to copy it.",
@@ -200,6 +237,45 @@ export function AccessTokensPage() {
       setMessage("Token revoked.");
     } catch {
       setRevokeError("Could not revoke the token. Reload and retry.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveScopes = async (scopes: ProposalCredentialScope[]) => {
+    if (!editingScopes) return;
+    setBusy(true);
+    setScopeUpdateError("");
+    setScopeUpdateBlocked(false);
+
+    try {
+      await updateMcpCredentialScopes({
+        data: {
+          credentialId: editingScopes.id,
+          scopes,
+          expectedScopes: [...editingScopes.scopes],
+        },
+      });
+    } catch (error) {
+      const isConflict =
+        error instanceof Error && /\bREVISION_CONFLICT\b/.test(error.message);
+      const message = isConflict
+        ? "This token's scopes changed after editing began. Close and reload before editing again."
+        : "Could not confirm that the scope changes were saved. Close and reload the token list before trying again.";
+      setScopeUpdateError(message);
+      setScopeUpdateBlocked(true);
+      setBusy(false);
+      return;
+    }
+
+    setEditingScopes(null);
+    try {
+      await router.invalidate({ sync: true });
+      setMessage("Token scopes updated.");
+    } catch {
+      setMessage(
+        "Token scopes were saved, but the list could not refresh. Do not resubmit; reload before editing again.",
+      );
     } finally {
       setBusy(false);
     }
@@ -289,11 +365,6 @@ export function AccessTokensPage() {
               <button type="button" onClick={() => void copyToken()}>
                 Copy token
               </button>
-              {copyFeedback?.credential === created && (
-                <span role="status" aria-live="polite">
-                  {copyFeedback.message}
-                </span>
-              )}
               <button
                 type="button"
                 className="secondary"
@@ -302,6 +373,15 @@ export function AccessTokensPage() {
                 Dismiss token
               </button>
             </div>
+            {copyFeedback?.credential === created && (
+              <p
+                className="admin-token-copy-toast"
+                role="status"
+                aria-live="polite"
+              >
+                {copyFeedback.message}
+              </p>
+            )}
           </div>
         )}
       </section>
@@ -342,16 +422,30 @@ export function AccessTokensPage() {
                     <td>{credential.revokedAt ? "Revoked" : "Active"}</td>
                     <td>
                       {!credential.revokedAt && (
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => {
-                            setRevokeError("");
-                            setRevoking(credential);
-                          }}
-                        >
-                          Revoke
-                        </button>
+                        <div className="admin-token-reveal-actions">
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => {
+                              setMessage("");
+                              setScopeUpdateError("");
+                              setScopeUpdateBlocked(false);
+                              setEditingScopes(credential);
+                            }}
+                          >
+                            Edit scopes
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => {
+                              setRevokeError("");
+                              setRevoking(credential);
+                            }}
+                          >
+                            Revoke
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -372,6 +466,145 @@ export function AccessTokensPage() {
           onConfirm={() => void revoke()}
         />
       )}
+      {editingScopes && (
+        <CredentialScopeDialog
+          key={editingScopes.id}
+          credential={editingScopes}
+          pending={busy}
+          error={scopeUpdateError}
+          saveBlocked={scopeUpdateBlocked}
+          onCancel={() => {
+            setEditingScopes(null);
+            if (scopeUpdateError) setMessage(scopeUpdateError);
+          }}
+          onSave={(scopes) => void saveScopes(scopes)}
+        />
+      )}
     </main>
   );
 }
+
+const CredentialScopeDialog = ({
+  credential,
+  pending,
+  error,
+  saveBlocked,
+  onCancel,
+  onSave,
+}: {
+  credential: ProposalCredentialRecord;
+  pending: boolean;
+  error: string;
+  saveBlocked: boolean;
+  onCancel: () => void;
+  onSave: (scopes: ProposalCredentialScope[]) => void;
+}) => {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const [selectionError, setSelectionError] = useState("");
+  const scopeOptionsForCredential = [
+    ...concreteScopeOptions,
+    ...(credential.scopes.includes("submissions:read")
+      ? [legacySubmissionScopeOption]
+      : []),
+  ];
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    if (!dialog.open) dialog.showModal();
+    cancelButtonRef.current?.focus();
+
+    return () => {
+      if (dialog.open) dialog.close();
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, []);
+
+  const save = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const selected = new Set(
+      new FormData(event.currentTarget).getAll("scope").map(String),
+    );
+    const scopes = scopeOptionsForCredential
+      .filter((scope) => selected.has(scope.value))
+      .map((scope) => scope.value);
+    if (scopes.length === 0) {
+      setSelectionError("Select at least one scope.");
+      return;
+    }
+    setSelectionError("");
+    onSave(scopes);
+  };
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="confirmation-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="edit-token-scopes-heading"
+      aria-describedby="edit-token-scopes-description"
+      aria-busy={pending}
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!pending) onCancel();
+      }}
+    >
+      <h2 id="edit-token-scopes-heading">Edit scopes for {credential.label}</h2>
+      <p id="edit-token-scopes-description">
+        Saved changes apply to subsequent requests. Its identity and secret stay
+        the same.
+      </p>
+      <form className="admin-token-scope-form" onSubmit={save}>
+        <fieldset
+          className="admin-token-scopes"
+          disabled={pending || saveBlocked}
+        >
+          <legend>Token scopes</legend>
+          {scopeOptionsForCredential.map((scope) => (
+            <label key={scope.value}>
+              <input
+                type="checkbox"
+                name="scope"
+                value={scope.value}
+                defaultChecked={credential.scopes.includes(scope.value)}
+                onChange={() => setSelectionError("")}
+              />
+              {scope.label}
+            </label>
+          ))}
+        </fieldset>
+        {selectionError ? (
+          <p className="confirmation-dialog__error" role="alert">
+            {selectionError}
+          </p>
+        ) : null}
+        {error ? (
+          <p className="confirmation-dialog__error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        <div className="confirmation-dialog__actions">
+          <button
+            ref={cancelButtonRef}
+            type="button"
+            className="secondary"
+            disabled={pending}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button type="submit" disabled={pending || saveBlocked}>
+            {pending ? "Saving…" : "Save scopes"}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+};

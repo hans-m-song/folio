@@ -6,6 +6,11 @@ import {
 import { z } from "zod";
 
 import {
+  artifactMetadataEditSchema,
+  artifactMetadataFieldsSchema,
+  artifactMetadataSchema,
+} from "../artifacts/metadata";
+import {
   artifactProfileSchema,
   getArtifactProfile,
 } from "../artifacts/profiles";
@@ -23,7 +28,10 @@ import {
   ProposalTransactionNotFoundError,
   type ProposalRepository,
 } from "../database/proposal-repository";
-import { ArtifactUploadIdempotencyConflictError } from "../documents/service";
+import {
+  ArtifactUploadIdempotencyConflictError,
+  type ArtifactDetails,
+} from "../documents/service";
 import {
   AppError,
   type AppErrorCode,
@@ -37,7 +45,10 @@ import {
   validatePreImportCommBankLocator,
 } from "../domain/proposals";
 import { transactionInputSchema, transactionKindSchema } from "../domain/types";
+import { parseCsvFilename, parseFileFilename } from "../domain/file-filename";
+import { parseWithDiagnostics } from "../domain/validation-diagnostics";
 import type { DocumentService } from "../documents/service";
+import type { InvoiceFieldReader } from "../documents/invoice-field-reader";
 import type { FolioConfig } from "../config";
 import {
   reportServerFailure,
@@ -77,6 +88,7 @@ type McpPublicErrorCode =
   | "INVALID_ARGUMENTS"
   | "NOT_AUTHORIZED"
   | "IDEMPOTENCY_CONFLICT"
+  | "ARTIFACT_METADATA_CONFLICT"
   | "BANK_ROW_NOT_ACTIONABLE"
   | "ARTIFACT_NOT_CONFIRMABLE"
   | "INVALID_BANK_ROW_LOCATOR"
@@ -91,8 +103,9 @@ class McpToolError extends AppError {
   constructor(
     readonly code: McpPublicErrorCode,
     message: string,
+    cause?: unknown,
   ) {
-    super({ code: code as AppErrorCode, stage: "tool_call" });
+    super({ code: code as AppErrorCode, stage: "tool_call", cause });
     this.message = message;
   }
 }
@@ -110,7 +123,7 @@ const safeError = (
   if (error instanceof ProposalDraftNotEditableError)
     return {
       code: "DRAFT_NOT_EDITABLE",
-      message: "The draft is no longer editable by this credential.",
+      message: "The draft is no longer editable.",
     };
   if (error instanceof ProposalTransactionConflictError)
     return {
@@ -127,6 +140,12 @@ const safeError = (
     return {
       code: "TRANSACTION_NOT_FOUND",
       message: "The transaction was not found.",
+    };
+  if (error instanceof AppError && error.code === "ARTIFACT_METADATA_CONFLICT")
+    return {
+      code: "ARTIFACT_METADATA_CONFLICT",
+      message:
+        "Artifact metadata changed or is no longer editable. Reload before saving again.",
     };
   if (
     error instanceof ProposalIdempotencyConflictError ||
@@ -189,6 +208,9 @@ type McpToolName =
   | "list_unresolved_bank_rows"
   | "search_transactions"
   | "list_artifacts"
+  | "get_artifact"
+  | "update_artifact_metadata"
+  | "extract_invoice_fields"
   | "begin_artifact_upload"
   | "confirm_artifact_upload"
   | "submit_draft_transaction"
@@ -281,17 +303,83 @@ const beginUploadInput = z
   .object({
     idempotencyKey: z.string().min(1).max(200),
     profile: uploadProfileSchema,
-    filename: z.string().trim().min(1).max(255),
     byteSize: z
       .number()
       .int()
       .min(1)
       .max(50 * 1024 * 1024),
     checksumSha256: z.string().regex(/^[A-Za-z0-9+/]{43}=$/),
+    ...artifactMetadataFieldsSchema.shape,
   })
-  .strict();
+  .strict()
+  .transform((request, context) => {
+    const metadata = artifactMetadataSchema.safeParse({
+      filename: request.filename,
+      originalFilename: request.originalFilename,
+      supplier: request.supplier,
+      periodStart: request.periodStart,
+      periodEnd: request.periodEnd,
+      documentDate: request.documentDate,
+      reference: request.reference,
+      notes: request.notes,
+    });
+    if (!metadata.success)
+      metadata.error.issues.forEach((issue) => context.addIssue(issue));
+
+    if (
+      request.profile === "manual_invoice_pdf_v1" &&
+      (request.periodStart != null || request.periodEnd != null)
+    )
+      context.addIssue({
+        code: "custom",
+        path: [request.periodStart != null ? "periodStart" : "periodEnd"],
+        message: "Coverage dates are only accepted for CSV exports.",
+      });
+
+    if (!metadata.success) return z.NEVER;
+    return { ...request, ...metadata.data };
+  });
 
 const confirmUploadInput = z.object({ artifactId: z.string().uuid() }).strict();
+
+const updateArtifactMetadataInput = z
+  .object({
+    artifactId: z.string().uuid(),
+    filename: z.string(),
+    periodStart: z.string().nullable(),
+    periodEnd: z.string().nullable(),
+    expected: z
+      .object({
+        filename: z.string(),
+        periodStart: z.string().nullable(),
+        periodEnd: z.string().nullable(),
+      })
+      .strict(),
+  })
+  .strict()
+  .transform((request, context) => {
+    const metadata = artifactMetadataEditSchema.safeParse({
+      id: request.artifactId,
+      filename: request.filename,
+      periodStart: request.periodStart,
+      periodEnd: request.periodEnd,
+      expected: request.expected,
+    });
+    if (!metadata.success) {
+      metadata.error.issues.forEach((issue) => context.addIssue(issue));
+      return z.NEVER;
+    }
+    return metadata.data;
+  });
+
+const getArtifactInput = z.object({ artifactId: z.string().uuid() }).strict();
+
+const extractInvoiceFieldsInput = z
+  .object({
+    artifactId: z.string().uuid(),
+    expectedChecksumSha256: z.string().regex(/^[A-Za-z0-9+/]{43}=$/),
+  })
+  .strict();
 
 const directBankTargetInput = directBankTargetSchema.extend({
   expectedRevision: z
@@ -485,7 +573,7 @@ const registerToolsForPrincipal = (
           principal.actorUserId,
           false,
           async () => {
-            const request = bankRowsInput.parse(input);
+            const request = parseWithDiagnostics(bankRowsInput, input);
             const rows = await dependencies.bankRepository.listTransactions(
               principal.actorUserId,
               {
@@ -544,7 +632,7 @@ const registerToolsForPrincipal = (
           principal.actorUserId,
           false,
           async () => {
-            const request = searchInput.parse(input);
+            const request = parseWithDiagnostics(searchInput, input);
             const page = await dependencies.repository.listTransactionPage(
               principal.actorUserId,
               {
@@ -619,7 +707,7 @@ const registerToolsForPrincipal = (
       },
       async (input) =>
         runTool("list_artifacts", principal.actorUserId, false, async () => {
-          const request = listArtifactsInput.parse(input);
+          const request = parseWithDiagnostics(listArtifactsInput, input);
           const page = await dependencies.repository.listArtifacts(
             principal.actorUserId,
             {
@@ -633,8 +721,195 @@ const registerToolsForPrincipal = (
               offset: request.offset,
             },
           );
-          return page;
+          return {
+            total: page.total,
+            rows: page.rows.map((artifact) => ({
+              id: artifact.id,
+              filename: artifact.filename,
+              originalFilename: artifact.originalFilename ?? null,
+              artifactProfile: artifact.artifactProfile,
+              mediaType: artifact.mediaType,
+              state: artifact.state,
+              byteSize: artifact.byteSize,
+              checksumSha256: artifact.checksumSha256,
+              periodStart: artifact.periodStart ?? null,
+              periodEnd: artifact.periodEnd ?? null,
+              documentDate: artifact.documentDate ?? null,
+              reference: artifact.reference ?? null,
+              notes: artifact.notes ?? null,
+              supplier: artifact.supplier ?? null,
+              createdAt: artifact.createdAt,
+              transactionCount: artifact.transactionCount,
+              bankRowCount: artifact.bankRowCount,
+            })),
+          };
         }),
+    );
+
+    server.registerTool(
+      "get_artifact",
+      {
+        description:
+          "Get workspace-visible artifact metadata, checksum identity, linkage counts, and filename suggestions. Original file bytes, download URLs, object keys, and linked transaction IDs are not returned.",
+        inputSchema: fromJsonSchema<{ artifactId: string }>(
+          jsonObject({ artifactId: { type: "string", format: "uuid" } }, [
+            "artifactId",
+          ]),
+        ),
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async (input) =>
+        runTool("get_artifact", principal.actorUserId, false, async () => {
+          const request = parseWithDiagnostics(getArtifactInput, input);
+          setDiagnosticContext({ ids: { artifactId: request.artifactId } });
+          const artifact = await dependencies.repository.getArtifactDetails(
+            principal.actorUserId,
+            request.artifactId,
+          );
+          return artifact ? publicArtifactDetails(artifact) : null;
+        }),
+    );
+  }
+
+  if (
+    hasScope(principal, "artifacts:read") &&
+    hasScope(principal, "artifacts:edit")
+  ) {
+    server.registerTool(
+      "update_artifact_metadata",
+      {
+        description:
+          "Update an artifact's current filename and CSV export coverage dates using the supplied expected metadata snapshot. This changes file metadata only; it does not record or alter financial transactions.",
+        inputSchema: fromJsonSchema<{
+          artifactId: string;
+          filename: string;
+          periodStart: string | null;
+          periodEnd: string | null;
+          expected: {
+            filename: string;
+            periodStart: string | null;
+            periodEnd: string | null;
+          };
+        }>(
+          jsonObject(
+            {
+              artifactId: { type: "string", format: "uuid" },
+              filename: { type: "string", minLength: 1, maxLength: 255 },
+              periodStart: nullable({ type: "string", format: "date" }),
+              periodEnd: nullable({ type: "string", format: "date" }),
+              expected: jsonObject(
+                {
+                  filename: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 255,
+                  },
+                  periodStart: nullable({ type: "string", format: "date" }),
+                  periodEnd: nullable({ type: "string", format: "date" }),
+                },
+                ["filename", "periodStart", "periodEnd"],
+              ),
+            },
+            ["artifactId", "filename", "periodStart", "periodEnd", "expected"],
+          ),
+        ),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async (input) =>
+        runTool(
+          "update_artifact_metadata",
+          principal.actorUserId,
+          true,
+          async () => {
+            const request = parseWithDiagnostics(
+              updateArtifactMetadataInput,
+              input,
+            );
+            setDiagnosticContext({ ids: { artifactId: request.id } });
+            const updated = await dependencies.documents.updateMetadata(
+              principal.actorUserId,
+              request,
+            );
+            return publicArtifact(updated);
+          },
+        ),
+    );
+  }
+
+  if (
+    hasScope(principal, "artifacts:read") &&
+    hasScope(principal, "artifacts:extract")
+  ) {
+    server.registerTool(
+      "extract_invoice_fields",
+      {
+        description:
+          "Read a confirmed invoice PDF with the expected checksum and return parsed fields, provenance, and duplicate hints for review. Unsupported PDFs return their reason. This tool never applies extracted values.",
+        inputSchema: fromJsonSchema<{
+          artifactId: string;
+          expectedChecksumSha256: string;
+        }>(
+          jsonObject(
+            {
+              artifactId: { type: "string", format: "uuid" },
+              expectedChecksumSha256: {
+                type: "string",
+                pattern: "^[A-Za-z0-9+/]{43}=$",
+              },
+            },
+            ["artifactId", "expectedChecksumSha256"],
+          ),
+        ),
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async (input) =>
+        runTool(
+          "extract_invoice_fields",
+          principal.actorUserId,
+          false,
+          async () => {
+            const request = parseWithDiagnostics(
+              extractInvoiceFieldsInput,
+              input,
+            );
+            setDiagnosticContext({ ids: { artifactId: request.artifactId } });
+            const result = await dependencies.extractInvoiceFields(
+              principal.actorUserId,
+              request,
+            );
+            if (result.status === "unsupported")
+              reportServerFailure(
+                new AppError({
+                  code:
+                    result.reason === "extraction_failed" ||
+                    result.reason === "deadline_exceeded"
+                      ? "PDF_EXTRACTION_FAILED"
+                      : "PDF_EXTRACTION_UNSUPPORTED",
+                  stage: "pdf_extraction",
+                }),
+                {
+                  operation: "extract_invoice_fields",
+                  metadata: { reason: result.reason },
+                },
+              );
+            return result;
+          },
+        ),
     );
   }
 
@@ -643,11 +918,18 @@ const registerToolsForPrincipal = (
       "begin_artifact_upload",
       {
         description:
-          "Create a bounded direct-to-storage upload intent for a supported artifact profile. For upload_ready, PUT the file bytes to uploadUrl with every exact name and value in uploadHeaders. If the PUT returns HTTP 412, call confirm_artifact_upload to confirm the existing object. Treat every other non-2xx response as a failed upload.",
+          "Create a bounded upload intent. For CSV profiles, periodStart and periodEnd describe the export coverage interval; for invoice PDFs, documentDate is the invoice date and coverage dates are not accepted. For upload_ready, PUT the raw file bytes to uploadUrl with every exact name and value in uploadHeaders. If the PUT returns HTTP 412, call confirm_artifact_upload; confirmation verifies that the existing object matches this artifact. Treat every other non-2xx response as a failed upload.",
         inputSchema: fromJsonSchema<{
           idempotencyKey: string;
           profile: (typeof uploadProfiles)[number];
           filename: string;
+          originalFilename?: string | null;
+          supplier?: string | null;
+          periodStart?: string | null;
+          periodEnd?: string | null;
+          documentDate?: string | null;
+          reference?: string | null;
+          notes?: string | null;
           byteSize: number;
           checksumSha256: string;
         }>(
@@ -656,6 +938,25 @@ const registerToolsForPrincipal = (
               idempotencyKey: stringSchema(200),
               profile: { type: "string", enum: uploadProfiles },
               filename: { type: "string", minLength: 1, maxLength: 255 },
+              originalFilename: nullable(stringSchema(255)),
+              supplier: nullable(stringSchema(200)),
+              periodStart: nullable({
+                type: "string",
+                format: "date",
+                description: "CSV export coverage start date.",
+              }),
+              periodEnd: nullable({
+                type: "string",
+                format: "date",
+                description: "CSV export coverage end date.",
+              }),
+              documentDate: nullable({
+                type: "string",
+                format: "date",
+                description: "Invoice date for PDF profiles.",
+              }),
+              reference: nullable(stringSchema(200)),
+              notes: nullable(stringSchema(2_000)),
               byteSize: {
                 type: "integer",
                 minimum: 1,
@@ -688,7 +989,7 @@ const registerToolsForPrincipal = (
           principal.actorUserId,
           true,
           async () => {
-            const request = beginUploadInput.parse(input);
+            const request = parseWithDiagnostics(beginUploadInput, input);
             const profile = getArtifactProfile(request.profile);
             const result = await dependencies.documents.startIdempotentUpload({
               credentialId: principal.credentialId,
@@ -697,6 +998,13 @@ const registerToolsForPrincipal = (
               ownerId: principal.defaultOwnerId,
               artifactProfile: request.profile,
               filename: request.filename,
+              originalFilename: request.originalFilename,
+              supplier: request.supplier,
+              periodStart: request.periodStart,
+              periodEnd: request.periodEnd,
+              documentDate: request.documentDate,
+              reference: request.reference,
+              notes: request.notes,
               mediaType: profile.mediaType,
               byteSize: request.byteSize,
               checksumSha256: request.checksumSha256,
@@ -731,7 +1039,7 @@ const registerToolsForPrincipal = (
       "confirm_artifact_upload",
       {
         description:
-          "Confirm an actor-owned upload whose stored object identity matches the artifact and queue it for human review.",
+          "Confirm an actor-owned upload whose stored object identity matches the artifact, then queue it for human review.",
         inputSchema: fromJsonSchema<{ artifactId: string }>(
           jsonObject({ artifactId: { type: "string", format: "uuid" } }, [
             "artifactId",
@@ -750,7 +1058,7 @@ const registerToolsForPrincipal = (
           principal.actorUserId,
           true,
           async () => {
-            const request = confirmUploadInput.parse(input);
+            const request = parseWithDiagnostics(confirmUploadInput, input);
             setDiagnosticContext({ ids: { artifactId: request.artifactId } });
             const creatorId =
               await dependencies.repository.getArtifactCreatorId(
@@ -871,7 +1179,7 @@ const registerToolsForPrincipal = (
           principal.actorUserId,
           true,
           async () => {
-            const request = draftInput.parse(input);
+            const request = parseWithDiagnostics(draftInput, input);
             const validatedTransaction = transactionInputSchema.parse({
               ...request.transaction,
               ownerId: null,
@@ -932,10 +1240,11 @@ const registerToolsForPrincipal = (
                   artifact: review.artifact,
                   parsedRows: parsed.rows,
                 });
-              } catch {
+              } catch (error) {
                 throw new McpToolError(
                   "INVALID_BANK_ROW_LOCATOR",
                   "The source row was not found in the pinned CommBank CSV.",
+                  error,
                 );
               }
             }
@@ -963,7 +1272,7 @@ const registerToolsForPrincipal = (
       "edit_transaction",
       {
         description:
-          "Edit an own still-draft transaction, or change only the category of any transaction when authorized. The exact updatedAt token is required.",
+          "With transactions:draft, edit any manual draft transaction using the exact updatedAt token. With transactions:categorize, change only the category of any transaction. Imported, recorded, and void transactions are rejected for manual draft edits.",
         inputSchema: fromJsonSchema<{
           transactionId: string;
           expectedUpdatedAt: string;
@@ -991,7 +1300,7 @@ const registerToolsForPrincipal = (
       },
       async (input) =>
         runTool("edit_transaction", principal.actorUserId, true, async () => {
-          const request = editDraftInput.parse(input);
+          const request = parseWithDiagnostics(editDraftInput, input);
           setDiagnosticContext({
             ids: { transactionId: request.transactionId },
           });
@@ -1063,7 +1372,7 @@ const registerToolsForPrincipal = (
           principal.actorUserId,
           true,
           async () => {
-            const request = suggestMatchInput.parse(input);
+            const request = parseWithDiagnostics(suggestMatchInput, input);
             setDiagnosticContext({
               ids: {
                 transactionId: request.existingTransactionId,
@@ -1094,26 +1403,126 @@ const registerToolsForPrincipal = (
   }
 };
 
-const publicArtifact = (artifact: {
+type PublicArtifactInput = {
   id: string;
   artifactProfile?: string;
   kind?: string;
-  filename?: string;
-  originalFilename?: string;
+  filename?: string | null;
+  originalFilename?: string | null;
   mediaType: string;
   byteSize: string;
   checksumSha256: string;
   state: string;
   confirmedAt?: string | null;
-}) => ({
+  uploadExpiresAt?: string | null;
+  periodStart?: string | null;
+  periodEnd?: string | null;
+  documentDate?: string | null;
+  reference?: string | null;
+  notes?: string | null;
+  supplier?: string | null;
+};
+
+const publicArtifact = (artifact: PublicArtifactInput) => ({
   id: artifact.id,
   profile: artifact.artifactProfile ?? artifact.kind ?? null,
-  filename: artifact.originalFilename ?? artifact.filename ?? null,
+  filename: artifact.filename ?? null,
+  originalFilename: artifact.originalFilename ?? null,
   mediaType: artifact.mediaType,
   byteSize: artifact.byteSize,
   checksumSha256: artifact.checksumSha256,
   state: artifact.state,
   confirmedAt: artifact.confirmedAt ?? null,
+  uploadExpiresAt: artifact.uploadExpiresAt ?? null,
+  periodStart: artifact.periodStart ?? null,
+  periodEnd: artifact.periodEnd ?? null,
+  documentDate: artifact.documentDate ?? null,
+  reference: artifact.reference ?? null,
+  notes: artifact.notes ?? null,
+  supplier: artifact.supplier ?? null,
+});
+
+const filenameSuggestionsFor = (artifact: ArtifactDetails) => {
+  const filename = artifact.originalFilename ?? artifact.filename;
+  const source = artifact.originalFilename
+    ? ("original_filename" as const)
+    : ("filename" as const);
+  if (artifact.artifactProfile === "manual_invoice_pdf_v1") {
+    const suggestions = parseFileFilename(filename);
+    if (
+      !suggestions?.supplier &&
+      !suggestions?.documentDate &&
+      !suggestions?.reference
+    )
+      return null;
+    return {
+      source,
+      supplier: suggestions.supplier,
+      documentDate: suggestions.documentDate,
+      reference: suggestions.reference,
+    };
+  }
+
+  if (
+    artifact.artifactProfile !== "stripe_balance_itemised_csv_v1" &&
+    artifact.artifactProfile !== "commbank_transaction_history_csv_v1"
+  )
+    return null;
+
+  const csv = parseCsvFilename(filename);
+  if (csv)
+    return csv.profile === artifact.artifactProfile
+      ? {
+          source,
+          provider: csv.provider,
+          periodStart: csv.periodStart,
+          periodEnd: csv.periodEnd,
+        }
+      : null;
+
+  if (!filename.toLowerCase().endsWith(".csv")) return null;
+  const basename = filename.replace(/^.*[\\/]/, "");
+  const legacyProvider = /^(stripe|commbank|combank)[_-]/i.exec(basename)?.[1];
+  if (
+    legacyProvider &&
+    (legacyProvider.toLowerCase() === "stripe") !==
+      (artifact.artifactProfile === "stripe_balance_itemised_csv_v1")
+  )
+    return null;
+
+  const suggestions = parseFileFilename(filename);
+  if (!suggestions?.periodStart || !suggestions.periodEnd) return null;
+  return {
+    source,
+    provider:
+      artifact.artifactProfile === "stripe_balance_itemised_csv_v1"
+        ? "Stripe"
+        : "CommBank",
+    periodStart: suggestions.periodStart,
+    periodEnd: suggestions.periodEnd,
+  };
+};
+
+const publicArtifactDetails = (artifact: ArtifactDetails) => ({
+  id: artifact.id,
+  artifactProfile: artifact.artifactProfile,
+  filename: artifact.filename,
+  originalFilename: artifact.originalFilename,
+  mediaType: artifact.mediaType,
+  state: artifact.state,
+  byteSize: artifact.byteSize,
+  checksumSha256: artifact.checksumSha256,
+  confirmedAt: artifact.confirmedAt,
+  periodStart: artifact.periodStart,
+  periodEnd: artifact.periodEnd,
+  documentDate: artifact.documentDate,
+  reference: artifact.reference,
+  notes: artifact.notes,
+  supplier: artifact.supplier,
+  createdAt: artifact.createdAt,
+  linkedTransactionCount: artifact.linkedTransactionIds.length,
+  bankRowCount: artifact.bankRowCount,
+  filenameSuggestions: filenameSuggestionsFor(artifact),
 });
 
 export interface McpToolDependencies {
@@ -1123,13 +1532,18 @@ export interface McpToolDependencies {
     FolioRepository,
     | "listTransactionPage"
     | "listArtifacts"
+    | "getArtifactDetails"
     | "getArtifact"
     | "getArtifactCreatorId"
   >;
   documents: Pick<
     DocumentService,
-    "startIdempotentUpload" | "confirmUpload" | "readReviewText"
+    | "startIdempotentUpload"
+    | "confirmUpload"
+    | "readReviewText"
+    | "updateMetadata"
   >;
+  extractInvoiceFields: InvoiceFieldReader;
   proposalRepository: Pick<
     ProposalRepository,
     "submit" | "updateDraft" | "categorizeTransaction"

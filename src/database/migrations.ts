@@ -20,4 +20,5 @@ export const requiredMigrationIds = [
   "0019_folio_unversioned_artifacts",
   "0020_folio_artifact_metadata",
   "0021_folio_artifact_supplier",
+  "0022_folio_mcp_artifact_scopes",
 ] as const;

@@ -7,12 +7,14 @@ import {
 } from "../domain/proposals";
 import {
   ProposalAuthorizationError,
+  ProposalCredentialScopesConflictError,
   ProposalDraftNotEditableError,
   ProposalIdempotencyConflictError,
   ProposalRepository,
   ProposalTransactionConflictError,
   ProposalTransactionRevisionRequiredError,
 } from "./proposal-repository";
+import { OperationCleanupError } from "../domain/errors";
 
 const credentialId = "11111111-1111-4111-8111-111111111111";
 const actorId = "22222222-2222-4222-8222-222222222222";
@@ -90,7 +92,7 @@ describe("proposal repository", () => {
     updated_at_token: "2026-09-26T00:00:00.123456Z",
   };
 
-  it("updates only its credential-owned draft fields with an exact revision token", async () => {
+  it("updates a manual draft without a linked proposal submission", async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce({})
@@ -117,48 +119,99 @@ describe("proposal repository", () => {
       transactionId: draftId,
       updatedAt: "2026-09-27T00:00:00.123456Z",
     });
-    expect(query.mock.calls[2]?.[0]).toContain("submission.credential_id=$2");
+    expect(query.mock.calls[2]?.[0]).not.toContain("mcp_submissions");
+    expect(query.mock.calls[2]?.[0]).toContain("FOR UPDATE OF transaction");
+    expect(query.mock.calls[2]?.[1]).toEqual([draftId]);
     expect(query.mock.calls[4]?.[0]).toContain("status='draft'");
+    expect(query.mock.calls[4]?.[0]).toContain("updated_at=$22::timestamptz");
+    expect(query.mock.calls[4]?.[0]).toContain("updated_by_id=$3");
+    expect(query.mock.calls[4]?.[0]).not.toMatch(/SET[^]*source_artifact_id/);
     expect(query.mock.calls[4]?.[1]).toContain("INV-42");
     expect(query.mock.calls[4]?.[1]).toContain("37.0800");
     expect(query.mock.calls[4]?.[1]).toContain("2026-05-31");
     expect(query.mock.calls[4]?.[1]).toContain(humanOwnerId);
     expect(query.mock.calls[4]?.[1]).toContain(actorId);
+    expect(query.mock.calls[4]?.[1]).toContain("2026-09-26T00:00:00.123456Z");
   });
 
   it.each([
-    { row: null, error: ProposalAuthorizationError },
     {
+      label: "a missing transaction",
+      row: null,
+      error: ProposalAuthorizationError,
+    },
+    {
+      label: "a recorded transaction",
       row: { ...editableDraftRow, status: "recorded" },
       error: ProposalDraftNotEditableError,
     },
-  ])(
-    "rejects another credential's or no-longer-draft record",
-    async ({ row, error }) => {
-      const query = vi
-        .fn()
-        .mockResolvedValueOnce({})
-        .mockResolvedValueOnce({ rows: [credentialRow] })
-        .mockResolvedValueOnce({ rows: row ? [row] : [] })
-        .mockResolvedValueOnce({});
-      const { repository } = repositoryWithClients(query);
-
-      await expect(
-        repository.updateDraft(
-          credentialId,
-          draftId,
-          "2026-09-26T00:00:00.123456Z",
-          { reference: "INV-42" },
-        ),
-      ).rejects.toBeInstanceOf(error);
-      expect(
-        query.mock.calls.some(([statement]) =>
-          String(statement).startsWith("UPDATE"),
-        ),
-      ).toBe(false);
-      expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    {
+      label: "a void transaction",
+      row: { ...editableDraftRow, status: "void" },
+      error: ProposalDraftNotEditableError,
     },
-  );
+    {
+      label: "an imported draft",
+      row: { ...editableDraftRow, source_system: "commbank" },
+      error: ProposalDraftNotEditableError,
+    },
+  ])("rejects $label", async ({ row, error }) => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({ rows: row ? [row] : [] })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.updateDraft(
+        credentialId,
+        draftId,
+        "2026-09-26T00:00:00.123456Z",
+        { reference: "INV-42" },
+      ),
+    ).rejects.toBeInstanceOf(error);
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).startsWith("UPDATE"),
+      ),
+    ).toBe(false);
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it("rejects a stale manual draft revision before loading or writing evidence", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            ...editableDraftRow,
+            updated_at_token: "2026-09-26T00:00:00.123457Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.updateDraft(
+        credentialId,
+        draftId,
+        "2026-09-26T00:00:00.123456Z",
+        { reference: "INV-42" },
+      ),
+    ).rejects.toBeInstanceOf(ProposalTransactionConflictError);
+    expect(query).toHaveBeenCalledTimes(4);
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).startsWith("UPDATE"),
+      ),
+    ).toBe(false);
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
 
   it("stores only a hash while binding a distinct actor and owner", async () => {
     const tokenHash = "a".repeat(64);
@@ -216,6 +269,96 @@ describe("proposal repository", () => {
     ]);
     expect(query.mock.calls[1]?.[0]).not.toContain("token_hash");
   });
+
+  it("updates active credential scopes with an administrator and expected scope set", async () => {
+    const nextScopes = ["artifacts:read", "transactions:draft"] as const;
+    const normalizedScopes = ["transactions:draft", "artifacts:read"] as const;
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [{ id: administratorId }] })
+      .mockResolvedValueOnce({ rows: [{ ...credentialRow }] })
+      .mockResolvedValueOnce({
+        rows: [{ ...credentialRow, scopes: normalizedScopes }],
+      })
+      .mockResolvedValueOnce({});
+    const { repository } = repositoryWithClients(query);
+
+    await expect(
+      repository.updateCredentialScopes(
+        administratorId,
+        credentialId,
+        nextScopes,
+        ["transactions:draft", "bank_matches:suggest", "submissions:read"],
+      ),
+    ).resolves.toEqual({
+      id: credentialId,
+      label: credentialRow.label,
+      actorUserId: actorId,
+      defaultOwnerId: ownerId,
+      scopes: normalizedScopes,
+      createdById: administratorId,
+      revokedAt: null,
+      createdAt: "2026-09-26T00:00:00.000Z",
+    });
+    expect(query.mock.calls[1]?.[0]).toContain("active=true");
+    expect(query.mock.calls[1]?.[0]).toContain("role='administrator'");
+    expect(query.mock.calls[1]?.[0]).toContain("FOR SHARE");
+    expect(query.mock.calls[2]?.[0]).toContain("FOR UPDATE");
+    expect(query.mock.calls[2]?.[0]).not.toContain("token_hash");
+    expect(query.mock.calls[3]?.[0]).toContain("SET scopes=$2");
+    expect(query.mock.calls[3]?.[0]).toContain("revoked_at IS NULL");
+    expect(query.mock.calls[3]?.[0]).not.toContain("token_hash");
+    expect(query.mock.calls[3]?.[1]).toEqual([credentialId, normalizedScopes]);
+    expect(query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it.each([
+    {
+      label: "a stale scope set",
+      administratorRows: [{ id: administratorId }],
+      credentialRows: [{ ...credentialRow }],
+      error: ProposalCredentialScopesConflictError,
+    },
+    {
+      label: "a revoked credential",
+      administratorRows: [{ id: administratorId }],
+      credentialRows: [{ ...credentialRow, revoked_at: new Date() }],
+      error: ProposalAuthorizationError,
+    },
+    {
+      label: "an inactive administrator",
+      administratorRows: [],
+      credentialRows: [],
+      error: ProposalAuthorizationError,
+    },
+  ])(
+    "rejects scope updates for $label without writing",
+    async ({ administratorRows, credentialRows, error }) => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ rows: administratorRows })
+        .mockResolvedValueOnce({ rows: credentialRows })
+        .mockResolvedValueOnce({});
+      const { repository } = repositoryWithClients(query);
+
+      await expect(
+        repository.updateCredentialScopes(
+          administratorId,
+          credentialId,
+          ["transactions:draft"],
+          ["transactions:categorize"],
+        ),
+      ).rejects.toBeInstanceOf(error);
+      expect(
+        query.mock.calls.some(([statement]) =>
+          String(statement).startsWith("UPDATE"),
+        ),
+      ).toBe(false);
+      expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    },
+  );
 
   it("categorizes any transaction without changing other transaction fields", async () => {
     const query = vi
@@ -521,7 +664,9 @@ describe("proposal repository", () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ rows: [credentialRow] })
+      .mockResolvedValueOnce({
+        rows: [{ ...credentialRow, scopes: ["bank_matches:suggest"] }],
+      })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -999,7 +1144,7 @@ describe("proposal repository", () => {
             artifact_profile: "commbank_transaction_history_csv_v1",
             state: "awaiting_review",
             checksum_sha256: "commbank-checksum",
-            confirmed_at: "2026-09-02T00:00:00.000Z",
+            confirmed_at: new Date("2026-09-02T00:00:00Z"),
           },
         ],
       })
@@ -1009,7 +1154,7 @@ describe("proposal repository", () => {
             artifact_profile: "manual_invoice_pdf_v1",
             state: "awaiting_review",
             checksum_sha256: "invoice-checksum",
-            confirmed_at: "2026-09-02T00:00:00.000Z",
+            confirmed_at: new Date("2026-09-02T00:00:00Z"),
           },
         ],
       })
@@ -1082,7 +1227,7 @@ describe("proposal repository", () => {
             artifact_profile: "stripe_balance_itemised_csv_v1",
             state: "awaiting_review",
             checksum_sha256: "stripe-checksum",
-            confirmed_at: "2026-09-02T00:00:00.000Z",
+            confirmed_at: new Date("2026-09-02T00:00:00Z"),
           },
         ],
       })
@@ -1261,5 +1406,52 @@ describe("proposal repository", () => {
     expect(query.mock.calls[0]?.[0]).toContain("actor.active=true");
     expect(query.mock.calls[1]?.[0]).toContain("evidence_discarded_at");
     expect(query.mock.calls[1]?.[0]).toContain("evidence_discarded_by_id");
+  });
+});
+
+describe("ProposalRepository transaction cleanup", () => {
+  it("retains operation, rollback, and release errors", async () => {
+    const operationError = new Error("synthetic proposal query failure");
+    const rollbackError = new Error("synthetic proposal rollback failure");
+    const releaseError = new Error("synthetic proposal release failure");
+    const query = vi.fn(async (statement: string) => {
+      if (statement === "BEGIN") return {};
+      if (statement === "ROLLBACK") throw rollbackError;
+      throw operationError;
+    });
+    const release = vi.fn(() => {
+      throw releaseError;
+    });
+    const repository = new ProposalRepository(
+      {
+        connect: vi.fn().mockResolvedValue({ query, release }),
+      } as never,
+      "folio",
+      false,
+    );
+
+    let failure: unknown;
+    try {
+      await repository.updateDraft(
+        credentialId,
+        draftId,
+        "2026-09-26T00:00:00.123456Z",
+        { reference: "SYN-1" },
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(OperationCleanupError);
+    const releaseFailure = failure as OperationCleanupError;
+    expect(releaseFailure.stage).toBe("client_release");
+    expect(releaseFailure.cleanupError).toBe(releaseError);
+    expect(releaseFailure.primaryError).toBeInstanceOf(OperationCleanupError);
+    const rollbackFailure =
+      releaseFailure.primaryError as OperationCleanupError;
+    expect(rollbackFailure.stage).toBe("transaction_rollback");
+    expect(rollbackFailure.primaryError).toBe(operationError);
+    expect(rollbackFailure.cleanupError).toBe(rollbackError);
+    expect(release).toHaveBeenCalledOnce();
   });
 });

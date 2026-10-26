@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => ({
   listMcpCredentials: vi.fn(),
   createMcpCredential: vi.fn(),
   revokeMcpCredential: vi.fn(),
+  updateMcpCredentialScopes: vi.fn(),
 }));
 
 const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(
@@ -130,6 +131,7 @@ vi.mock("../server/mcp-credential-operations", () => ({
   listMcpCredentials: mocks.listMcpCredentials,
   createMcpCredential: mocks.createMcpCredential,
   revokeMcpCredential: mocks.revokeMcpCredential,
+  updateMcpCredentialScopes: mocks.updateMcpCredentialScopes,
 }));
 
 import { AccessTokensPage, Route } from "./admin.tokens";
@@ -215,11 +217,278 @@ describe("access token administration", () => {
     );
   });
 
+  it("edits active token scopes with expected scopes and leaves identity unchanged", async () => {
+    mocks.updateMcpCredentialScopes.mockResolvedValue({
+      ...credential,
+      scopes: ["transactions:search", "transactions:draft"],
+    });
+    render(createElement(AccessTokensPage));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit scopes" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Edit scopes for Synthetic integration",
+    });
+    expect(
+      (within(dialog).getByLabelText("Search transactions") as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+    expect(
+      (
+        within(dialog).getByLabelText(
+          "Create and edit any manual transaction drafts",
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(false);
+
+    fireEvent.click(
+      within(dialog).getByLabelText(
+        "Create and edit any manual transaction drafts",
+      ),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save scopes" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.updateMcpCredentialScopes).toHaveBeenCalledWith({
+        data: {
+          credentialId,
+          scopes: ["transactions:search", "transactions:draft"],
+          expectedScopes: ["transactions:search"],
+        },
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("status").textContent).toBe(
+      "Token scopes updated.",
+    );
+    expect(mocks.router.invalidate).toHaveBeenCalledWith({ sync: true });
+    const scopeUpdateCall = JSON.stringify(
+      mocks.updateMcpCredentialScopes.mock.calls,
+    );
+    expect(scopeUpdateCall).not.toContain("tokenHash");
+    expect(scopeUpdateCall).not.toContain("folio_mcp_");
+  });
+
+  it("shows and preserves the legacy submission scope when already present", async () => {
+    const legacyCredential = {
+      ...credential,
+      scopes: ["submissions:read", "transactions:search"],
+    };
+    mocks.loaderData = {
+      allowed: true,
+      administratorId,
+      users,
+      credentials: [legacyCredential],
+    };
+    mocks.updateMcpCredentialScopes.mockResolvedValue(legacyCredential);
+    render(createElement(AccessTokensPage));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit scopes" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Edit scopes for Synthetic integration",
+    });
+    expect(
+      (
+        within(dialog).getByLabelText(
+          "Read submission outcomes (legacy: submissions:read)",
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save scopes" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.updateMcpCredentialScopes).toHaveBeenCalledWith({
+        data: {
+          credentialId,
+          scopes: ["transactions:search", "submissions:read"],
+          expectedScopes: ["submissions:read", "transactions:search"],
+        },
+      }),
+    );
+  });
+
+  it("does not change scopes when the editor is canceled", () => {
+    render(createElement(AccessTokensPage));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit scopes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(mocks.updateMcpCredentialScopes).not.toHaveBeenCalled();
+  });
+
+  it("disables scope controls while the save is pending", async () => {
+    let finishUpdate: ((value: typeof credential) => void) | undefined;
+    mocks.updateMcpCredentialScopes.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishUpdate = resolve;
+        }),
+    );
+    render(createElement(AccessTokensPage));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit scopes" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Edit scopes for Synthetic integration",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save scopes" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        (
+          within(dialog).getByRole("group", {
+            name: "Token scopes",
+          }) as HTMLFieldSetElement
+        ).disabled,
+      ).toBe(true),
+    );
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Cancel",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    await act(async () => finishUpdate?.(credential));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("keeps scope editing unavailable for revoked tokens", () => {
+    mocks.loaderData = {
+      allowed: true,
+      administratorId,
+      users,
+      credentials: [{ ...credential, revokedAt: "2026-10-24T00:00:00.000Z" }],
+    };
+    render(createElement(AccessTokensPage));
+
+    expect(screen.queryByRole("button", { name: "Edit scopes" })).toBeNull();
+  });
+
+  it("reports saved scopes separately when the list refresh fails", async () => {
+    mocks.updateMcpCredentialScopes.mockResolvedValue({
+      ...credential,
+      scopes: ["transactions:search", "transactions:draft"],
+    });
+    mocks.router.invalidate.mockRejectedValue(new Error("refresh unavailable"));
+    render(createElement(AccessTokensPage));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit scopes" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Edit scopes for Synthetic integration",
+    });
+    fireEvent.click(
+      within(dialog).getByLabelText(
+        "Create and edit any manual transaction drafts",
+      ),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save scopes" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Token scopes were saved, but the list could not refresh. Do not resubmit",
+      ),
+    );
+    expect(mocks.updateMcpCredentialScopes).toHaveBeenCalledTimes(1);
+    expect(mocks.router.invalidate).toHaveBeenCalledWith({ sync: true });
+  });
+
+  it("blocks another save when a rejected request leaves its outcome uncertain", async () => {
+    mocks.updateMcpCredentialScopes.mockRejectedValue(
+      new Error("connection lost"),
+    );
+    render(createElement(AccessTokensPage));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit scopes" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Edit scopes for Synthetic integration",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save scopes" }),
+    );
+
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert").textContent).toContain(
+        "Could not confirm that the scope changes were saved.",
+      ),
+    );
+    expect(
+      (
+        within(dialog).getByRole("group", {
+          name: "Token scopes",
+        }) as HTMLFieldSetElement
+      ).disabled,
+    ).toBe(true);
+    const saveButton = within(dialog).getByRole("button", {
+      name: "Save scopes",
+    }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+    fireEvent.click(saveButton);
+    expect(mocks.updateMcpCredentialScopes).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("status").textContent).toContain(
+      "reload the token list before trying again.",
+    );
+  });
+
+  it("blocks repeated saves after a stale-scope conflict", async () => {
+    mocks.updateMcpCredentialScopes.mockRejectedValue(
+      new Error("The record changed. Code REVISION_CONFLICT."),
+    );
+    render(createElement(AccessTokensPage));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit scopes" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Edit scopes for Synthetic integration",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save scopes" }),
+    );
+
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert").textContent).toContain(
+        "This token's scopes changed after editing began.",
+      ),
+    );
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Save scopes",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("status").textContent).toContain(
+      "reload before editing again.",
+    );
+    expect(mocks.updateMcpCredentialScopes).toHaveBeenCalledTimes(1);
+  });
+
   it("creates a wildcard token and reveals the plaintext only until dismissed", async () => {
     const token = "synthetic-token-shown-once";
     mocks.createMcpCredential.mockResolvedValue({ token, credential });
     render(createElement(AccessTokensPage));
-    expect(screen.getByLabelText("All current artifact scopes")).toBeTruthy();
+    expect(
+      screen.getByLabelText(
+        "All artifact scopes, including PDF field extraction (reads file contents)",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText(
+        "All current scopes, including PDF field extraction (reads file contents)",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByLabelText("Edit artifact metadata")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Extract PDF fields (reads file contents)"),
+    ).toBeTruthy();
     expect(screen.queryByLabelText("Read submission outcomes")).toBeNull();
 
     fireEvent.change(screen.getByRole("textbox", { name: "Label" }), {
@@ -234,6 +503,10 @@ describe("access token administration", () => {
       "Default owner (member)",
     );
     fireEvent.click(screen.getByLabelText("All current transaction scopes"));
+    fireEvent.click(screen.getByLabelText("Edit artifact metadata"));
+    fireEvent.click(
+      screen.getByLabelText("Extract PDF fields (reads file contents)"),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Create token" }));
 
     await waitFor(() =>
@@ -242,7 +515,7 @@ describe("access token administration", () => {
           label: "Synthetic integration",
           actorUserId: actorId,
           defaultOwnerId: ownerId,
-          scopes: ["transactions:*"],
+          scopes: ["transactions:*", "artifacts:edit", "artifacts:extract"],
         },
       }),
     );
@@ -251,7 +524,7 @@ describe("access token administration", () => {
     expect(screen.queryByText(token)).toBeNull();
   });
 
-  it("copies with the modern clipboard API and reports success beside the button", async () => {
+  it("copies with the modern clipboard API and reports concise success feedback", async () => {
     const token = "synthetic-modern-copy-token";
     const writeText = vi.fn().mockResolvedValue(undefined);
     const legacyCopy = setExecCommand(() => true);
@@ -263,9 +536,7 @@ describe("access token administration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
 
-    await waitFor(() =>
-      expect(copyFeedbackText()).toBe("Token copied. Store it securely."),
-    );
+    await waitFor(() => expect(copyFeedbackText()).toBe("Token copied"));
     expect(writeText).toHaveBeenCalledWith(token);
     expect(legacyCopy).not.toHaveBeenCalled();
   });
@@ -280,9 +551,7 @@ describe("access token administration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
 
     await waitFor(() => expect(legacyCopy).toHaveBeenCalledWith("copy"));
-    await waitFor(() =>
-      expect(copyFeedbackText()).toBe("Token copied. Store it securely."),
-    );
+    await waitFor(() => expect(copyFeedbackText()).toBe("Token copied"));
     expect(selectedText()).toBe(token);
   });
 
@@ -298,9 +567,7 @@ describe("access token administration", () => {
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(token));
     await waitFor(() => expect(legacyCopy).toHaveBeenCalledWith("copy"));
-    await waitFor(() =>
-      expect(copyFeedbackText()).toBe("Token copied. Store it securely."),
-    );
+    await waitFor(() => expect(copyFeedbackText()).toBe("Token copied"));
     expect(selectedText()).toBe(token);
   });
 
@@ -330,7 +597,7 @@ describe("access token administration", () => {
       );
       expect(legacyCopy).toHaveBeenCalledWith("copy");
       expect(selectedText()).toBe(token);
-      expect(screen.queryByText("Token copied. Store it securely.")).toBeNull();
+      expect(screen.queryByText("Token copied")).toBeNull();
     },
   );
 

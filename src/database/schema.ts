@@ -420,7 +420,18 @@ export function createFolioSchema(schemaName: string) {
       ),
       check(
         "mcp_credentials_scopes_check",
-        sql`cardinality(${table.scopes}) between 1 and 8 and ${table.scopes} <@ array['bank_rows:read', 'transactions:search', 'transactions:draft', 'transactions:categorize', 'bank_matches:suggest', 'artifacts:read', 'artifacts:upload', 'submissions:read']::text[]`,
+        sql`cardinality(${table.scopes}) between 1 and 10 and ${table.scopes} <@ array[
+          'bank_rows:read',
+          'transactions:search',
+          'transactions:draft',
+          'transactions:categorize',
+          'bank_matches:suggest',
+          'artifacts:read',
+          'artifacts:upload',
+          'submissions:read',
+          'artifacts:edit',
+          'artifacts:extract'
+        ]::text[]`,
       ),
       index("mcp_credentials_actor_user_id_idx").on(table.actorUserId),
       index("mcp_credentials_default_owner_id_idx").on(table.defaultOwnerId),

@@ -17,11 +17,15 @@ describe("MCP credential administration", () => {
   it("lists the available scopes without requiring user IDs", () => {
     expect(parseCredentialCommand(["scopes"])).toEqual({ action: "scopes" });
     const help = credentialScopeHelp();
-    expect(help.split("\n")).toHaveLength(7);
+    expect(help.split("\n")).toHaveLength(9);
     expect(help).not.toContain("submissions:read");
     expect(help).toContain("artifacts:read\tRead artifact metadata");
+    expect(help).toContain("artifacts:edit\tEdit artifact metadata");
     expect(help).toContain(
-      "transactions:draft\tCreate and edit this credential's drafts",
+      "artifacts:extract\tExtract PDF fields (reads file contents)",
+    );
+    expect(help).toContain(
+      "transactions:draft\tCreate and edit any manual transaction drafts",
     );
   });
 
@@ -65,6 +69,8 @@ describe("MCP credential administration", () => {
         "transactions:categorize",
         "artifacts:read",
         "artifacts:upload",
+        "artifacts:edit",
+        "artifacts:extract",
       ],
     });
     expect(() =>

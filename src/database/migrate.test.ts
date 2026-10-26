@@ -116,7 +116,7 @@ describe("migration runner", () => {
       statements.filter((statement) =>
         statement.includes('"_migrations" WHERE id = $1'),
       ),
-    ).toHaveLength(21);
+    ).toHaveLength(22);
     expect(
       statements.some((statement) => /CREATE SCHEMA/i.test(statement)),
     ).toBe(false);

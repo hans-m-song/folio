@@ -1,10 +1,13 @@
 import { request as httpRequest } from "node:http";
 
 import {
+  ProposalDraftNotEditableError,
   ProposalIdempotencyConflictError,
   ProposalTransactionConflictError,
   ProposalTransactionRevisionRequiredError,
 } from "../database/proposal-repository";
+import { AppError } from "../domain/errors";
+import type { InvoiceFieldReader } from "../documents/invoice-field-reader";
 import type { ArtifactRecord } from "../documents/service";
 import { describe, expect, it, vi } from "vitest";
 
@@ -42,7 +45,13 @@ const artifact = {
   checksumSha256: `${"A".repeat(43)}=`,
   state: "awaiting_review" as const,
   filename: "statement.csv",
-  originalFilename: "statement.csv",
+  originalFilename: "original-statement.csv",
+  periodStart: "2026-08-01",
+  periodEnd: "2026-08-31",
+  documentDate: null,
+  reference: "SYN-2026",
+  notes: "Synthetic upload metadata",
+  supplier: "Synthetic supplier",
   confirmedAt: "2026-01-01T00:00:00.000Z",
   uploadExpiresAt: null,
 };
@@ -120,16 +129,45 @@ const createDependencies = () => {
         {
           id: ids.artifact,
           filename: "statement.csv",
+          originalFilename: "original-statement.csv",
           artifactProfile: "commbank_transaction_history_csv_v1",
           mediaType: "text/csv",
           state: "awaiting_review",
           byteSize: "42",
           checksumSha256: `${"A".repeat(43)}=`,
+          periodStart: "2026-08-01",
+          periodEnd: "2026-08-31",
+          documentDate: null,
+          reference: "SYN-2026",
+          notes: "Synthetic upload metadata",
+          supplier: "Synthetic supplier",
           createdAt: "2026-01-01T00:00:00.000Z",
           transactionCount: 0,
           bankRowCount: 0,
         },
       ],
+    })),
+    getArtifactDetails: vi.fn(async () => ({
+      id: ids.artifact,
+      artifactProfile: "stripe_balance_itemised_csv_v1",
+      filename: "renamed-stripe.csv",
+      originalFilename: "Stripe-2026-08-01-2026-08-31.csv",
+      mediaType: "text/csv",
+      state: "available",
+      byteSize: "42",
+      checksumSha256: `${"A".repeat(43)}=`,
+      confirmedAt: "2026-01-01T00:00:00.000Z",
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      documentDate: null,
+      reference: null,
+      notes: null,
+      supplier: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      linkedTransactionIds: [ids.transaction, ids.submission],
+      bankRowCount: 1,
+      objectKey: "private/artifact-object-key",
+      downloadUrl: "https://private-storage.test/artifact",
     })),
     getArtifact: vi.fn(async (): Promise<ArtifactRecord | null> => artifact),
     getArtifactCreatorId: vi.fn(async () => ids.actor),
@@ -143,8 +181,8 @@ const createDependencies = () => {
       uploadUrl: "http://storage.test/signed-put",
       uploadHeaders: {
         "Content-Type": "text/csv",
-        "x-amz-checksum-sha256": artifact.checksumSha256,
-        "x-amz-meta-folio-artifact-id": artifact.id,
+        "x-amz-checksum-sha256": `${"A".repeat(43)}=`,
+        "x-amz-meta-folio-artifact-id": ids.artifact,
         "If-None-Match": "*",
       },
       replayed: false,
@@ -153,12 +191,42 @@ const createDependencies = () => {
       ...artifact,
       state: "awaiting_review" as const,
     })),
+    updateMetadata: vi.fn(
+      async (
+        _actorId: string,
+        input: {
+          id: string;
+          filename: string;
+          periodStart: string | null;
+          periodEnd: string | null;
+        },
+      ) => ({
+        ...artifact,
+        id: input.id,
+        filename: input.filename,
+        periodStart: input.periodStart,
+        periodEnd: input.periodEnd,
+      }),
+    ),
     readReviewText: vi.fn(async () => ({
       artifact,
-      confirmedAt: artifact.confirmedAt,
       text: "01/01/2026,-1.00,Synthetic row,10.00",
     })),
   };
+  const extractInvoiceFields = vi.fn<InvoiceFieldReader>(async () => ({
+    status: "parsed",
+    artifactId: ids.artifact,
+    checksumSha256: `${"A".repeat(43)}=`,
+    confirmedAt: "2026-01-01T00:00:00.000Z",
+    result: {
+      fields: { supplier: "Synthetic supplier", reference: "INV-42" },
+    } as never,
+    duplicateHints: {
+      linkedTransactions: 0,
+      matchingReferenceTransactions: 1,
+      matchingChecksumArtifacts: 0,
+    },
+  }));
   const proposalRepository = {
     submit: vi.fn(async (_credentialId, submission) => ({
       submissionId: ids.submission,
@@ -184,6 +252,7 @@ const createDependencies = () => {
     bankRepository,
     repository,
     documents,
+    extractInvoiceFields,
     proposalRepository,
     getCsvDuplicateWarnings,
   } as unknown as McpToolDependencies;
@@ -192,6 +261,7 @@ const createDependencies = () => {
     bankRepository,
     repository,
     documents,
+    extractInvoiceFields,
     proposalRepository,
     getCsvDuplicateWarnings,
   };
@@ -341,24 +411,40 @@ describe("Folio MCP tools", () => {
 
   it("registers only tools authorized by the exact credential scopes", async () => {
     const scopeTools = [
-      ["bank_rows:read", ["list_unresolved_bank_rows"]],
-      ["transactions:search", ["search_transactions"]],
-      ["artifacts:read", ["list_artifacts"]],
-      [
-        "artifacts:upload",
-        ["begin_artifact_upload", "confirm_artifact_upload"],
-      ],
-      ["transactions:draft", ["submit_draft_transaction", "edit_transaction"]],
-      ["transactions:categorize", ["edit_transaction"]],
-      ["bank_matches:suggest", ["suggest_existing_match"]],
-      ["submissions:read", []],
+      { scopes: ["bank_rows:read"], tools: ["list_unresolved_bank_rows"] },
+      { scopes: ["transactions:search"], tools: ["search_transactions"] },
+      {
+        scopes: ["artifacts:read"],
+        tools: ["list_artifacts", "get_artifact"],
+      },
+      { scopes: ["artifacts:edit"], tools: [] },
+      { scopes: ["artifacts:extract"], tools: [] },
+      {
+        scopes: ["artifacts:read", "artifacts:edit"],
+        tools: ["list_artifacts", "get_artifact", "update_artifact_metadata"],
+      },
+      {
+        scopes: ["artifacts:read", "artifacts:extract"],
+        tools: ["list_artifacts", "get_artifact", "extract_invoice_fields"],
+      },
+      {
+        scopes: ["artifacts:upload"],
+        tools: ["begin_artifact_upload", "confirm_artifact_upload"],
+      },
+      {
+        scopes: ["transactions:draft"],
+        tools: ["submit_draft_transaction", "edit_transaction"],
+      },
+      { scopes: ["transactions:categorize"], tools: ["edit_transaction"] },
+      { scopes: ["bank_matches:suggest"], tools: ["suggest_existing_match"] },
+      { scopes: ["submissions:read"], tools: [] },
     ] as const;
 
-    for (const [scope, authorizedTools] of scopeTools) {
+    for (const { scopes, tools: authorizedTools } of scopeTools) {
       const fakes = createDependencies();
       await withServer(
         fakes.dependencies,
-        principal([scope]),
+        principal(scopes),
         async ({ address }) => {
           const listing = await send(
             address.port,
@@ -375,7 +461,7 @@ describe("Folio MCP tools", () => {
           expect(toolNames).not.toContain("read_artifact");
           expect(toolNames).not.toContain("download_artifact");
 
-          if (scope === "submissions:read") {
+          if (scopes[0] === "submissions:read") {
             expect(toolNames).not.toContain("get_submission_status");
             const removedTool = await call(
               address.port,
@@ -389,7 +475,7 @@ describe("Folio MCP tools", () => {
           }
 
           const deniedTool =
-            scope === "bank_rows:read"
+            scopes[0] === "bank_rows:read"
               ? "list_artifacts"
               : "list_unresolved_bank_rows";
           const denied = await call(address.port, deniedTool, {});
@@ -398,6 +484,7 @@ describe("Folio MCP tools", () => {
           ).toBeTruthy();
           expect(fakes.bankRepository.listTransactions).not.toHaveBeenCalled();
           expect(fakes.repository.listArtifacts).not.toHaveBeenCalled();
+          expect(fakes.repository.getArtifactDetails).not.toHaveBeenCalled();
         },
       );
     }
@@ -460,12 +547,189 @@ describe("Folio MCP tools", () => {
           linkage: "all",
         }),
       );
+      expect(value?.rows).toMatchObject([
+        {
+          filename: "statement.csv",
+          originalFilename: "original-statement.csv",
+          periodStart: "2026-08-01",
+          periodEnd: "2026-08-31",
+          documentDate: null,
+          reference: "SYN-2026",
+          notes: "Synthetic upload metadata",
+          supplier: "Synthetic supplier",
+        },
+      ]);
       expect(JSON.stringify(value)).not.toContain("objectKey");
       expect(JSON.stringify(value)).not.toContain(
         "private/internal-object-key",
       );
       expect(JSON.stringify(value)).not.toContain("http");
     });
+  });
+
+  it("returns safe artifact details and filename hints without linked IDs", async () => {
+    const fakes = createDependencies();
+    await withServer(
+      fakes.dependencies,
+      principal(["artifacts:read"]),
+      async ({ address }) => {
+        const response = await call(address.port, "get_artifact", {
+          artifactId: ids.artifact,
+        });
+        const value = toolValue(response).value;
+
+        expect(fakes.repository.getArtifactDetails).toHaveBeenCalledWith(
+          ids.actor,
+          ids.artifact,
+        );
+        expect(value).toMatchObject({
+          id: ids.artifact,
+          artifactProfile: "stripe_balance_itemised_csv_v1",
+          filename: "renamed-stripe.csv",
+          originalFilename: "Stripe-2026-08-01-2026-08-31.csv",
+          periodStart: "2026-08-01",
+          periodEnd: "2026-08-31",
+          linkedTransactionCount: 2,
+          bankRowCount: 1,
+          filenameSuggestions: {
+            source: "original_filename",
+            provider: "Stripe",
+            periodStart: "2026-08-01",
+            periodEnd: "2026-08-31",
+          },
+        });
+        expect(value).not.toHaveProperty("linkedTransactionIds");
+        expect(JSON.stringify(value)).not.toContain("objectKey");
+        expect(JSON.stringify(value)).not.toContain(
+          "private/artifact-object-key",
+        );
+        expect(JSON.stringify(value)).not.toContain("private-storage.test");
+      },
+    );
+  });
+
+  it("updates only artifact metadata with an expected snapshot and maps conflicts safely", async () => {
+    const fakes = createDependencies();
+    const input = {
+      artifactId: ids.artifact,
+      filename: "renamed.csv",
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      expected: {
+        filename: "statement.csv",
+        periodStart: "2026-07-01",
+        periodEnd: "2026-07-31",
+      },
+    };
+
+    await withServer(
+      fakes.dependencies,
+      principal(["artifacts:read", "artifacts:edit"]),
+      async ({ address }) => {
+        const updated = await call(
+          address.port,
+          "update_artifact_metadata",
+          input,
+        );
+        expect(toolValue(updated).value).toMatchObject({
+          id: ids.artifact,
+          filename: "renamed.csv",
+          originalFilename: "original-statement.csv",
+          periodStart: "2026-08-01",
+          periodEnd: "2026-08-31",
+        });
+        expect(fakes.documents.updateMetadata).toHaveBeenCalledWith(ids.actor, {
+          id: ids.artifact,
+          filename: "renamed.csv",
+          periodStart: "2026-08-01",
+          periodEnd: "2026-08-31",
+          expected: input.expected,
+        });
+        expect(fakes.proposalRepository.submit).not.toHaveBeenCalled();
+        expect(fakes.proposalRepository.updateDraft).not.toHaveBeenCalled();
+        expect(fakes.bankRepository.reconcile).not.toHaveBeenCalled();
+
+        fakes.documents.updateMetadata.mockRejectedValueOnce(
+          new AppError({ code: "ARTIFACT_METADATA_CONFLICT" }),
+        );
+        const conflict = await call(
+          address.port,
+          "update_artifact_metadata",
+          input,
+        );
+        expect(toolValue(conflict).value).toMatchObject({
+          code: "ARTIFACT_METADATA_CONFLICT",
+          message:
+            "Artifact metadata changed or is no longer editable. Reload before saving again.",
+          recovery: "refresh",
+        });
+
+        const invalid = await call(address.port, "update_artifact_metadata", {
+          ...input,
+          periodStart: "2026-09-01",
+          periodEnd: "2026-08-31",
+        });
+        expect(toolValue(invalid).value?.code).toBe("INVALID_ARGUMENTS");
+        expect(fakes.documents.updateMetadata).toHaveBeenCalledTimes(2);
+      },
+    );
+  });
+
+  it("extracts invoice fields only for a required checksum and returns unsupported identity safely", async () => {
+    const fakes = createDependencies();
+    await withServer(
+      fakes.dependencies,
+      principal(["artifacts:read", "artifacts:extract"]),
+      async ({ address }) => {
+        const missingChecksum = await call(
+          address.port,
+          "extract_invoice_fields",
+          {
+            artifactId: ids.artifact,
+          },
+        );
+        expect(toolValue(missingChecksum).result?.isError).toBe(true);
+        expect(fakes.extractInvoiceFields).not.toHaveBeenCalled();
+
+        const parsed = await call(address.port, "extract_invoice_fields", {
+          artifactId: ids.artifact,
+          expectedChecksumSha256: `${"A".repeat(43)}=`,
+        });
+        const parsedValue = toolValue(parsed).value;
+        expect(fakes.extractInvoiceFields).toHaveBeenCalledWith(ids.actor, {
+          artifactId: ids.artifact,
+          expectedChecksumSha256: `${"A".repeat(43)}=`,
+        });
+        expect(parsedValue).toMatchObject({
+          status: "parsed",
+          artifactId: ids.artifact,
+          checksumSha256: `${"A".repeat(43)}=`,
+          duplicateHints: { matchingReferenceTransactions: 1 },
+        });
+        expect(JSON.stringify(parsedValue)).not.toContain("normalizedDocument");
+        expect(JSON.stringify(parsedValue)).not.toContain("bytes");
+        expect(JSON.stringify(parsedValue)).not.toContain("objectKey");
+
+        fakes.extractInvoiceFields.mockResolvedValueOnce({
+          status: "unsupported",
+          artifactId: ids.artifact,
+          checksumSha256: `${"A".repeat(43)}=`,
+          confirmedAt: "2026-01-01T00:00:00.000Z",
+          reason: "encrypted",
+        });
+        const unsupported = await call(address.port, "extract_invoice_fields", {
+          artifactId: ids.artifact,
+          expectedChecksumSha256: `${"A".repeat(43)}=`,
+        });
+        expect(toolValue(unsupported).value).toMatchObject({
+          status: "unsupported",
+          artifactId: ids.artifact,
+          checksumSha256: `${"A".repeat(43)}=`,
+          confirmedAt: "2026-01-01T00:00:00.000Z",
+          reason: "encrypted",
+        });
+      },
+    );
   });
 
   it("begins only supported actor-bound idempotent uploads", async () => {
@@ -475,10 +739,60 @@ describe("Folio MCP tools", () => {
         idempotencyKey: "upload:synthetic-1",
         profile: "commbank_transaction_history_csv_v1",
         filename: "statement.csv",
+        originalFilename: "source-statement.csv",
+        supplier: "  Synthetic supplier  ",
+        periodStart: "2026-08-01",
+        periodEnd: "2026-08-31",
+        documentDate: null,
+        reference: "  SYN-2026  ",
+        notes: "  Synthetic upload note  ",
         byteSize: 42,
         checksumSha256: `${"A".repeat(43)}=`,
       });
       const value = toolValue(response).value;
+      const listing = await send(
+        address.port,
+        rpcBody("tools/list"),
+        "tools/list",
+      );
+      const listedTools = JSON.parse(listing.body) as {
+        result?: {
+          tools: {
+            name: string;
+            description?: string;
+            inputSchema?: {
+              properties?: Record<string, unknown>;
+              required?: string[];
+            };
+          }[];
+        };
+      };
+      const uploadTool = listedTools.result?.tools.find(
+        ({ name }) => name === "begin_artifact_upload",
+      );
+      expect(uploadTool?.description).toContain(
+        "PUT the raw file bytes to uploadUrl with every exact name and value in uploadHeaders",
+      );
+      expect(uploadTool?.description).toContain(
+        "periodStart and periodEnd describe the export coverage interval",
+      );
+      expect(uploadTool?.description).toContain(
+        "coverage dates are not accepted",
+      );
+      expect(uploadTool?.description).toContain(
+        "If the PUT returns HTTP 412, call confirm_artifact_upload",
+      );
+      expect(uploadTool?.inputSchema?.properties).toHaveProperty(
+        "originalFilename",
+      );
+      expect(uploadTool?.inputSchema?.properties).toHaveProperty("supplier");
+      expect(uploadTool?.inputSchema?.properties).toHaveProperty("periodStart");
+      expect(uploadTool?.inputSchema?.properties).toHaveProperty(
+        "documentDate",
+      );
+      expect(uploadTool?.inputSchema?.required).not.toContain(
+        "originalFilename",
+      );
 
       expect(fakes.documents.startIdempotentUpload).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -487,6 +801,14 @@ describe("Folio MCP tools", () => {
           actorId: ids.actor,
           ownerId: ids.owner,
           artifactProfile: "commbank_transaction_history_csv_v1",
+          filename: "statement.csv",
+          originalFilename: "source-statement.csv",
+          supplier: "Synthetic supplier",
+          periodStart: "2026-08-01",
+          periodEnd: "2026-08-31",
+          documentDate: null,
+          reference: "SYN-2026",
+          notes: "Synthetic upload note",
           mediaType: "text/csv",
         }),
       );
@@ -494,10 +816,23 @@ describe("Folio MCP tools", () => {
       expect(value?.replayed).toBe(false);
       expect(value?.uploadHeaders).toEqual({
         "Content-Type": "text/csv",
-        "x-amz-checksum-sha256": artifact.checksumSha256,
-        "x-amz-meta-folio-artifact-id": artifact.id,
+        "x-amz-checksum-sha256": `${"A".repeat(43)}=`,
+        "x-amz-meta-folio-artifact-id": ids.artifact,
         "If-None-Match": "*",
       });
+      expect(value?.artifact).toMatchObject({
+        filename: "statement.csv",
+        originalFilename: "original-statement.csv",
+        periodStart: "2026-08-01",
+        periodEnd: "2026-08-31",
+        documentDate: null,
+        reference: "SYN-2026",
+        notes: "Synthetic upload metadata",
+        supplier: "Synthetic supplier",
+        confirmedAt: "2026-01-01T00:00:00.000Z",
+        uploadExpiresAt: null,
+      });
+      expect(JSON.stringify(value)).not.toContain("versionId");
 
       for (const [profile, mediaType, filename] of [
         ["manual_invoice_pdf_v1", "application/pdf", "invoice.pdf"],
@@ -529,6 +864,37 @@ describe("Folio MCP tools", () => {
         });
         expect(toolValue(unsupported).result?.isError).toBe(true);
       }
+      expect(fakes.documents.startIdempotentUpload).toHaveBeenCalledTimes(3);
+
+      const invalidPdfCoverage = await call(
+        address.port,
+        "begin_artifact_upload",
+        {
+          idempotencyKey: "upload:pdf-coverage-invalid",
+          profile: "manual_invoice_pdf_v1",
+          filename: "invoice.pdf",
+          periodStart: "2026-08-01",
+          byteSize: 42,
+          checksumSha256: `${"A".repeat(43)}=`,
+        },
+      );
+      expect(toolValue(invalidPdfCoverage).result?.isError).toBe(true);
+      expect(fakes.documents.startIdempotentUpload).toHaveBeenCalledTimes(3);
+
+      const invalidCsvCoverage = await call(
+        address.port,
+        "begin_artifact_upload",
+        {
+          idempotencyKey: "upload:csv-coverage-invalid",
+          profile: "commbank_transaction_history_csv_v1",
+          filename: "statement.csv",
+          periodStart: "2026-09-01",
+          periodEnd: "2026-08-31",
+          byteSize: 42,
+          checksumSha256: `${"A".repeat(43)}=`,
+        },
+      );
+      expect(toolValue(invalidCsvCoverage).result?.isError).toBe(true);
       expect(fakes.documents.startIdempotentUpload).toHaveBeenCalledTimes(3);
     });
   });
@@ -582,7 +948,10 @@ describe("Folio MCP tools", () => {
           artifactId: ids.artifact,
           actorId: ids.actor,
         });
-        expect(JSON.stringify(event)).not.toContain("synthetic");
+
+        expect(JSON.stringify(toolValue(warningFailure).value)).not.toContain(
+          "synthetic",
+        );
       });
     } finally {
       errorLog.mockRestore();
@@ -642,6 +1011,9 @@ describe("Folio MCP tools", () => {
         "commbank_transaction_history_csv_v1",
       );
 
+      const diagnosticLog = vi
+        .spyOn(console, "info")
+        .mockImplementation(() => {});
       const wrongRow = await call(address.port, "submit_draft_transaction", {
         idempotencyKey: "draft:synthetic-3",
         transaction: { kind: "supplier_expense" },
@@ -651,7 +1023,14 @@ describe("Folio MCP tools", () => {
           sourceRow: 2,
         },
       });
+      const logged = diagnosticLog.mock.calls.map(([line]) => String(line));
+      diagnosticLog.mockRestore();
       expect(toolValue(wrongRow).value?.code).toBe("INVALID_BANK_ROW_LOCATOR");
+      expect(toolValue(wrongRow).value?.message).toBe(
+        "The source row was not found in the pinned CommBank CSV.",
+      );
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toContain('"operation":"submit_draft_transaction"');
       expect(fakes.proposalRepository.submit).toHaveBeenCalledTimes(2);
       expect(fakes.repository.createManual).not.toHaveBeenCalled();
       expect(fakes.bankRepository.reconcile).not.toHaveBeenCalled();
@@ -680,7 +1059,7 @@ describe("Folio MCP tools", () => {
     });
   });
 
-  it("passes only parsed draft field changes to the credential-bound update", async () => {
+  it("passes only parsed draft field changes to the manual draft update", async () => {
     const fakes = createDependencies();
     await withServer(fakes.dependencies, principal(), async ({ address }) => {
       const edited = await call(address.port, "edit_transaction", {
@@ -703,6 +1082,24 @@ describe("Folio MCP tools", () => {
       });
       expect(toolValue(forbidden).result?.isError).toBe(true);
       expect(fakes.proposalRepository.updateDraft).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("reports protected manual drafts without implying credential ownership", async () => {
+    const fakes = createDependencies();
+    fakes.proposalRepository.updateDraft.mockRejectedValueOnce(
+      new ProposalDraftNotEditableError(),
+    );
+    await withServer(fakes.dependencies, principal(), async ({ address }) => {
+      const response = await call(address.port, "edit_transaction", {
+        transactionId: ids.transaction,
+        expectedUpdatedAt: "2026-09-27T00:00:00.123456Z",
+        changes: { reference: "INV-43" },
+      });
+      expect(toolValue(response).value).toMatchObject({
+        code: "DRAFT_NOT_EDITABLE",
+        message: "The draft is no longer editable.",
+      });
     });
   });
 
@@ -845,6 +1242,46 @@ describe("Folio MCP tools", () => {
       expect(value?.reference).toMatch(/^[0-9a-f-]{36}$/i);
       expect(JSON.stringify(value)).not.toContain("Synthetic private note");
     });
+  });
+
+  it("keeps server diagnostics while sanitizing the tool response", async () => {
+    const fakes = createDependencies();
+    fakes.repository.getArtifactDetails.mockRejectedValueOnce(
+      new Error("Synthetic private server diagnostic"),
+    );
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await withServer(
+        fakes.dependencies,
+        principal(["artifacts:read"]),
+        async ({ address }) => {
+          const response = await call(address.port, "get_artifact", {
+            artifactId: ids.artifact,
+          });
+          const value = toolValue(response).value;
+
+          expect(value).toMatchObject({
+            code: "REQUEST_FAILED",
+            message: "The request could not be completed.",
+          });
+          expect(JSON.stringify(value)).not.toContain(
+            "Synthetic private server diagnostic",
+          );
+          expect(error).toHaveBeenCalledOnce();
+          const event = JSON.parse(error.mock.calls[0][0] as string) as Record<
+            string,
+            unknown
+          >;
+          expect(event).toMatchObject({
+            operation: "get_artifact",
+            code: "UNEXPECTED_ERROR",
+            correlationId: value?.reference,
+          });
+        },
+      );
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it("logs successful mutations without logging successful reads", async () => {

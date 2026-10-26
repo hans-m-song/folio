@@ -103,7 +103,7 @@ describe("Folio repository health", () => {
           },
         ],
       })
-      .mockResolvedValueOnce({ rowCount: 21 });
+      .mockResolvedValueOnce({ rowCount: 22 });
     const repository = new FolioRepository({ query } as never, "folio", false);
 
     await expect(repository.health()).resolves.toBeUndefined();
@@ -136,6 +136,7 @@ describe("Folio repository health", () => {
           "0019_folio_unversioned_artifacts",
           "0020_folio_artifact_metadata",
           "0021_folio_artifact_supplier",
+          "0022_folio_mcp_artifact_scopes",
         ],
       ],
     );

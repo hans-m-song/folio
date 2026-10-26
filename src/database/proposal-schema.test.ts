@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { requiredMigrationIds } from "./migrations";
+
 describe("MCP proposal migration", () => {
   it("stores hash-only scoped credentials and exclusive proposal outcomes", async () => {
     const path = fileURLToPath(
@@ -54,5 +56,24 @@ describe("MCP proposal migration", () => {
     expect(migration).toContain("'transactions:categorize'");
     expect(migration).toContain("'bank_matches:suggest'");
     expect(migration).not.toContain("transactions:*");
+  });
+
+  it("extends accepted artifact scopes without changing issued credentials", async () => {
+    const path = fileURLToPath(
+      new URL(
+        "../../migrations/0022_folio_mcp_artifact_scopes.sql",
+        import.meta.url,
+      ),
+    );
+    const migration = await readFile(path, "utf8");
+    expect(requiredMigrationIds).toContain("0022_folio_mcp_artifact_scopes");
+    expect(migration).toContain(
+      'DROP CONSTRAINT "mcp_credentials_scopes_check"',
+    );
+    expect(migration).toContain('cardinality("scopes") BETWEEN 1 AND 10');
+    expect(migration).toContain("'submissions:read'");
+    expect(migration).toContain("'artifacts:edit'");
+    expect(migration).toContain("'artifacts:extract'");
+    expect(migration).not.toMatch(/\b(UPDATE|GRANT|REVOKE)\b/i);
   });
 });

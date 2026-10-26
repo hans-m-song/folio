@@ -6,6 +6,7 @@ import {
   MAX_PROPOSAL_REQUEST_BYTES,
   parseProposalSubmission,
   proposalCredentialInputSchema,
+  proposalCredentialScopeUpdateSchema,
   proposalCredentialScopeSchema,
   proposalDraftNotes,
   proposalPayloadHash,
@@ -129,6 +130,60 @@ describe("proposal domain", () => {
     expect(() => expandCredentialScopes(["submissions:read"])).toThrow(
       "Unknown credential scope",
     );
+    expect(
+      proposalCredentialInputSchema.safeParse({
+        label: "Synthetic credential",
+        tokenHash: "a".repeat(64),
+        actorUserId: "22222222-2222-4222-8222-222222222222",
+        defaultOwnerId: "33333333-3333-4333-8333-333333333333",
+        scopes: [
+          "bank_rows:read",
+          "transactions:search",
+          "transactions:draft",
+          "transactions:categorize",
+          "bank_matches:suggest",
+          "artifacts:read",
+          "artifacts:upload",
+          "submissions:read",
+          "artifacts:edit",
+          "artifacts:extract",
+        ],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts unique concrete scope updates including the legacy scope", () => {
+    const scopes = [
+      "bank_rows:read",
+      "transactions:search",
+      "transactions:draft",
+      "transactions:categorize",
+      "bank_matches:suggest",
+      "artifacts:read",
+      "artifacts:upload",
+      "submissions:read",
+      "artifacts:edit",
+      "artifacts:extract",
+    ] as const;
+    expect(proposalCredentialScopeUpdateSchema.parse(scopes)).toEqual(scopes);
+    expect(proposalCredentialScopeUpdateSchema.safeParse([]).success).toBe(
+      false,
+    );
+    expect(
+      proposalCredentialScopeUpdateSchema.safeParse([
+        "transactions:draft",
+        "transactions:draft",
+      ]).success,
+    ).toBe(false);
+    expect(
+      proposalCredentialScopeUpdateSchema.safeParse([
+        ...scopes,
+        "transactions:draft",
+      ]).success,
+    ).toBe(false);
+    expect(
+      proposalCredentialScopeUpdateSchema.safeParse(["transactions:*"]).success,
+    ).toBe(false);
   });
 
   it("expands only the current concrete credential scopes", () => {
@@ -138,11 +193,13 @@ describe("proposal domain", () => {
       "transactions:categorize",
       "artifacts:read",
       "artifacts:upload",
+      "artifacts:edit",
+      "artifacts:extract",
     ]);
     expect(expandCredentialScopes(["bank_matches:*"])).toEqual([
       "bank_matches:suggest",
     ]);
-    expect(expandCredentialScopes(["*"])).toHaveLength(7);
+    expect(expandCredentialScopes(["*"])).toHaveLength(9);
     expect(() => expandCredentialScopes(["future:*"])).toThrow(
       "Unknown credential scope",
     );

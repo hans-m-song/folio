@@ -1,5 +1,36 @@
 # Local MCP-assisted draft workflow
 
+25 October 2026: suggest_existing_match now also supports an existing manual
+draft. Supply its exact expectedUpdatedAt from search plus the unresolved bank
+row's revision; draft targets require both bank_matches:suggest and
+transactions:draft. The suggestion references the existing transaction without
+creating or recording another one. Reconcile opens that draft in the normal
+inline editor. Recorded targets keep their existing compatibility when the
+optional transaction revision is omitted.
+
+24 October 2026: the corrected action is labelled Save, match, and next.
+Invoice-based settlement acknowledgement is requested before recording, using
+the submitted invoice facts and current bank movement. The combined action waits
+for blocking revalidation before handing off to matching. An unchanged refreshed
+candidate can then match and advance without another acknowledgement or match
+click. Changed facts require renewed review; cancellation does not record the
+draft. Local verification and operator acceptance are tracked in the handoff.
+
+23 October 2026: suggested-draft editing in Reconcile offers the explicit human
+action Save, match and next. It records the draft, checks refreshed candidates
+and existing settlement acknowledgement, then matches and advances. Saving,
+matching and advancing remain distinct operations with separate recovery. This
+UI shortcut is implemented locally; synthetic verification passes, operator
+verification remains open. MCP tools still cannot record or match.
+
+21 October 2026: file-workflow parity is implemented locally: descriptive upload/read
+metadata, guarded metadata editing and bounded PDF field extraction. Independent
+ten-file synthetic gate169/169, types, scoped lint/format and production build pass.
+Five pre-existing migration-role unit failures remain outside that gate. Migration
+0022 is prepared but unapplied; it permits two new scopes without changing issued
+credentials. Live DB/storage and operator acceptance remain unverified. The earlier
+status and acceptance history below remain historical.
+
 Status: implemented for synthetic functional verification, 26 September 2026;
 local operator rollout and live PostgreSQL migration verification remain.
 Artifact review, durable CSV intake, scoped MCP tools, proposal
@@ -29,7 +60,8 @@ suggestions to match existing recorded transactions. It cannot record a draft,
 classify a bank row, create a bank match, or void a transaction. The existing
 authenticated Folio save action is the approval boundary for a new draft;
 the existing match action is the approval boundary for a reconciliation.
-Recording and matching are separate actions. A recorded but unmatched
+Recording and matching are separate writes. The human-operated Save, match and
+next shortcut can request both; ordinary Save as recorded only records. A recorded but unmatched
 transaction can therefore exist between them. That transaction affects
 reports according to ordinary Folio rules, while imported bank rows have no
 direct report effect.
@@ -50,9 +82,11 @@ must not be silently promoted or matched by an MCP call.
    narrow per-file exception to the repository's no-PII-reading instruction;
    no background or automatic inspection is authorised. Extracted values
    remain suggestions, not invoice or tax proof. Codex may discover artifact
-   metadata; retrieval of original contents through Folio MCP is deferred.
+   metadata; retrieval of original bytes through Folio MCP is deferred. Extracted
+   PDF facts require separate content-read authority and explicit per-file operator
+   permission, as described below.
 2. Codex uploads the original file as a typed Folio artifact. Folio validates
-   its size, checksum, media type, immutable storage version, and
+   its size, checksum, media type, immutable object identity, and
    profile-specific rules, then places it in the same human-review intake as
    UI uploads. No uploaded artifact becomes usable evidence or imported
    activity merely because upload validation succeeded.
@@ -70,10 +104,21 @@ must not be silently promoted or matched by an MCP call.
    suggestions above the ordinary candidate and manual-action controls. The
    user can open the draft in the existing transaction editor, change fields,
    review proposed invoice PDFs, and save it as recorded only after approving
-   any PDF it retains as evidence. The user can then
-   return to Reconcile and match it through the existing explicit action.
-5. A suggested existing match is never applied automatically. The user opens
-   the transaction, reviews it, and performs the ordinary match action.
+   any PDF it retains as evidence. Show PDF reveals pending or approved proposed
+   evidence above the form at full width with a compact, nominal half-A4 height.
+   Already-attached PDF previews in transaction edit views use the same layout.
+   The proposed preview starts hidden, and Hide PDF preserves entered
+   fields and evidence selection. Previewing does not approve or attach the file.
+   Save, match, and next requests recording,
+   matching and queue advancement together. The recorded transaction must appear
+   in refreshed candidates; invoice-based matching still needs the existing bank
+   settlement acknowledgement before recording. A failed match leaves Saved, unmatched and offers
+   match-only recovery. A failed advance offers advance-only recovery. Ordinary
+   Save as recorded leaves matching to the existing explicit action.
+5. A suggested existing match is never applied automatically. For an existing
+   manual draft, the user opens the same draft in the inline editor, reviews it,
+   and may choose Save, match, and next. A recorded target uses the ordinary
+   transaction review and match action.
    Stale bank revisions, an already matched transaction, or a mismatched AUD
    cash effect prevent matching.
 6. The user can leave a draft unrecorded or permanently delete it. Neither
@@ -118,16 +163,18 @@ flowchart LR
 
 ### Reconcile — selected bank row, desktop
 
+Example values below are synthetic.
+
 ```text
 Banking / Reconcile
 ┌─ Bank queue ───────────────┬─ Selected source row ────────────────────────┐
-│ 18 Aug  -AUD 49.90         │ Posted 18 Aug · -AUD 49.90 · Unresolved       │
-│ 18 Aug  -AUD 1.75          │ Raw description: SUPABASE ... USD 35.19     │
+│ [date]  -[amount]          │ Posted [date] · -[amount] · Unresolved       │
+│ [date]  -[amount]          │ Raw description: [supplier] ... [amount]     │
 │ ...                       │                                              │
 │                           │ Suggested drafts and matches                 │
 │                           │ ┌──────────────────────────────────────────┐ │
 │                           │ │ Suggested draft · Supplier expense       │ │
-│                           │ │ USD 35.19 · AUD 49.90 settlement         │ │
+│                           │ │ [amount] · [amount] settlement              │
 │                           │ │ Note: Check invoice PDF and tax details. │ │
 │                           │ │ [Edit draft here]                         │ │
 │                           │ └──────────────────────────────────────────┘ │
@@ -152,12 +199,12 @@ The source row is never auto-matched by recording the draft.
 ```text
 ☰  Banking / Reconcile
 [Bank row selector]
-18 Aug · -AUD 49.90 · Unresolved
-SUPABASE ... USD 35.19
+[date] · -[amount] · Unresolved
+[supplier] ... [amount]
 
 Suggested drafts and matches
   Suggested draft · Supplier expense
-  USD 35.19 · AUD 49.90 settlement
+  [amount] · [amount] settlement
   Note: Check invoice PDF and tax details.
   [Edit draft here]
 
@@ -267,6 +314,13 @@ At issuance, `*` expands to every current concrete scope and a known resource
 wildcard such as `artifacts:*` expands only to that resource's current scopes.
 Unknown resource patterns are rejected, and stored credentials contain only
 the expanded concrete scopes, so later scopes are never granted implicitly.
+Administration → Access tokens also offers Edit scopes for active tokens.
+The editor changes concrete scopes without replacing the token, checks the
+scope set observed when editing began, and preserves any selected legacy scope.
+Saved changes apply to subsequent MCP requests; requests already running retain
+their verified scope snapshot. To return parsed PDF fields and source evidence,
+grant both artifacts:read and artifacts:extract and use extract_invoice_fields.
+
 The retired `submissions:read` scope is accepted on existing credentials but
 cannot be issued through the CLI or token-management page and is excluded from
 wildcard expansion. It no longer exposes a tool. If a submission response is
@@ -318,11 +372,12 @@ but original-file retrieval through MCP is deferred. The Folio UI retains its
 existing approved-artifact download workflow.
 
 The existing upload service creates a pending artifact and a short-lived,
-checksum-bound storage PUT URL; confirmation verifies object metadata and its
-immutable version ([artifact service](../src/documents/service.ts)). A direct
+checksum-bound, create-only storage PUT URL; confirmation verifies object metadata
+against the immutable UUID key and expected checksum
+([artifact service](../src/documents/service.ts)). A direct
 binary upload argument in MCP would inflate large files and couple the server
 to the client's filesystem. The implemented contract is therefore
-`begin_artifact_upload` → ordinary authenticated PUT to the returned upload URL
+`begin_artifact_upload` → PUT using every returned `uploadHeaders` entry
 → `confirm_artifact_upload`. This is a stateless workflow; the artifact ID is
 the durable hand-off between calls. Confirm must be idempotent or report an
 unambiguous already-confirmed outcome after retries. The upload URL is a
@@ -364,16 +419,54 @@ Import approval remains distinct from upload confirmation. Treating
 [Stripe import route](../src/routes/-transaction-workflow.tsx)).
 
 `list_artifacts` returns bounded, paginated metadata with ID, profile,
-original filename, MIME type, size, checksum, state, and link counts; it never
+current and original filename, descriptive metadata, MIME type, size, checksum,
+state, and link counts; it never
 returns bytes or storage keys. Metadata may show any artifact state. The first
 MCP release has no `read_artifact` tool, download URL, or original-file read
 scope. If retrieval is reconsidered later, it must be separately authorised
-and restricted to approved, `available`, versioned artifacts, matching the
+and restricted to approved, `available`, confirmed artifacts, matching the
 current UI download boundary ([download service](../src/documents/service.ts)).
 The binary transport and privacy policy would then need explicit verification.
 The operator expects filenames to contain no PII, so metadata results include
 the original filename without a per-file approval step or redaction. This is
 an input convention, not a guarantee or a content-inspection permission.
+
+### File-workflow parity
+
+`begin_artifact_upload` accepts a chosen filename and optional original filename,
+supplier, CSV coverage start/end, document date, reference and notes. Omitted
+original filename defaults to the chosen filename. Coverage describes the CSV
+export interval, not the first/last observed transaction; PDF uploads reject
+non-null coverage values. Shared validation and atomic intent insertion retain
+metadata with the original file. Retries use normalized metadata in their
+fingerprint; legacy default-only requests retain their original v1 fingerprints.
+Changing metadata under the same idempotency key is a conflict, not a replay edit.
+
+`get_artifact` returns allowlisted metadata and link counts, without storage keys,
+file bytes or URLs. Its original-name `filenameSuggestions` are separate hints;
+CSV hints must match the stored profile. Neither reading nor applying hints
+changes a transaction automatically.
+
+`update_artifact_metadata` requires both `artifacts:read` and `artifacts:edit`.
+It uses the UI's filename/coverage expected-value comparison and allows only
+confirmed `awaiting_review`/`available` records. Filename changes preserve original
+name and object identity. CSV coverage may be set or cleared; stored PDF coverage
+must remain unchanged. It cannot change invoice facts, imports, links, ownership
+or financial records. A stale expected snapshot is rejected.
+
+`extract_invoice_fields` requires both `artifacts:read` and `artifacts:extract`,
+an explicit artifact ID and its expected checksum. This is content-read authority,
+not part of metadata discovery. Only run it when the operator authorizes that
+particular PDF. The web UI and MCP share the verified PDF reader, bounded PDF.js
+extractor, supplier parser and duplicate hints. Returned facts preserve provenance,
+uncertainty and unsupported reasons; no raw PDF/normalized document or signed URL
+is returned. Nothing is approved, attached, applied, recorded or matched.
+
+Apply `0022_folio_mcp_artifact_scopes` before issuing credentials with the new
+scopes. It replaces only the scope CHECK constraint; existing credential arrays
+remain unchanged. Newly issued wildcards expand to the current concrete scopes.
+Existing credentials need explicitly authorized replacement to gain edit/extract
+access. No new environment variables are required.
 
 Upload and metadata-read are separate credential scopes. A
 draft-submit credential must not implicitly grant file access. The user
@@ -388,16 +481,19 @@ remain provenance for their own import workflows, not invoice evidence.
 
 ## First tools
 
-| Tool                        | Permitted effect                                                     |
-| --------------------------- | -------------------------------------------------------------------- |
-| `list_unresolved_bank_rows` | Bounded source facts and revision tokens                             |
-| `search_transactions`       | Bounded all-status search with category and exact revision token     |
-| `list_artifacts`            | Bounded metadata across artifact profiles and states                 |
-| `begin_artifact_upload`     | Create an upload intent for one of the three supported profiles      |
-| `confirm_artifact_upload`   | Verify the uploaded version and queue a supported profile for review |
-| `submit_draft_transaction`  | Create one manual draft only                                         |
-| `edit_transaction`          | Revision-checked own-draft edit or separately scoped category edit   |
-| `suggest_existing_match`    | Store one existing-match suggestion only                             |
+| Tool                        | Permitted effect                                                        |
+| --------------------------- | ----------------------------------------------------------------------- |
+| `list_unresolved_bank_rows` | Bounded source facts and revision tokens                                |
+| `search_transactions`       | Bounded all-status search with category and exact revision token        |
+| `list_artifacts`            | Bounded metadata across artifact profiles and states                    |
+| `get_artifact`              | Safe metadata, link counts and filename hints for one artifact          |
+| `begin_artifact_upload`     | Create an upload intent for one of the three supported profiles         |
+| `confirm_artifact_upload`   | Verify uploaded bytes/metadata and queue a supported profile for review |
+| `update_artifact_metadata`  | Expected-value filename/CSV coverage edit under explicit new scope      |
+| `extract_invoice_fields`    | Bounded PDF facts under separate content-read scope                     |
+| `submit_draft_transaction`  | Create one manual draft only                                            |
+| `edit_transaction`          | Revision-checked manual-draft edit or separately scoped category edit   |
+| `suggest_existing_match`    | Suggest an existing manual draft or recorded transaction for a bank row |
 
 No tool can record, approve, match, classify, delete, run raw SQL, or
 read arbitrary transactions. Artifact upload cannot import bank rows or
@@ -406,7 +502,7 @@ suggestion is a recommendation to use
 the existing Folio match action, not an MCP-created reconciliation.
 The edit tool requires the exact `updatedAt` token returned by search. With
 `transactions:draft`, it accepts a non-empty field patch for a still-draft
-manual transaction created by that credential, preserves omitted fields and
+manual transaction regardless of creating credential or owner, preserves omitted fields and
 the human-selected owner, and cannot change status or evidence links. With
 `transactions:categorize`, a category-only patch may update any transaction,
 including Stripe and recorded rows, and changes only category, updater, and
@@ -421,7 +517,7 @@ and authorization failures.
    and no report/bank-state effect before human action.
 2. Protocol and security tests: current MCP wire format with Codex, anonymous
    and wrong-scope rejection, unexpected `Host`/`Origin` rejection, and no
-   public-proxy exposure. Confirm upload/read isolation, immutable-version
+   public-proxy exposure. Confirm upload/read isolation, immutable-object
    checks, oversized-file rejection, and retry outcomes. Assert that the MCP
    surface exposes no original-file retrieval tool or URL. Test against
    synthetic records; a real bank file may be inspected only after the
@@ -441,7 +537,7 @@ and authorization failures.
    keyboard/narrow-screen review, stale state, edit return path, and no
    implicit save or match.
 5. Deferred live PostgreSQL workflow tests: MCP draft → human edit/record → candidate appears
-   → human match; retries do not duplicate drafts, recording does not match,
+   → human match; retries do not duplicate drafts, ordinary recording does not match,
    and stale or amount-mismatched rows remain unresolved. A pre-import
    CommBank artifact-and-row locator resolves only after import and does not
    match automatically; a rejected or missing row leaves the draft unlinked.

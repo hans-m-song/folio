@@ -14,6 +14,7 @@ import {
 } from "../domain/csv-duplicates";
 import { parseCommBankTransactionHistoryCsv } from "../domain/bank-profiles/commbank-transaction-history-v1";
 import { parseStripeBalanceCsv } from "../domain/stripe-csv";
+import { createInvoiceFieldReader } from "../documents/invoice-field-reader";
 import { DocumentService } from "../documents/service";
 import { S3ObjectStorage } from "../documents/storage";
 import type { McpCredentialVerifier, McpPrincipal } from "./server";
@@ -85,6 +86,10 @@ export const createMcpRuntime = (
     prefix: config.s3KeyPrefix,
     maxUploadBytes: config.maxUploadBytes,
   });
+  const extractInvoiceFields = createInvoiceFieldReader({
+    documents,
+    repository,
+  });
 
   const getCsvDuplicateWarnings = async (
     actorId: string,
@@ -125,6 +130,7 @@ export const createMcpRuntime = (
       bankRepository,
       proposalRepository,
       documents,
+      extractInvoiceFields,
       getCsvDuplicateWarnings,
     }),
     close: async () => {

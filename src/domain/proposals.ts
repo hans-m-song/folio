@@ -17,6 +17,8 @@ export const proposalCredentialIssuanceScopeSchema = z.enum([
   "bank_matches:suggest",
   "artifacts:read",
   "artifacts:upload",
+  "artifacts:edit",
+  "artifacts:extract",
 ]);
 
 export const proposalCredentialScopeSchema = z.enum([
@@ -31,6 +33,18 @@ export type ProposalCredentialIssuanceScope = z.infer<
 export type ProposalCredentialScope = z.infer<
   typeof proposalCredentialScopeSchema
 >;
+
+export const proposalCredentialScopeUpdateSchema = z
+  .array(proposalCredentialScopeSchema)
+  .min(1)
+  .max(10)
+  .superRefine((scopes, context) => {
+    if (new Set(scopes).size !== scopes.length)
+      context.addIssue({
+        code: "custom",
+        message: "Credential scopes must be unique",
+      });
+  });
 
 export const expandCredentialScopes = (
   patterns: readonly string[],
@@ -76,7 +90,7 @@ export const proposalCredentialInputSchema = z
     tokenHash: z.string().regex(/^[a-f0-9]{64}$/),
     actorUserId: z.string().uuid(),
     defaultOwnerId: z.string().uuid(),
-    scopes: z.array(proposalCredentialScopeSchema).min(1).max(8),
+    scopes: proposalCredentialScopeUpdateSchema,
   })
   .strict()
   .superRefine((input, context) => {
@@ -85,12 +99,6 @@ export const proposalCredentialInputSchema = z
         code: "custom",
         path: ["actorUserId"],
         message: "Credential actor must be distinct from its default owner",
-      });
-    if (new Set(input.scopes).size !== input.scopes.length)
-      context.addIssue({
-        code: "custom",
-        path: ["scopes"],
-        message: "Credential scopes must be unique",
       });
   });
 
