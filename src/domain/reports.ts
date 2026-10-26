@@ -190,7 +190,7 @@ function effects(transaction: TransactionRecord, basis: ReportBasis) {
       return {
         date: transaction.occurredAt,
         income: gross,
-        expense: 0n,
+        expense: fee,
         cash: parseDecimal(
           transaction.sourceNet ?? transaction.sourceGross ?? "0",
         ),
@@ -199,7 +199,7 @@ function effects(transaction: TransactionRecord, basis: ReportBasis) {
       return {
         date: transaction.occurredAt,
         income: 0n,
-        expense: fee || -gross,
+        expense: fee - gross,
         cash: parseDecimal(
           transaction.sourceNet ?? transaction.sourceGross ?? "0",
         ),
@@ -207,7 +207,7 @@ function effects(transaction: TransactionRecord, basis: ReportBasis) {
     return {
       date: transaction.occurredAt,
       income: 0n,
-      expense: -gross,
+      expense: fee - gross,
       cash: parseDecimal(
         transaction.sourceNet ?? transaction.sourceGross ?? "0",
       ),

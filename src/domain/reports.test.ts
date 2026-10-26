@@ -10,6 +10,8 @@ import {
 import type { TransactionRecord } from "./types";
 import { manualCashEffectAud } from "./cash-effect";
 import { parseDecimal } from "./money";
+import { parseStripeBalanceCsv } from "./stripe-csv";
+import { classifyStripeReportingCategory } from "./stripe-semantics";
 
 const base: TransactionRecord = {
   id: "b",
@@ -46,6 +48,50 @@ const base: TransactionRecord = {
 };
 
 describe("preparation reports", () => {
+  it.each([
+    ["refund", "-100", "-5", "-95", "-100.0000", "-5.0000"],
+    ["fee", "-9.38", "0.94", "-10.32", "0.0000", "10.3200"],
+    ["dispute", "-100", "15", "-115", "0.0000", "115.0000"],
+    ["dispute", "100", "-15", "115", "0.0000", "-115.0000"],
+  ])(
+    "preserves all signed provider amounts for %s gross=%s fee=%s",
+    (category, gross, fee, net, incomeEffectAud, expenseEffectAud) => {
+      const [imported] = parseStripeBalanceCsv(
+        "balance_transaction_id,created_utc,available_on_utc,currency,gross,fee,net,reporting_category,description\n" +
+          `txn_synthetic,2026-06-01 00:00:00,2026-06-03 00:00:00,aud,${gross},${fee},${net},${category},Synthetic activity`,
+      );
+      const transaction: TransactionRecord = {
+        ...base,
+        ...imported,
+        sourceSystem: "stripe",
+        kind: classifyStripeReportingCategory(category).kind,
+      };
+      const ledger = buildFinancialYearCashLedger(
+        [transaction],
+        2025,
+        "Australia/Brisbane",
+      );
+      expect(ledger.totals).toMatchObject({
+        incomeEffectAud,
+        expenseEffectAud,
+      });
+      expect(
+        parseDecimal(ledger.totals.incomeEffectAud) -
+          parseDecimal(ledger.totals.expenseEffectAud),
+      ).toBe(parseDecimal(net));
+      for (const basis of ["activity", "cash"] as const) {
+        expect(
+          buildReport(
+            [transaction],
+            basis,
+            "financial_year",
+            "Australia/Brisbane",
+          ).lines[0],
+        ).toMatchObject({ incomeEffectAud, expenseEffectAud });
+      }
+    },
+  );
+
   it("uses Australian financial years in the reporting timezone", () => {
     expect(
       periodKey("2026-06-30T14:30:00Z", "Australia/Brisbane", "financial_year"),
