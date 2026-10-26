@@ -50,8 +50,22 @@
   font-size: 0.85rem;
 }
 
+.invoice-facts-table th,
+.invoice-facts-table td {
+  overflow-wrap: anywhere;
+}
+
 .invoice-facts-table .money-column {
   text-align: right;
+  white-space: normal;
+}
+
+.invoice-facts-table .invoice-facts-currency-label {
+  white-space: normal;
+}
+
+.invoice-facts-table .money-column .money-text {
+  display: inline-block;
   white-space: nowrap;
 }
 

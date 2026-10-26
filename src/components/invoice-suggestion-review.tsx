@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import type { InvoiceParseResult } from "../domain/invoice-types";
 import {
@@ -16,11 +16,31 @@ import "../styles/invoice-suggestions.css";
 
 interface InvoiceReviewProps {
   file: File | null;
-  artifacts: readonly { id: string; filename?: string }[];
+  artifacts: readonly {
+    id: string;
+    filename?: string;
+    originalFilename?: string | null;
+  }[];
   busy: boolean;
+  observation?: InvoiceReviewObservation | null;
+  observationOnly?: boolean;
+  onObservation?: (observation: InvoiceReviewObservation) => void;
   prepareFile?: (file: File) => Promise<string>;
   getValues: () => InvoiceEditableFields;
   onApply: (changes: Partial<InvoiceEditableFields>) => void;
+  canApplySettlement?: (settlement: ReviewedSettlementValues) => boolean;
+  onApplySettlement?: (settlement: ReviewedSettlementValues) => boolean;
+}
+
+export interface ReviewedSettlementValues {
+  settlementAmount: string;
+  settlementCurrency: string;
+}
+
+export interface InvoiceReviewObservation {
+  artifactId: string;
+  result: InvoiceParseResult;
+  duplicateMessage: string;
 }
 
 const fieldLabels: Record<keyof InvoiceEditableFields, string> = {
@@ -53,14 +73,19 @@ export const InvoiceSuggestionReview = ({
   file,
   artifacts,
   busy,
+  observation,
+  observationOnly = false,
+  onObservation,
   prepareFile,
   getValues,
   onApply,
+  canApplySettlement,
+  onApplySettlement,
 }: InvoiceReviewProps) => {
+  const id = useId();
   const artifactKey = artifacts.map(({ id }) => id).join(",");
-  const [source, setSource] = useState(
-    file ? "selected-file" : (artifacts[0]?.id ?? ""),
-  );
+  const defaultSource = file ? "selected-file" : (artifacts[0]?.id ?? "");
+  const [source, setSource] = useState(defaultSource);
   const [extracting, setExtracting] = useState(false);
   const [result, setResult] = useState<InvoiceParseResult | null>(null);
   const [message, setMessage] = useState("");
@@ -73,18 +98,37 @@ export const InvoiceSuggestionReview = ({
   valuesRef.current = getValues;
   const targetRef = useRef({ source, file, artifactKey });
   targetRef.current = { source, file, artifactKey };
+  const matchingObservation =
+    !file &&
+    observation &&
+    artifacts.some(({ id }) => id === observation.artifactId)
+      ? observation
+      : null;
 
   useEffect(() => {
     requestVersion.current += 1;
-    setResult(null);
-    setMessage("");
-    setDuplicateMessage("");
+    setResult(matchingObservation?.result ?? null);
+    setMessage(
+      matchingObservation
+        ? matchingObservation.result.status === "unsupported"
+          ? observationOnly
+            ? "This invoice layout is unsupported. No transaction changes were made."
+            : "This invoice layout is unsupported. Continue with manual entry."
+          : observationOnly
+            ? "Review the observed facts against the confirmed PDF. Transaction fields remain unchanged."
+            : "Review the suggestions against the PDF before applying them."
+        : "",
+    );
+    setDuplicateMessage(matchingObservation?.duplicateMessage ?? "");
     setExtracting(false);
-    setSource(file ? "selected-file" : (artifacts[0]?.id ?? ""));
+    setSource(matchingObservation?.artifactId ?? defaultSource);
+    setTotal(matchingObservation?.result.fields.invoiceTotal?.amount ?? "");
+    setCurrency(matchingObservation?.result.fields.currency ?? "");
+    setConfirmed(false);
     return () => {
       requestVersion.current += 1;
     };
-  }, [file, artifactKey]);
+  }, [artifactKey, defaultSource, file, matchingObservation]);
 
   const clearResult = (next: string) => {
     requestVersion.current += 1;
@@ -93,6 +137,9 @@ export const InvoiceSuggestionReview = ({
     setMessage("");
     setDuplicateMessage("");
     setExtracting(false);
+    setTotal("");
+    setCurrency("");
+    setConfirmed(false);
   };
 
   const extract = async () => {
@@ -131,11 +178,12 @@ export const InvoiceSuggestionReview = ({
       }
       if (response.status === "unsupported") {
         setMessage(
-          "This PDF could not be safely extracted. Continue with manual entry.",
+          observationOnly
+            ? "This PDF could not be safely extracted. No transaction changes were made."
+            : "This PDF could not be safely extracted. Continue with manual entry.",
         );
         return;
       }
-      setResult(response.result);
       const duplicateFacts = [
         response.duplicateHints.linkedTransactions
           ? `${response.duplicateHints.linkedTransactions} existing transaction link(s)`
@@ -147,18 +195,28 @@ export const InvoiceSuggestionReview = ({
           ? `${response.duplicateHints.matchingChecksumArtifacts} other PDF(s) with the same checksum`
           : "",
       ].filter(Boolean);
-      setDuplicateMessage(
-        duplicateFacts.length
-          ? `Review possible duplicates: ${duplicateFacts.join("; ")}. Shared evidence may be legitimate; no records were blocked or changed.`
-          : "",
-      );
+      const nextDuplicateMessage = duplicateFacts.length
+        ? `Review possible duplicates: ${duplicateFacts.join("; ")}. Shared evidence may be legitimate; no records were blocked or changed.`
+        : "";
+      const nextObservation = {
+        artifactId,
+        result: response.result,
+        duplicateMessage: nextDuplicateMessage,
+      } satisfies InvoiceReviewObservation;
+      setResult(response.result);
+      setDuplicateMessage(nextDuplicateMessage);
+      onObservation?.(nextObservation);
       setTotal(response.result.fields.invoiceTotal?.amount ?? "");
       setCurrency(response.result.fields.currency ?? "");
       setConfirmed(false);
       setMessage(
         response.result.status === "unsupported"
-          ? "This invoice layout is unsupported. Continue with manual entry."
-          : "Review the suggestions against the PDF before applying them.",
+          ? observationOnly
+            ? "This invoice layout is unsupported. No transaction changes were made."
+            : "This invoice layout is unsupported. Continue with manual entry."
+          : observationOnly
+            ? "Review the observed facts against the confirmed PDF. Transaction fields remain unchanged."
+            : "Review the suggestions against the PDF before applying them.",
       );
     } catch {
       if (stillCurrent())
@@ -180,12 +238,43 @@ export const InvoiceSuggestionReview = ({
   };
   const review = { amount: total, currency, confirmed };
   const money = result ? reviewedInvoiceMoney(result, review) : null;
+  const settlement = money
+    ? {
+        settlementAmount: money.documentAmount,
+        settlementCurrency: money.documentCurrency,
+      }
+    : null;
+  const settlementAvailable =
+    settlement &&
+    confirmed &&
+    onApplySettlement &&
+    canApplySettlement?.(settlement);
+  const applySettlement = () => {
+    if (!settlement || !confirmed || !canApplySettlement?.(settlement)) {
+      setMessage(
+        "Settlement fields changed or are already populated. Review them before applying the reviewed amount.",
+      );
+      return;
+    }
+    if (onApplySettlement?.(settlement) === false) {
+      setMessage(
+        "Settlement fields changed or are already populated. Review them before applying the reviewed amount.",
+      );
+      return;
+    }
+    setMessage(
+      "Applied the reviewed amount and currency to settlement fields. Payment date and invoice fields were not changed.",
+    );
+  };
   const suggestions = result ? invoiceEditableSuggestions(result) : {};
   const currentValues = getValues();
   const sourceFilename =
     source === "selected-file"
       ? file?.name
-      : artifacts.find((artifact) => artifact.id === source)?.filename;
+      : (() => {
+          const artifact = artifacts.find(({ id }) => id === source);
+          return artifact?.originalFilename ?? artifact?.filename;
+        })();
   const conflicts = result
     ? invoiceSuggestionConflicts(currentValues, result, sourceFilename)
     : [];
@@ -232,27 +321,48 @@ export const InvoiceSuggestionReview = ({
     >
       <h3>Invoice content suggestions</h3>
       <p>
-        Extract locally from a confirmed PDF. Applying suggestions does not
-        approve, link or save the transaction.
+        {observationOnly
+          ? "Observed facts from this confirmed PDF are for review only. No transaction fields or amounts are applied here."
+          : "Extract locally from a confirmed PDF. Applying suggestions does not approve, link or save the transaction."}
       </p>
       <div className="invoice-extraction-actions">
-        <label htmlFor="invoice-extraction-source">PDF to review</label>
-        <AutocompleteSelect
-          id="invoice-extraction-source"
-          aria-label="PDF to review"
-          value={source}
-          onValueChange={clearResult}
-          disabled={busy || extracting}
-        >
-          {file && (
-            <option value="selected-file">Selected file: {file.name}</option>
-          )}
-          {artifacts.map((artifact) => (
-            <option key={artifact.id} value={artifact.id}>
-              {artifact.filename ?? `Invoice PDF ${artifact.id}`}
-            </option>
-          ))}
-        </AutocompleteSelect>
+        {observationOnly ? (
+          <p>
+            Source:{" "}
+            {(() => {
+              const artifact = artifacts.find(({ id }) => id === source);
+              return (
+                artifact?.originalFilename ??
+                artifact?.filename ??
+                "Confirmed invoice PDF"
+              );
+            })()}
+          </p>
+        ) : (
+          <>
+            <label htmlFor={`invoice-extraction-source-${id}`}>
+              PDF to review
+            </label>
+            <AutocompleteSelect
+              id={`invoice-extraction-source-${id}`}
+              aria-label="PDF to review"
+              value={source}
+              onValueChange={clearResult}
+              disabled={busy || extracting}
+            >
+              {file && (
+                <option value="selected-file">
+                  Selected file: {file.name}
+                </option>
+              )}
+              {artifacts.map((artifact) => (
+                <option key={artifact.id} value={artifact.id}>
+                  {artifact.filename ?? `Invoice PDF ${artifact.id}`}
+                </option>
+              ))}
+            </AutocompleteSelect>
+          </>
+        )}
         <button
           type="button"
           disabled={
@@ -267,7 +377,9 @@ export const InvoiceSuggestionReview = ({
             ? "Extracting…"
             : source === "selected-file"
               ? "Upload and extract invoice fields"
-              : "Extract invoice fields"}
+              : observationOnly
+                ? "Extract observed invoice facts"
+                : "Extract invoice fields"}
         </button>
       </div>
       {message && (
@@ -295,7 +407,7 @@ export const InvoiceSuggestionReview = ({
               ))}
             </ul>
           )}
-          {conflicts.length > 0 && (
+          {!observationOnly && conflicts.length > 0 && (
             <ul
               className="invoice-warning-list"
               aria-label="Invoice field conflicts"
@@ -356,9 +468,12 @@ export const InvoiceSuggestionReview = ({
                   <tr key={`${fact.label}-${index}`}>
                     <th scope="row">{fact.label}</th>
                     <td className="money-column">
-                      <MoneyText>
-                        {`${fact.currency ? `${fact.currency} ` : "Currency unconfirmed · "}${formatMoneyAmount(fact.amount)}`}
-                      </MoneyText>
+                      <span className="invoice-facts-currency-label">
+                        {fact.currency
+                          ? `${fact.currency} `
+                          : "Currency unconfirmed · "}
+                      </span>
+                      <MoneyText>{formatMoneyAmount(fact.amount)}</MoneyText>
                     </td>
                     <td>
                       {fact.provenance
@@ -370,7 +485,7 @@ export const InvoiceSuggestionReview = ({
               </tbody>
             </table>
           </div>
-          {!reviewOnly && (
+          {!observationOnly && !reviewOnly && (
             <>
               <div className="invoice-field-actions">
                 {(["counterparty", "invoiceDate", "reference"] as const).map(
@@ -399,10 +514,10 @@ export const InvoiceSuggestionReview = ({
                   and subtotal are shown only as evidence.
                 </p>
                 <div className="invoice-money-fields">
-                  <label htmlFor="reviewed-invoice-total">
+                  <label htmlFor={`reviewed-invoice-total-${id}`}>
                     Invoice total
                     <input
-                      id="reviewed-invoice-total"
+                      id={`reviewed-invoice-total-${id}`}
                       inputMode="decimal"
                       value={total}
                       onChange={(event) => {
@@ -412,9 +527,11 @@ export const InvoiceSuggestionReview = ({
                     />
                   </label>
                   <div>
-                    <label htmlFor="reviewed-invoice-currency">Currency</label>
+                    <label htmlFor={`reviewed-invoice-currency-${id}`}>
+                      Currency
+                    </label>
                     <AutocompleteSelect
-                      id="reviewed-invoice-currency"
+                      id={`reviewed-invoice-currency-${id}`}
                       aria-label="Currency"
                       value={currency}
                       onValueChange={(value) => {
@@ -444,8 +561,30 @@ export const InvoiceSuggestionReview = ({
                   disabled={busy || !money}
                   onClick={() => money && apply(money)}
                 >
-                  Use reviewed total and currency
+                  Use reviewed invoice total and currency
                 </button>
+                {onApplySettlement && (
+                  <>
+                    <p>
+                      Use this only when the reviewed amount and currency are
+                      the payment actually made. This does not convert
+                      currencies or change the payment date.
+                    </p>
+                    {settlement?.settlementCurrency === "USD" && (
+                      <p>
+                        Use only if payment was in USD; reconcile an AUD bank
+                        movement to record its AUD settlement.
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      disabled={busy || !settlementAvailable}
+                      onClick={applySettlement}
+                    >
+                      Use reviewed amount as settlement
+                    </button>
+                  </>
+                )}
               </fieldset>
               <button
                 type="button"

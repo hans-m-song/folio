@@ -1,7 +1,11 @@
 import { AutocompleteSelect } from "./autocomplete";
-import { InvoiceSuggestionReview } from "./invoice-suggestion-review";
+import {
+  InvoiceSuggestionReview,
+  type InvoiceReviewObservation,
+  type ReviewedSettlementValues,
+} from "./invoice-suggestion-review";
 import type { InvoiceEditableFields } from "../domain/pdf-invoice-fields";
-import { useForm } from "@tanstack/react-form";
+import { useForm, useStore } from "@tanstack/react-form";
 import {
   Button,
   ComboBox,
@@ -14,13 +18,14 @@ import {
   TextArea,
   TextField,
 } from "react-aria-components";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { nonNegativeDecimalSchema, parseDecimal } from "../domain/money";
 import {
   applyPdfFilenameSuggestions,
   parsePdfFilename,
   type PdfFilenameSuggestions,
+  type PdfTransactionFieldValues,
 } from "../domain/pdf-filename";
 import {
   buildManualTransaction,
@@ -83,6 +88,7 @@ const ownerFundingMatchesBankMovement = (
 
 export interface ManualTransactionSubmission {
   action: ManualTransactionAction;
+  afterSave?: "match_next";
   transaction: TransactionInput;
   artifactIds: readonly string[];
   file: File | null;
@@ -91,6 +97,10 @@ export interface ManualTransactionSubmission {
 export interface ManualArtifactOption {
   id: string;
   filename?: string;
+  originalFilename?: string | null;
+  supplier?: string | null;
+  periodStart?: string | null;
+  periodEnd?: string | null;
 }
 
 interface ManualTransactionFormProps {
@@ -107,6 +117,7 @@ interface ManualTransactionFormProps {
   attachedArtifactIds?: readonly string[];
   availableArtifacts?: readonly ManualArtifactOption[];
   suggestedEvidence?: ManualArtifactOption;
+  invoiceObservation?: InvoiceReviewObservation | null;
   allowedKinds?: readonly TransactionInput["kind"][];
   autoDefaultTaxTreatment?: boolean;
   bankSettlementPrefilled?: boolean;
@@ -114,10 +125,17 @@ interface ManualTransactionFormProps {
     foreignCurrency?: string | null;
     foreignAmount?: string | null;
   };
+  pdfFilenameSuggestionRequest?: {
+    id: number;
+    suggestions: PdfFilenameSuggestions;
+    field: keyof PdfTransactionFieldValues;
+  };
   bankMovementIsPositive?: boolean;
   evidenceStatus: ReactNode;
   busy: boolean;
   onEvidenceChange: (file: File | null) => void;
+  onSelectedArtifactsChange?: (artifactIds: readonly string[]) => void;
+  onDirtyChange?: (dirty: boolean) => void;
   onPrepareInvoiceForExtraction?: (
     file: File,
     ownerId: string | null,
@@ -128,6 +146,9 @@ interface ManualTransactionFormProps {
   submissionError?: string;
   onCancel?: () => void;
   recordButtonLabel?: string;
+  allowSaveMatchNext?: boolean;
+  fileUploadHref?: string;
+  hideFileUpload?: boolean;
 }
 
 const fieldIds: Record<keyof ManualTransactionValues, string> = {
@@ -176,6 +197,18 @@ const fieldLabels: Record<keyof typeof fieldIds, string> = {
 
 const normalizeCounterpartyName = (value: string) =>
   value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+const sameArtifactIds = (left: readonly string[], right: readonly string[]) =>
+  left.length === right.length &&
+  left.every((id, index) => id === right[index]);
+
+const sameManualTransactionValues = (
+  left: ManualTransactionValues,
+  right: ManualTransactionValues,
+) =>
+  (Object.keys(left) as (keyof ManualTransactionValues)[]).every(
+    (key) => left[key] === right[key],
+  );
 
 const humanizeSupplierName = (value: string) =>
   value
@@ -385,14 +418,18 @@ export const ManualTransactionForm = ({
   attachedArtifactIds,
   availableArtifacts = [],
   suggestedEvidence,
+  invoiceObservation,
   allowedKinds,
   autoDefaultTaxTreatment = false,
   bankSettlementPrefilled = false,
   bankPaymentHints,
+  pdfFilenameSuggestionRequest,
   bankMovementIsPositive = true,
   evidenceStatus,
   busy,
   onEvidenceChange,
+  onSelectedArtifactsChange,
+  onDirtyChange,
   onPrepareInvoiceForExtraction,
   onSubmit,
   serverIssues = noServerIssues,
@@ -400,6 +437,9 @@ export const ManualTransactionForm = ({
   submissionError,
   onCancel,
   recordButtonLabel,
+  allowSaveMatchNext = false,
+  fileUploadHref,
+  hideFileUpload = false,
 }: ManualTransactionFormProps) => {
   const [selectedKind, setSelectedKind] = useState(transaction.kind);
   const ownerFunding = isOwnerFundingKind(selectedKind);
@@ -419,10 +459,13 @@ export const ManualTransactionForm = ({
   const [attempted, setAttempted] = useState(false);
   const [serverFormError, setServerFormError] = useState<string | null>(null);
   const [artifactSearch, setArtifactSearch] = useState("");
-  const initialArtifactIds = [
-    ...(attachedArtifactIds ??
-      (attachedArtifactId ? [attachedArtifactId] : [])),
-  ];
+  const initialArtifactIds = useMemo(
+    () => [
+      ...(attachedArtifactIds ??
+        (attachedArtifactId ? [attachedArtifactId] : [])),
+    ],
+    [attachedArtifactId, attachedArtifactIds],
+  );
   const [selectedArtifactIds, setSelectedArtifactIds] =
     useState<string[]>(initialArtifactIds);
   const initialValues = manualTransactionValues(transaction);
@@ -430,6 +473,10 @@ export const ManualTransactionForm = ({
     initialValues.documentCurrency.trim().toUpperCase(),
   );
   const occurredAtEdited = useRef(Boolean(transaction.occurredAt));
+  const lastConsumedFilenameSuggestionRequest = useRef<number | null>(null);
+  const [settlementCurrencyEdited, setSettlementCurrencyEdited] = useState(
+    Boolean(transaction.settlementCurrency?.trim()),
+  );
   const initialFundingAmountPrefill =
     bankSettlementPrefilled &&
     ownerFundingMatchesBankMovement(transaction.kind, bankMovementIsPositive) &&
@@ -448,6 +495,7 @@ export const ManualTransactionForm = ({
   const submissionErrorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const taxDetailsRef = useRef<HTMLDetailsElement>(null);
+  const paymentDetailsRef = useRef<HTMLDetailsElement>(null);
   const categoryOptions = [
     ...new Set([...expenseCategorySuggestions, ...categories]),
   ];
@@ -497,7 +545,12 @@ export const ManualTransactionForm = ({
 
   const form = useForm({
     defaultValues: initialValues,
-    onSubmitMeta: { action: "save_draft" as ManualTransactionAction },
+    onSubmitMeta: {
+      action: "save_draft" as ManualTransactionAction,
+    } as {
+      action: ManualTransactionAction;
+      afterSave?: "match_next";
+    },
     validators: {
       onSubmit: ({ value }) => validate(value),
     },
@@ -525,9 +578,53 @@ export const ManualTransactionForm = ({
         },
         artifactIds: selectedArtifactIds,
         file,
+        ...(meta.afterSave === "match_next"
+          ? { afterSave: meta.afterSave }
+          : {}),
       });
     },
   });
+  const formValues = useStore(form.store, (state) => state.values);
+  const formIsDirty = !sameManualTransactionValues(formValues, initialValues);
+  const evidenceIsDirty =
+    file !== null || !sameArtifactIds(selectedArtifactIds, initialArtifactIds);
+
+  useEffect(() => {
+    onDirtyChange?.(formIsDirty || evidenceIsDirty);
+  }, [evidenceIsDirty, formIsDirty, onDirtyChange]);
+
+  const canApplyReviewedSettlement = ({
+    settlementCurrency,
+  }: ReviewedSettlementValues) => {
+    const values = form.state.values;
+    if (bankSettlementPrefilled || values.settlementAmount.trim()) return false;
+
+    const currentCurrency = values.settlementCurrency.trim().toUpperCase();
+    const reviewedCurrency = settlementCurrency.trim().toUpperCase();
+    if (!reviewedCurrency) return false;
+    if (!currentCurrency || currentCurrency === reviewedCurrency) return true;
+
+    return (
+      currentCurrency === "AUD" &&
+      reviewedCurrency === "USD" &&
+      !transaction.settlementCurrency?.trim() &&
+      !settlementCurrencyEdited &&
+      !values.settledAt.trim()
+    );
+  };
+  const applyReviewedSettlement = (settlement: ReviewedSettlementValues) => {
+    if (!canApplyReviewedSettlement(settlement)) return false;
+
+    if (
+      form.state.values.settlementCurrency.trim().toUpperCase() !==
+      settlement.settlementCurrency.trim().toUpperCase()
+    )
+      form.setFieldValue("settlementCurrency", settlement.settlementCurrency);
+    form.setFieldValue("settlementAmount", settlement.settlementAmount);
+    setSettlementCurrencyEdited(true);
+    if (paymentDetailsRef.current) paymentDetailsRef.current.open = true;
+    return true;
+  };
   const clearAutoSuggestedDocumentTaxAmount = (
     currentValue = form.state.values.documentTaxAmount,
   ) => {
@@ -580,7 +677,8 @@ export const ManualTransactionForm = ({
 
   const applyPdfSuggestionsToBlankFields = (
     suggestions: PdfFilenameSuggestions,
-    allowedFields: readonly ("counterparty" | "invoiceDate" | "reference")[],
+    allowedFields: readonly (keyof PdfTransactionFieldValues)[],
+    updateOccurrenceDate = true,
   ) => {
     const result = applyPdfFilenameSuggestions(
       {
@@ -593,7 +691,11 @@ export const ManualTransactionForm = ({
     const filled = result.filled.filter((name) => allowedFields.includes(name));
     for (const name of filled) {
       form.setFieldValue(name, result.values[name]);
-      if (name === "invoiceDate" && !occurredAtEdited.current)
+      if (
+        updateOccurrenceDate &&
+        name === "invoiceDate" &&
+        !occurredAtEdited.current
+      )
         form.setFieldValue("occurredAt", result.values.invoiceDate);
     }
     const labels = filled.map((name) =>
@@ -608,13 +710,7 @@ export const ManualTransactionForm = ({
       : "No blank fields were available to fill.";
   };
 
-  const applyFilenameSuggestions = () => {
-    if (!filenameSuggestions) return;
-    const feedback = applyPdfSuggestionsToBlankFields(filenameSuggestions, [
-      "counterparty",
-      "invoiceDate",
-      "reference",
-    ]);
+  const showFilenameSuggestionFeedback = (feedback: string) => {
     setFilenameSuggestionFeedback(
       feedback === "No blank fields were available to fill."
         ? "No blank supplier, invoice date, or reference fields were available to fill."
@@ -622,20 +718,69 @@ export const ManualTransactionForm = ({
     );
   };
 
+  const applyFilenameSuggestions = () => {
+    if (!filenameSuggestions) return;
+    const feedback = applyPdfSuggestionsToBlankFields(filenameSuggestions, [
+      "counterparty",
+      "invoiceDate",
+      "reference",
+    ]);
+    showFilenameSuggestionFeedback(feedback);
+  };
+
+  useEffect(() => {
+    if (
+      !pdfFilenameSuggestionRequest ||
+      lastConsumedFilenameSuggestionRequest.current ===
+        pdfFilenameSuggestionRequest.id
+    )
+      return;
+
+    lastConsumedFilenameSuggestionRequest.current =
+      pdfFilenameSuggestionRequest.id;
+    const feedback = applyPdfSuggestionsToBlankFields(
+      pdfFilenameSuggestionRequest.suggestions,
+      [pdfFilenameSuggestionRequest.field],
+      false,
+    );
+    const fieldLabel =
+      pdfFilenameSuggestionRequest.field === "counterparty"
+        ? "Supplier"
+        : pdfFilenameSuggestionRequest.field === "invoiceDate"
+          ? "Invoice date"
+          : "Reference";
+    showFilenameSuggestionFeedback(
+      feedback === "No blank fields were available to fill."
+        ? `${fieldLabel} already has a value; no changes were made.`
+        : feedback,
+    );
+  }, [applyPdfSuggestionsToBlankFields, pdfFilenameSuggestionRequest]);
+
   const applyExistingFilenameSuggestion = (
     artifactId: string,
     field: "counterparty" | "invoiceDate" | "reference",
     value: string,
     label: string,
   ) => {
+    const previousValue = form.state.values[field].trim();
+    const isReplacing = previousValue && previousValue !== value.trim();
     form.setFieldValue(field, value);
     if (field === "invoiceDate" && !occurredAtEdited.current)
       form.setFieldValue("occurredAt", value);
     setExistingFilenameSuggestionFeedback((current) => ({
       ...current,
-      [artifactId]: `Applied ${label} from selected PDF.`,
+      [artifactId]: `${isReplacing ? "Replaced" : "Applied"} ${label} from selected PDF.`,
     }));
   };
+
+  const existingFilenameSuggestionAction = (
+    field: "counterparty" | "invoiceDate" | "reference",
+    value: string,
+  ) =>
+    form.state.values[field].trim() &&
+    form.state.values[field].trim() !== value.trim()
+      ? "Replace"
+      : "Apply";
 
   const applyPaymentValues = () => {
     const suggestions = getPaymentValueSuggestions(form.state.values);
@@ -798,12 +943,17 @@ export const ManualTransactionForm = ({
         const submittedAction = manualTransactionActionSchema.safeParse(
           submitter?.value,
         );
+        const afterSave =
+          submitter?.dataset.afterSave === "match_next"
+            ? "match_next"
+            : undefined;
         clearServerFieldIssues();
         setServerFormError(null);
         void form.handleSubmit({
           action: submittedAction.success
             ? submittedAction.data
             : defaultAction,
+          ...(afterSave ? { afterSave } : {}),
         });
       }}
     >
@@ -1266,30 +1416,50 @@ export const ManualTransactionForm = ({
       >
         {(field) => (
           <div className="wide evidence-panel">
-            <label htmlFor={fieldIds.artifact}>PDF evidence</label>
-            <input
-              id={fieldIds.artifact}
-              ref={fileInputRef}
-              type="file"
-              accept="application/pdf,.pdf"
-              aria-invalid={Boolean(firstError(field.state.meta.errors))}
-              aria-describedby={
-                firstError(field.state.meta.errors)
-                  ? `${fieldIds.artifact}-error`
-                  : undefined
-              }
-              onBlur={field.handleBlur}
-              onChange={(event) => {
-                const next = event.currentTarget.files?.[0] ?? null;
-                setFile(next);
-                setFilenameSuggestions(
-                  next ? parsePdfFilename(next.name) : null,
-                );
-                setFilenameSuggestionFeedback("");
-                field.handleChange(next?.name ?? "");
-                onEvidenceChange(next);
-              }}
-            />
+            {hideFileUpload || fileUploadHref ? (
+              <p>PDF evidence</p>
+            ) : (
+              <label htmlFor={fieldIds.artifact}>PDF evidence</label>
+            )}
+            {hideFileUpload ? (
+              <p className="existing-evidence-help">
+                Upload, preview and approve invoice PDFs in the adjacent
+                evidence panel. Only approved PDFs can be linked when you save
+                and match.
+              </p>
+            ) : fileUploadHref ? (
+              <p>
+                <a href={fileUploadHref} target="_blank" rel="noreferrer">
+                  Upload an invoice PDF
+                </a>
+                , review it, then reload this form to select it from the file
+                library. Save any changes before reloading.
+              </p>
+            ) : (
+              <input
+                id={fieldIds.artifact}
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf,.pdf"
+                aria-invalid={Boolean(firstError(field.state.meta.errors))}
+                aria-describedby={
+                  firstError(field.state.meta.errors)
+                    ? `${fieldIds.artifact}-error`
+                    : undefined
+                }
+                onBlur={field.handleBlur}
+                onChange={(event) => {
+                  const next = event.currentTarget.files?.[0] ?? null;
+                  setFile(next);
+                  setFilenameSuggestions(
+                    next ? parsePdfFilename(next.name) : null,
+                  );
+                  setFilenameSuggestionFeedback("");
+                  field.handleChange(next?.name ?? "");
+                  onEvidenceChange(next);
+                }}
+              />
+            )}
             {file && (
               <Button type="button" onPress={clearSelectedFile}>
                 Clear selected PDF
@@ -1308,12 +1478,16 @@ export const ManualTransactionForm = ({
                 <Button type="button" onPress={applyFilenameSuggestions}>
                   Apply filename suggestions
                 </Button>
-                {filenameSuggestionFeedback && (
-                  <p role="status" aria-live="polite">
-                    {filenameSuggestionFeedback}
-                  </p>
-                )}
               </div>
+            )}
+            {filenameSuggestionFeedback && (
+              <p
+                className="existing-evidence-help"
+                role="status"
+                aria-live="polite"
+              >
+                {filenameSuggestionFeedback}
+              </p>
             )}
             <fieldset
               className="existing-evidence"
@@ -1326,10 +1500,10 @@ export const ManualTransactionForm = ({
               <legend>Available invoice PDFs</legend>
               {availableArtifacts.length === 0 ? (
                 <p className="existing-evidence-empty">
-                  No available invoice PDFs yet. Upload a PDF from Transactions
-                  to use it here. An available PDF can be linked to more than
-                  one transaction; bank CSV files remain payment provenance, not
-                  invoice evidence.
+                  No available invoice PDFs yet. Upload and approve a PDF in
+                  Files to use it here. An available PDF can be linked to more
+                  than one transaction; bank CSV files remain payment
+                  provenance, not invoice evidence.
                 </p>
               ) : (
                 <>
@@ -1374,14 +1548,20 @@ export const ManualTransactionForm = ({
                               }
                               disabled={suggestedEvidence?.id === artifact.id}
                               onChange={(event) => {
-                                setSelectedArtifactIds((current) =>
-                                  event.currentTarget.checked
-                                    ? [...new Set([...current, artifact.id])]
-                                    : current.filter(
-                                        (id) => id !== artifact.id,
-                                      ),
-                                );
-                                if (!event.currentTarget.checked)
+                                const selected = event.currentTarget.checked;
+                                const next = selected
+                                  ? [
+                                      ...new Set([
+                                        ...selectedArtifactIds,
+                                        artifact.id,
+                                      ]),
+                                    ]
+                                  : selectedArtifactIds.filter(
+                                      (id) => id !== artifact.id,
+                                    );
+                                setSelectedArtifactIds(next);
+                                onSelectedArtifactsChange?.(next);
+                                if (!selected)
                                   setExistingFilenameSuggestionFeedback(
                                     (current) => {
                                       const next = { ...current };
@@ -1412,10 +1592,21 @@ export const ManualTransactionForm = ({
                       (suggestedEvidence?.id === artifactId
                         ? suggestedEvidence
                         : null);
-                    const suggestions = artifact?.filename
-                      ? parsePdfFilename(artifact.filename)
+                    if (!artifact) return null;
+                    const suggestionFilename =
+                      artifact.originalFilename ?? artifact.filename;
+                    const filenameSuggestions = suggestionFilename
+                      ? parsePdfFilename(suggestionFilename)
                       : null;
-                    if (!artifact || !suggestions) return null;
+                    const savedSupplier = artifact.supplier?.trim();
+                    const suggestedSupplier =
+                      savedSupplier || filenameSuggestions?.supplier;
+                    if (
+                      !suggestedSupplier &&
+                      !filenameSuggestions?.invoiceDate &&
+                      !filenameSuggestions?.reference
+                    )
+                      return null;
                     const sourceIndex =
                       availableArtifacts.findIndex(
                         (available) => available.id === artifact.id,
@@ -1425,10 +1616,14 @@ export const ManualTransactionForm = ({
                       !selectedArtifactIds.includes(artifactId)
                         ? `Proposed PDF: ${artifact.filename}`
                         : `PDF ${sourceIndex}: ${artifact.filename}`;
-                    const supplier = existingPdfSupplierName(
-                      suggestions.supplier,
-                      counterparties,
-                    );
+                    const supplier = savedSupplier
+                      ? savedSupplier
+                      : filenameSuggestions?.supplier
+                        ? existingPdfSupplierName(
+                            filenameSuggestions.supplier,
+                            counterparties,
+                          )
+                        : null;
 
                     return (
                       <div
@@ -1439,45 +1634,61 @@ export const ManualTransactionForm = ({
                       >
                         <p className="existing-pdf-filename-source">{source}</p>
                         <div className="existing-pdf-filename-actions">
-                          <Button
-                            type="button"
-                            onPress={() =>
-                              applyExistingFilenameSuggestion(
-                                artifact.id,
+                          {supplier && (
+                            <Button
+                              type="button"
+                              onPress={() =>
+                                applyExistingFilenameSuggestion(
+                                  artifact.id,
+                                  "counterparty",
+                                  supplier,
+                                  "supplier",
+                                )
+                              }
+                            >
+                              {existingFilenameSuggestionAction(
                                 "counterparty",
                                 supplier,
-                                "supplier",
-                              )
-                            }
-                          >
-                            Apply supplier {supplier}
-                          </Button>
-                          <Button
-                            type="button"
-                            onPress={() =>
-                              applyExistingFilenameSuggestion(
-                                artifact.id,
+                              )}{" "}
+                              supplier {supplier}
+                            </Button>
+                          )}
+                          {filenameSuggestions?.invoiceDate && (
+                            <Button
+                              type="button"
+                              onPress={() =>
+                                applyExistingFilenameSuggestion(
+                                  artifact.id,
+                                  "invoiceDate",
+                                  filenameSuggestions.invoiceDate,
+                                  "invoice date",
+                                )
+                              }
+                            >
+                              {existingFilenameSuggestionAction(
                                 "invoiceDate",
-                                suggestions.invoiceDate,
-                                "invoice date",
-                              )
-                            }
-                          >
-                            Apply date {suggestions.invoiceDate}
-                          </Button>
-                          {suggestions.reference && (
+                                filenameSuggestions.invoiceDate,
+                              )}{" "}
+                              date {filenameSuggestions.invoiceDate}
+                            </Button>
+                          )}
+                          {filenameSuggestions?.reference && (
                             <Button
                               type="button"
                               onPress={() =>
                                 applyExistingFilenameSuggestion(
                                   artifact.id,
                                   "reference",
-                                  suggestions.reference!,
+                                  filenameSuggestions.reference!,
                                   "reference",
                                 )
                               }
                             >
-                              Apply reference {suggestions.reference}
+                              {existingFilenameSuggestionAction(
+                                "reference",
+                                filenameSuggestions.reference,
+                              )}{" "}
+                              reference {filenameSuggestions.reference}
                             </Button>
                           )}
                         </div>
@@ -1507,6 +1718,9 @@ export const ManualTransactionForm = ({
                 state.values.reference,
                 state.values.documentAmount,
                 state.values.documentCurrency,
+                state.values.settledAt,
+                state.values.settlementAmount,
+                state.values.settlementCurrency,
               ]}
             >
               {() => (
@@ -1517,16 +1731,26 @@ export const ManualTransactionForm = ({
                       ...selectedArtifactIds,
                       ...(suggestedEvidence ? [suggestedEvidence.id] : []),
                     ]),
-                  ].map((id) => ({
-                    id,
-                    filename:
-                      availableArtifacts.find((artifact) => artifact.id === id)
-                        ?.filename ??
-                      (suggestedEvidence?.id === id
-                        ? suggestedEvidence.filename
-                        : undefined),
-                  }))}
+                  ].map((id) => {
+                    const artifact = availableArtifacts.find(
+                      (candidate) => candidate.id === id,
+                    );
+                    return {
+                      id,
+                      filename:
+                        artifact?.filename ??
+                        (suggestedEvidence?.id === id
+                          ? suggestedEvidence.filename
+                          : undefined),
+                      originalFilename:
+                        artifact?.originalFilename ??
+                        (suggestedEvidence?.id === id
+                          ? suggestedEvidence.originalFilename
+                          : undefined),
+                    };
+                  })}
                   busy={busy}
+                  observation={invoiceObservation}
                   prepareFile={
                     onPrepareInvoiceForExtraction
                       ? (selectedFile) =>
@@ -1543,6 +1767,8 @@ export const ManualTransactionForm = ({
                     documentAmount: form.state.values.documentAmount,
                     documentCurrency: form.state.values.documentCurrency,
                   })}
+                  canApplySettlement={canApplyReviewedSettlement}
+                  onApplySettlement={applyReviewedSettlement}
                   onApply={(changes) => {
                     for (const name of Object.keys(changes) as Array<
                       keyof InvoiceEditableFields
@@ -1563,6 +1789,7 @@ export const ManualTransactionForm = ({
 
       <details
         className={`wide form-details${bankSettlementPrefilled || (documentCurrency && documentCurrency !== "AUD") ? "settlement-prominent" : ""}`}
+        ref={paymentDetailsRef}
         open={
           bankSettlementPrefilled ||
           (documentCurrency !== "" && documentCurrency !== "AUD")
@@ -1624,7 +1851,10 @@ export const ManualTransactionForm = ({
                 options={currencySuggestions}
                 className="field-settlement-currency"
                 error={firstError(field.state.meta.errors)}
-                onChange={field.handleChange}
+                onChange={(value) => {
+                  setSettlementCurrencyEdited(true);
+                  field.handleChange(value);
+                }}
                 onBlur={field.handleBlur}
               />
             )}
@@ -2044,6 +2274,17 @@ export const ManualTransactionForm = ({
             >
               {recordButtonLabel ?? "Save as recorded"}
             </button>
+            {allowSaveMatchNext && transaction.status === "draft" && (
+              <button
+                type="submit"
+                name="action"
+                value="save_recorded"
+                data-after-save="match_next"
+                disabled={saveDisabled}
+              >
+                Save, match, and next
+              </button>
+            )}
           </>
         )}
         {onCancel && (

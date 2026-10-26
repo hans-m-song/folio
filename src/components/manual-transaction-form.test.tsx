@@ -13,12 +13,19 @@ import { renderToString } from "react-dom/server";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { parseSupplierInvoice } from "../domain/invoice-parser";
+import { normalizedInvoiceDocumentVersion } from "../domain/invoice-types";
 import { transactionInputSchema } from "../domain/types";
 import { selectAutocompleteOption } from "./autocomplete-test-helpers";
 import {
   ManualTransactionForm,
   type ManualArtifactOption,
 } from "./manual-transaction-form";
+
+const invoiceOperation = vi.hoisted(() => vi.fn());
+vi.mock("../server/invoice-operations", () => ({
+  extractInvoiceFields: invoiceOperation,
+}));
 
 Object.defineProperty(globalThis, "CSS", {
   configurable: true,
@@ -30,6 +37,39 @@ const transaction = transactionInputSchema.parse({
   kind: "supplier_expense",
   documentCurrency: "AUD",
   gstCreditStatus: "not_registered",
+});
+
+const invoiceArtifact = {
+  id: "22222222-2222-4222-8222-222222222222",
+  filename: "reviewed-invoice.pdf",
+};
+const invoiceResponse = (lines: string[]) => ({
+  status: "parsed" as const,
+  artifactId: invoiceArtifact.id,
+  checksumSha256: "synthetic-checksum",
+  confirmedAt: "2026-10-07T00:00:00.000Z",
+  duplicateHints: {
+    linkedTransactions: 0,
+    matchingReferenceTransactions: 0,
+    matchingChecksumArtifacts: 0,
+  },
+  result: parseSupplierInvoice({
+    schemaVersion: normalizedInvoiceDocumentVersion,
+    pages: [
+      {
+        pageNumber: 1,
+        width: 612,
+        height: 792,
+        items: lines.map((text, index) => ({
+          text,
+          x: 40,
+          y: 40 + index * 20,
+          width: 300,
+          height: 12,
+        })),
+      },
+    ],
+  }),
 });
 
 const formElement = (
@@ -44,6 +84,12 @@ const formElement = (
     attachedArtifactId?: string | null;
     attachedArtifactIds?: readonly string[];
     availableArtifacts?: readonly ManualArtifactOption[];
+    onSelectedArtifactsChange?: ComponentProps<
+      typeof ManualTransactionForm
+    >["onSelectedArtifactsChange"];
+    onDirtyChange?: ComponentProps<
+      typeof ManualTransactionForm
+    >["onDirtyChange"];
     suggestedEvidence?: ManualArtifactOption;
     supplierCategories?: ComponentProps<
       typeof ManualTransactionForm
@@ -58,6 +104,15 @@ const formElement = (
     submissionStatus?: string;
     submissionError?: string;
     recordButtonLabel?: string;
+    allowSaveMatchNext?: ComponentProps<
+      typeof ManualTransactionForm
+    >["allowSaveMatchNext"];
+    busy?: boolean;
+    hideFileUpload?: boolean;
+    fileUploadHref?: string;
+    pdfFilenameSuggestionRequest?: ComponentProps<
+      typeof ManualTransactionForm
+    >["pdfFilenameSuggestionRequest"];
   } = {},
 ) => (
   <ManualTransactionForm
@@ -77,6 +132,8 @@ const formElement = (
     attachedArtifactId={options.attachedArtifactId ?? null}
     attachedArtifactIds={options.attachedArtifactIds}
     availableArtifacts={options.availableArtifacts}
+    onSelectedArtifactsChange={options.onSelectedArtifactsChange}
+    onDirtyChange={options.onDirtyChange}
     suggestedEvidence={options.suggestedEvidence}
     supplierCategories={options.supplierCategories}
     allowedKinds={options.allowedKinds}
@@ -87,8 +144,12 @@ const formElement = (
     submissionStatus={options.submissionStatus}
     submissionError={options.submissionError}
     recordButtonLabel={options.recordButtonLabel}
+    allowSaveMatchNext={options.allowSaveMatchNext}
+    hideFileUpload={options.hideFileUpload}
+    fileUploadHref={options.fileUploadHref}
+    pdfFilenameSuggestionRequest={options.pdfFilenameSuggestionRequest}
     evidenceStatus={<p>No PDF selected.</p>}
-    busy={false}
+    busy={options.busy ?? false}
     onEvidenceChange={vi.fn()}
     onSubmit={onSubmit}
     serverIssues={serverIssues}
@@ -104,15 +165,586 @@ const renderForm = (
   options: Parameters<typeof formElement>[3] = {},
 ) => render(formElement(onSubmit, initial, serverIssues, options));
 
-const submitWith = (button: HTMLButtonElement) => {
+const submitWith = (button: HTMLElement) => {
   const form = button.closest("form");
   if (!form) throw new Error("Submit control is not inside a form");
   fireEvent.click(button);
 };
 
+const enterReviewedMoney = async (
+  view: ReturnType<typeof render>,
+  amount: string,
+  currency: string,
+) => {
+  const total = view.getByLabelText("Invoice total");
+  fireEvent.change(total, { target: { value: amount } });
+  await selectAutocompleteOption(
+    screen.getByRole("combobox", { name: "Currency" }),
+    currency,
+  );
+};
+
 afterEach(cleanup);
 
 describe("managed manual transaction form", () => {
+  it.each([
+    ["counterparty", "#transaction-counterparty", "Acme Supplies", "supplier"],
+    ["invoiceDate", "#transaction-invoice-date", "2026-09-20", "invoice date"],
+    ["reference", "#transaction-reference", "INV-77", "reference"],
+  ] as const)(
+    "applies only the requested %s filename field and preserves other blanks and bank settlement",
+    async (field, selector, expectedValue, fieldLabel) => {
+      const onSubmit = vi.fn();
+      const initial = transactionInputSchema.parse({
+        ...transaction,
+        counterparty: null,
+        invoiceDate: null,
+        reference: null,
+        occurredAt: null,
+        settledAt: "2026-09-24T00:00:00.000Z",
+        settlementCurrency: "AUD",
+        settlementAmount: "35.1200",
+      });
+      const suggestions = {
+        supplier: "Acme Supplies",
+        invoiceDate: "2026-09-20",
+        reference: "INV-77",
+      };
+      const request = { id: 1, suggestions, field };
+      const view = renderForm(onSubmit, initial, [], {
+        bankSettlementPrefilled: true,
+        hideFileUpload: true,
+        pdfFilenameSuggestionRequest: request,
+      });
+      const supplier = view.container.querySelector<HTMLInputElement>(
+        "#transaction-counterparty",
+      );
+      const invoiceDate = view.container.querySelector<HTMLInputElement>(
+        "#transaction-invoice-date",
+      );
+      const reference = view.container.querySelector<HTMLInputElement>(
+        "#transaction-reference",
+      );
+      const activityDate = view.container.querySelector<HTMLInputElement>(
+        "#transaction-occurred-at",
+      );
+      const target = view.container.querySelector<HTMLInputElement>(selector);
+      if (!supplier || !invoiceDate || !reference || !activityDate || !target)
+        throw new Error("Expected filename suggestion fields to be rendered");
+
+      await waitFor(() => {
+        expect(target.value).toBe(expectedValue);
+        expect(
+          view.container.querySelector('.evidence-panel [role="status"]')
+            ?.textContent,
+        ).toBe(`Applied filename suggestions to ${fieldLabel}.`);
+      });
+      expect(supplier.value).toBe(
+        field === "counterparty" ? "Acme Supplies" : "",
+      );
+      expect(invoiceDate.value).toBe(
+        field === "invoiceDate" ? "2026-09-20" : "",
+      );
+      expect(reference.value).toBe(field === "reference" ? "INV-77" : "");
+      expect(activityDate.value).toBe("");
+      expect(
+        view.container.querySelector<HTMLInputElement>(
+          "#transaction-settled-at",
+        )?.value,
+      ).toBe("2026-09-24");
+      expect(
+        view.container.querySelector<HTMLInputElement>(
+          "#transaction-settlement-currency",
+        )?.value,
+      ).toBe("AUD");
+      expect(
+        view.container.querySelector<HTMLInputElement>(
+          "#transaction-settlement-amount",
+        )?.value,
+      ).toBe("35.1200");
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      fireEvent.change(target, { target: { value: "" } });
+      view.rerender(
+        formElement(onSubmit, initial, [], {
+          bankSettlementPrefilled: true,
+          hideFileUpload: true,
+          pdfFilenameSuggestionRequest: request,
+        }),
+      );
+      expect(target.value).toBe("");
+    },
+  );
+
+  it("preserves entered transaction fields when applying a different filename field", async () => {
+    const onSubmit = vi.fn();
+    const initial = transactionInputSchema.parse({
+      ...transaction,
+      counterparty: "Typed supplier",
+      invoiceDate: null,
+      reference: "USER-REF",
+      occurredAt: "2026-09-25T00:00:00.000Z",
+      settledAt: "2026-09-24T00:00:00.000Z",
+      settlementCurrency: "AUD",
+      settlementAmount: "35.1200",
+    });
+    const view = renderForm(onSubmit, initial, [], {
+      bankSettlementPrefilled: true,
+      hideFileUpload: true,
+      pdfFilenameSuggestionRequest: {
+        id: 1,
+        field: "invoiceDate",
+        suggestions: {
+          supplier: "Acme Supplies",
+          invoiceDate: "2026-09-20",
+          reference: "INV-77",
+        },
+      },
+    });
+    await waitFor(() =>
+      expect(
+        view.container.querySelector<HTMLInputElement>(
+          "#transaction-invoice-date",
+        )?.value,
+      ).toBe("2026-09-20"),
+    );
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-counterparty",
+      )?.value,
+    ).toBe("Typed supplier");
+    expect(
+      view.container.querySelector<HTMLInputElement>("#transaction-reference")
+        ?.value,
+    ).toBe("USER-REF");
+    expect(
+      view.container.querySelector<HTMLInputElement>("#transaction-occurred-at")
+        ?.value,
+    ).toBe("2026-09-25");
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("explains when the selected target is filled even though other suggestion fields are blank", async () => {
+    const onSubmit = vi.fn();
+    const initial = transactionInputSchema.parse({
+      ...transaction,
+      counterparty: "Existing supplier",
+      invoiceDate: null,
+      reference: null,
+      occurredAt: null,
+    });
+    const view = renderForm(onSubmit, initial, [], {
+      hideFileUpload: true,
+      pdfFilenameSuggestionRequest: {
+        id: 1,
+        field: "counterparty",
+        suggestions: {
+          supplier: "Filename supplier",
+          invoiceDate: "2026-09-20",
+          reference: "INV-77",
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(
+        view.container.querySelector('.evidence-panel [role="status"]')
+          ?.textContent,
+      ).toBe("Supplier already has a value; no changes were made."),
+    );
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-counterparty",
+      )?.value,
+    ).toBe("Existing supplier");
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-invoice-date",
+      )?.value,
+    ).toBe("");
+    expect(
+      view.container.querySelector<HTMLInputElement>("#transaction-reference")
+        ?.value,
+    ).toBe("");
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("preselects the approved file passed from file details", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const onSubmit = vi.fn();
+    render(
+      formElement(onSubmit, transaction, [], {
+        attachedArtifactId: id,
+        attachedArtifactIds: [id],
+        availableArtifacts: [{ id, filename: "Chosen invoice.pdf" }],
+      }),
+    );
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: /Chosen invoice.pdf/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(["AUD", "USD"] as const)(
+    "uses an explicitly reviewed %s payment amount as settlement without changing invoice values or date",
+    async (currency) => {
+      const user = userEvent.setup();
+      const onSubmit = vi.fn();
+      invoiceOperation.mockReset();
+      invoiceOperation.mockResolvedValue(
+        invoiceResponse([
+          "Supabase Invoice",
+          "Subtotal $35.12",
+          "Amount paid $35.12",
+        ]),
+      );
+      const view = renderForm(onSubmit, transaction, [], {
+        availableArtifacts: [invoiceArtifact],
+      });
+
+      await user.click(
+        screen.getByRole("checkbox", { name: invoiceArtifact.filename }),
+      );
+      await user.click(
+        screen.getByRole("button", { name: "Extract invoice fields" }),
+      );
+      await screen.findByRole("button", {
+        name: "Use reviewed invoice total and currency",
+      });
+      await enterReviewedMoney(view, "35.12", currency);
+      const settlementAction = screen.getByRole("button", {
+        name: "Use reviewed amount as settlement",
+      });
+      expect((settlementAction as HTMLButtonElement).disabled).toBe(true);
+
+      await user.click(
+        screen.getByRole("checkbox", {
+          name: "I checked the invoice total and currency against the source PDF.",
+        }),
+      );
+      expect((settlementAction as HTMLButtonElement).disabled).toBe(false);
+      await user.click(settlementAction);
+
+      expect(
+        view.container.querySelector<HTMLInputElement>(
+          "#transaction-settlement-amount",
+        )?.value,
+      ).toBe("35.12");
+      expect(
+        view.container.querySelector<HTMLInputElement>(
+          "#transaction-settlement-currency",
+        )?.value,
+      ).toBe(currency);
+      const paymentDate = view.container.querySelector<HTMLInputElement>(
+        "#transaction-settled-at",
+      );
+      expect(paymentDate?.value).toBe("");
+      expect(paymentDate?.closest("details")?.open).toBe(true);
+      expect(
+        view.container.querySelector<HTMLInputElement>(
+          "#transaction-document-amount",
+        )?.value,
+      ).toBe("");
+      expect(
+        view.container.querySelector<HTMLInputElement>(
+          "#transaction-document-currency",
+        )?.value,
+      ).toBe("AUD");
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
+
+  it("fills a blank settlement amount while preserving a matching existing payment date", async () => {
+    const user = userEvent.setup();
+    const initial = transactionInputSchema.parse({
+      ...transaction,
+      settledAt: "2026-02-27T00:00:00.000Z",
+      settlementCurrency: "USD",
+    });
+    invoiceOperation.mockReset();
+    invoiceOperation.mockResolvedValue(
+      invoiceResponse([
+        "Supabase Invoice",
+        "Subtotal $12.00",
+        "Amount paid $12.00",
+      ]),
+    );
+    const view = renderForm(vi.fn(), initial, [], {
+      availableArtifacts: [invoiceArtifact],
+    });
+
+    await user.click(
+      screen.getByRole("checkbox", { name: invoiceArtifact.filename }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Extract invoice fields" }),
+    );
+    await screen.findByRole("button", {
+      name: "Use reviewed invoice total and currency",
+    });
+    await enterReviewedMoney(view, "12.00", "USD");
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "I checked the invoice total and currency against the source PDF.",
+      }),
+    );
+
+    const settlementAction = screen.getByRole("button", {
+      name: "Use reviewed amount as settlement",
+    });
+    expect((settlementAction as HTMLButtonElement).disabled).toBe(false);
+    await user.click(settlementAction);
+
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-settlement-amount",
+      )?.value,
+    ).toBe("12.00");
+    expect(
+      view.container.querySelector<HTMLInputElement>("#transaction-settled-at")
+        ?.value,
+    ).toBe("2026-02-27");
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-settlement-currency",
+      )?.value,
+    ).toBe("USD");
+  });
+
+  it("keeps an already-entered settlement amount protected", async () => {
+    const user = userEvent.setup();
+    const initial = transactionInputSchema.parse({
+      ...transaction,
+      settlementCurrency: "AUD",
+      settlementAmount: "58.4400",
+    });
+    invoiceOperation.mockReset();
+    invoiceOperation.mockResolvedValue(
+      invoiceResponse([
+        "Supabase Invoice",
+        "Subtotal $12.00",
+        "Amount paid $12.00",
+      ]),
+    );
+    const view = renderForm(vi.fn(), initial, [], {
+      availableArtifacts: [invoiceArtifact],
+    });
+
+    await user.click(
+      screen.getByRole("checkbox", { name: invoiceArtifact.filename }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Extract invoice fields" }),
+    );
+    await screen.findByRole("button", {
+      name: "Use reviewed invoice total and currency",
+    });
+    await enterReviewedMoney(view, "12.00", "USD");
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "I checked the invoice total and currency against the source PDF.",
+      }),
+    );
+
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Use reviewed amount as settlement",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-settlement-amount",
+      )?.value,
+    ).toBe("58.4400");
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-settlement-currency",
+      )?.value,
+    ).toBe("AUD");
+  });
+
+  it("does not apply reviewed settlement values when bank settlement facts are prefilled", async () => {
+    const user = userEvent.setup();
+    invoiceOperation.mockReset();
+    invoiceOperation.mockResolvedValue(
+      invoiceResponse([
+        "Supabase Invoice",
+        "Subtotal $12.00",
+        "Amount paid $12.00",
+      ]),
+    );
+    const view = renderForm(vi.fn(), transaction, [], {
+      availableArtifacts: [invoiceArtifact],
+      bankSettlementPrefilled: true,
+    });
+
+    await user.click(
+      screen.getByRole("checkbox", { name: invoiceArtifact.filename }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Extract invoice fields" }),
+    );
+    await screen.findByRole("button", {
+      name: "Use reviewed invoice total and currency",
+    });
+    await enterReviewedMoney(view, "12.00", "USD");
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "I checked the invoice total and currency against the source PDF.",
+      }),
+    );
+
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Use reviewed amount as settlement",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-settlement-amount",
+      )?.value,
+    ).toBe("");
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        "#transaction-settlement-currency",
+      )?.value,
+    ).toBe("AUD");
+  });
+
+  it("does not replace the default settlement currency when a payment date is present", async () => {
+    const user = userEvent.setup();
+    const initial = transactionInputSchema.parse({
+      ...transaction,
+      settledAt: "2026-02-27T00:00:00.000Z",
+    });
+    invoiceOperation.mockReset();
+    invoiceOperation.mockResolvedValue(
+      invoiceResponse([
+        "Supabase Invoice",
+        "Subtotal $12.00",
+        "Amount paid $12.00",
+      ]),
+    );
+    const view = renderForm(vi.fn(), initial, [], {
+      availableArtifacts: [invoiceArtifact],
+    });
+
+    await user.click(
+      screen.getByRole("checkbox", { name: invoiceArtifact.filename }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Extract invoice fields" }),
+    );
+    await screen.findByRole("button", {
+      name: "Use reviewed invoice total and currency",
+    });
+    await enterReviewedMoney(view, "12.00", "USD");
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "I checked the invoice total and currency against the source PDF.",
+      }),
+    );
+
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Use reviewed amount as settlement",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+
+  it("reports selected library artifact IDs and clears them when deselected", async () => {
+    const user = userEvent.setup();
+    const artifactId = "00000000-0000-4000-8000-000000000002";
+    const onSelectedArtifactsChange = vi.fn();
+    renderForm(vi.fn(), transaction, [], {
+      availableArtifacts: [{ id: artifactId, filename: "Invoice.pdf" }],
+      onSelectedArtifactsChange,
+    });
+
+    await user.click(screen.getByRole("checkbox", { name: "Invoice.pdf" }));
+    expect(onSelectedArtifactsChange).toHaveBeenLastCalledWith([artifactId]);
+
+    await user.click(screen.getByRole("checkbox", { name: "Invoice.pdf" }));
+    expect(onSelectedArtifactsChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it("reports dirty TanStack form values", async () => {
+    const onDirtyChange = vi.fn();
+    renderForm(vi.fn(), transaction, [], { onDirtyChange });
+
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+    fireEvent.change(screen.getByLabelText("Invoice / reference"), {
+      target: { value: "INV-42" },
+    });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+    fireEvent.change(screen.getByLabelText("Invoice / reference"), {
+      target: { value: "" },
+    });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it("reports selected files and library evidence changes", async () => {
+    const onFileDirtyChange = vi.fn();
+    const fileView = renderForm(vi.fn(), transaction, [], {
+      onDirtyChange: onFileDirtyChange,
+    });
+    await waitFor(() =>
+      expect(onFileDirtyChange).toHaveBeenLastCalledWith(false),
+    );
+    const evidenceInput = screen.getByLabelText("PDF evidence");
+    fireEvent.change(evidenceInput, {
+      target: {
+        files: [
+          new File(["invoice"], "invoice.pdf", { type: "application/pdf" }),
+        ],
+      },
+    });
+    await waitFor(() =>
+      expect(onFileDirtyChange).toHaveBeenLastCalledWith(true),
+    );
+    fireEvent.change(evidenceInput, { target: { files: [] } });
+    await waitFor(() =>
+      expect(onFileDirtyChange).toHaveBeenLastCalledWith(false),
+    );
+    fileView.unmount();
+
+    const existingArtifactId = "00000000-0000-4000-8000-000000000003";
+    const selectedArtifactId = "00000000-0000-4000-8000-000000000004";
+    const onArtifactDirtyChange = vi.fn();
+    renderForm(vi.fn(), transaction, [], {
+      attachedArtifactIds: [existingArtifactId],
+      availableArtifacts: [
+        { id: existingArtifactId, filename: "Existing.pdf" },
+        { id: selectedArtifactId, filename: "Selected.pdf" },
+      ],
+      onDirtyChange: onArtifactDirtyChange,
+    });
+    await waitFor(() =>
+      expect(onArtifactDirtyChange).toHaveBeenLastCalledWith(false),
+    );
+    const selectedArtifact = screen.getByRole("checkbox", {
+      name: "Selected.pdf",
+    });
+    fireEvent.click(selectedArtifact);
+    await waitFor(() =>
+      expect(onArtifactDirtyChange).toHaveBeenLastCalledWith(true),
+    );
+    fireEvent.click(selectedArtifact);
+    await waitFor(() =>
+      expect(onArtifactDirtyChange).toHaveBeenLastCalledWith(false),
+    );
+  });
+
   it("uses the existing explicit recorded-submit label without changing ordinary save labels", () => {
     const recorded = { ...transaction, status: "recorded" as const };
     const view = renderForm(vi.fn(), recorded, [], {
@@ -223,6 +855,27 @@ describe("managed manual transaction form", () => {
     expect(screen.getByText(/No available invoice PDFs yet/)).toBeTruthy();
     expect(
       screen.getByText(/bank CSV files remain payment provenance/),
+    ).toBeTruthy();
+  });
+
+  it("hides standalone upload controls when invoice evidence is handled beside the form", () => {
+    const { container } = renderForm(vi.fn(), transaction, [], {
+      hideFileUpload: true,
+      fileUploadHref: "/imports/upload?profile=manual_invoice_pdf_v1",
+    });
+
+    expect(
+      screen.queryByRole("link", { name: "Upload an invoice PDF" }),
+    ).toBeNull();
+    expect(container.querySelector('input[type="file"]')).toBeNull();
+    expect(
+      screen.getByText(
+        /Upload, preview and approve invoice PDFs in the adjacent evidence panel/,
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Description" })).toBeTruthy();
+    expect(
+      screen.getByRole("group", { name: "Available invoice PDFs" }),
     ).toBeTruthy();
   });
 
@@ -584,7 +1237,11 @@ describe("managed manual transaction form", () => {
     });
     renderForm(vi.fn(), initial, [], {
       availableArtifacts: [
-        { id: firstId, filename: "Acme-Supplies-2026-02-28-INV-104.pdf" },
+        {
+          id: firstId,
+          filename: "Renamed invoice.pdf",
+          originalFilename: "Acme-Supplies-2026-02-28-INV-104.pdf",
+        },
         { id: secondId, filename: "GoogleWorkspace-2026-03-01-REF-7.pdf" },
       ],
     });
@@ -594,7 +1251,7 @@ describe("managed manual transaction form", () => {
     ).toBeNull();
     await user.click(
       screen.getByRole("checkbox", {
-        name: "Acme-Supplies-2026-02-28-INV-104.pdf",
+        name: "Renamed invoice.pdf",
       }),
     );
     await user.click(
@@ -604,32 +1261,30 @@ describe("managed manual transaction form", () => {
     );
 
     const firstGroup = screen.getByRole("group", {
-      name: "Suggestions from PDF 1: Acme-Supplies-2026-02-28-INV-104.pdf",
+      name: "Suggestions from PDF 1: Renamed invoice.pdf",
     });
     const secondGroup = screen.getByRole("group", {
       name: "Suggestions from PDF 2: GoogleWorkspace-2026-03-01-REF-7.pdf",
     });
-    expect(
-      screen.getByText("PDF 1: Acme-Supplies-2026-02-28-INV-104.pdf"),
-    ).toBeTruthy();
+    expect(screen.getByText("PDF 1: Renamed invoice.pdf")).toBeTruthy();
     expect(
       screen.getByText("PDF 2: GoogleWorkspace-2026-03-01-REF-7.pdf"),
     ).toBeTruthy();
     const supplierButton = screen.getByRole("button", {
-      name: "Apply supplier Acme Supplies",
+      name: "Replace supplier Acme Supplies",
     });
     const dateButton = screen.getByRole("button", {
-      name: "Apply date 2026-02-28",
+      name: "Replace date 2026-02-28",
     });
     const referenceButton = screen.getByRole("button", {
-      name: "Apply reference INV-104",
+      name: "Replace reference INV-104",
     });
     expect(supplierButton.closest("[role='group']")).toBe(firstGroup);
     expect(dateButton.closest("[role='group']")).toBe(firstGroup);
     expect(referenceButton.closest("[role='group']")).toBe(firstGroup);
     expect(
       screen
-        .getByRole("button", { name: "Apply supplier Google Workspace" })
+        .getByRole("button", { name: "Replace supplier Google Workspace" })
         .closest("[role='group']"),
     ).toBe(secondGroup);
 
@@ -640,6 +1295,9 @@ describe("managed manual transaction form", () => {
     const reference = screen.getByRole("textbox", {
       name: "Invoice / reference",
     });
+    expect(supplier).toMatchObject({ value: "Saved supplier" });
+    expect(date).toMatchObject({ value: "2026-02-10" });
+    expect(reference).toMatchObject({ value: "Saved reference" });
     await user.clear(supplier);
     await user.type(supplier, "Edited supplier");
     await user.click(supplierButton);
@@ -688,7 +1346,7 @@ describe("managed manual transaction form", () => {
     expect(reference).toMatchObject({ value: "INV-104" });
 
     await user.click(
-      screen.getByRole("button", { name: "Apply supplier Google Workspace" }),
+      screen.getByRole("button", { name: "Replace supplier Google Workspace" }),
     );
     expect(supplier).toMatchObject({ value: "Google Workspace" });
     expect(date).toMatchObject({ value: "2026-02-28" });
@@ -725,6 +1383,57 @@ describe("managed manual transaction form", () => {
     expect(
       screen.getByRole("button", { name: "Apply reference 5581706785" }),
     ).toBeTruthy();
+  });
+
+  it("prefers saved supplier metadata over the filename and applies it only on request", async () => {
+    const user = userEvent.setup();
+    const artifactId = "00000000-0000-4000-8000-000000000005";
+    const initial = transactionInputSchema.parse({
+      ...transaction,
+      counterparty: null,
+      invoiceDate: null,
+      reference: null,
+    });
+    renderForm(vi.fn(), initial, [], {
+      availableArtifacts: [
+        {
+          id: artifactId,
+          filename: "Reviewed invoice.pdf",
+          originalFilename: "FilenameSupplier-2026-03-01-INV-5.pdf",
+          supplier: "ReviewedSupplier",
+        },
+      ],
+    });
+
+    expect(
+      screen.getByRole("combobox", { name: "Supplier / counterparty" }),
+    ).toHaveProperty("value", "");
+    await user.click(
+      screen.getByRole("checkbox", { name: "Reviewed invoice.pdf" }),
+    );
+    expect(
+      screen.getByRole("combobox", { name: "Supplier / counterparty" }),
+    ).toHaveProperty("value", "");
+    expect(
+      screen.getByRole("button", { name: "Apply supplier ReviewedSupplier" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", {
+        name: "Apply supplier Filename Supplier",
+      }),
+    ).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", { name: "Apply supplier ReviewedSupplier" }),
+    );
+
+    expect(
+      screen.getByRole("combobox", { name: "Supplier / counterparty" }),
+    ).toHaveProperty("value", "ReviewedSupplier");
+    expect(screen.getByLabelText("Invoice date")).toHaveProperty("value", "");
+    expect(
+      screen.getByRole("textbox", { name: "Invoice / reference" }),
+    ).toHaveProperty("value", "");
   });
 
   it("labels draft promotion with its approved PDF attachment", () => {
@@ -1262,6 +1971,124 @@ describe("managed manual transaction form", () => {
       name: "action",
       value: "save_recorded",
     });
+    expect(
+      screen.queryByRole("button", { name: "Save, match, and next" }),
+    ).toBeNull();
+  });
+
+  it("submits match-next intent outside the recorded transaction", async () => {
+    const onSubmit = vi.fn();
+    renderForm(onSubmit, transaction, [], { allowSaveMatchNext: true });
+
+    const button = screen.getByRole("button", {
+      name: "Save, match, and next",
+    });
+    expect(button).toMatchObject({
+      type: "submit",
+      name: "action",
+      value: "save_recorded",
+      dataset: { afterSave: "match_next" },
+    });
+    submitWith(button);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const submission = onSubmit.mock.calls[0][0];
+    expect(submission).toMatchObject({
+      action: "save_recorded",
+      afterSave: "match_next",
+      transaction: { status: "recorded" },
+    });
+    expect(submission.transaction).not.toHaveProperty("afterSave");
+  });
+
+  it.each(["void", "recorded"] as const)(
+    "does not offer match-next for a %s transaction",
+    (status) => {
+      renderForm(vi.fn(), { ...transaction, status }, [], {
+        allowSaveMatchNext: true,
+      });
+
+      expect(
+        screen.queryByRole("button", { name: "Save, match, and next" }),
+      ).toBeNull();
+    },
+  );
+
+  it("omits match-next metadata for regular and implicit Enter submissions", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    renderForm(onSubmit, transaction, [], {
+      allowSaveMatchNext: true,
+    });
+
+    submitWith(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("afterSave");
+
+    submitWith(screen.getByRole("button", { name: "Save as recorded" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit.mock.calls[1][0]).not.toHaveProperty("afterSave");
+
+    await user.click(
+      screen.getByRole("textbox", { name: "Invoice / reference" }),
+    );
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(3));
+    expect(onSubmit.mock.calls[2][0]).not.toHaveProperty("afterSave");
+  });
+
+  it.each([
+    ["busy", transaction, { busy: true }],
+    [
+      "invalid bank direction",
+      {
+        ...transaction,
+        kind: "owner_contribution",
+        taxTreatment: "no_tax",
+        gstCreditStatus: "not_claimable",
+      },
+      { bankSettlementPrefilled: true, bankMovementIsPositive: false },
+    ],
+  ] as const)(
+    "disables match-next under the existing %s save guard",
+    (_condition, initial, options) => {
+      renderForm(vi.fn(), initial, [], {
+        ...options,
+        allowSaveMatchNext: true,
+      });
+
+      expect(
+        (
+          screen.getByRole("button", {
+            name: "Save, match, and next",
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(true);
+    },
+  );
+
+  it("keeps evidence validation on match-next submission", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const initial = transactionInputSchema.parse({
+      ...transaction,
+      sourceArtifactId: "00000000-0000-4000-8000-000000000001",
+      gstCreditStatus: "claimable",
+      claimableGstAud: "1.0000",
+    });
+    renderForm(onSubmit, initial, [], {
+      gstRegistered: true,
+      allowSaveMatchNext: true,
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Save, match, and next" }),
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "PDF invoice",
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("shows a linked summary and focuses an over-precision amount", async () => {
