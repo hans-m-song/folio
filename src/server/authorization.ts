@@ -73,6 +73,7 @@ export const operationPermissions = {
   createUser: [permissions.userAdmin],
   updateUser: [permissions.userAdmin],
   startArtifactUpload: [permissions.artifactUpload],
+  updateArtifactMetadata: [permissions.artifactUpload],
   confirmArtifactUpload: [permissions.artifactUpload],
   downloadArtifact: [permissions.artifactDownload],
   extractInvoiceFields: [

@@ -365,13 +365,10 @@ export const ManualTransactionRoute = ({
     const response = await fetch(started.uploadUrl, {
       method: "PUT",
       body: file,
-      headers: {
-        "content-type": "application/pdf",
-        "x-amz-checksum-sha256": checksumSha256,
-        "x-amz-meta-folio-artifact-id": started.artifact.id,
-      },
+      headers: started.uploadHeaders,
     });
-    if (!response.ok) throw new Error(`PDF upload failed (${response.status})`);
+    if (!response.ok && response.status !== 412)
+      throw new Error(`PDF upload failed (${response.status})`);
     setWorkflow({
       stage: "confirming",
       detail: "Confirming PDF evidence…",
@@ -1386,13 +1383,9 @@ export const StripeImportRoute = ({
       const response = await fetch(started.uploadUrl, {
         method: "PUT",
         body: item.file,
-        headers: {
-          "content-type": "text/csv",
-          "x-amz-checksum-sha256": checksumSha256,
-          "x-amz-meta-folio-artifact-id": artifactId,
-        },
+        headers: started.uploadHeaders,
       });
-      if (!response.ok)
+      if (!response.ok && response.status !== 412)
         throw new Error(`Stripe CSV upload failed (${response.status})`);
       updateQueueItem(id, { status: "confirming" });
       confirmationAttempted = true;

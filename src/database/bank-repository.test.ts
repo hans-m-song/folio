@@ -85,8 +85,8 @@ describe("bank repository queries", () => {
               id: artifactId,
               artifact_profile: "commbank_transaction_history_csv_v1",
               state: "awaiting_review",
-              version_id: "synthetic-version",
               checksum_sha256: "synthetic-checksum",
+              confirmed_at: new Date("2026-09-02T00:00:00Z"),
             },
           ],
         })
@@ -108,7 +108,7 @@ describe("bank repository queries", () => {
       ).confirmImport({
         actorId: "55555555-5555-4555-8555-555555555555",
         artifactId,
-        versionId: "synthetic-version",
+        checksumSha256: "synthetic-checksum",
         rows: [row],
         earliestDate: "2026-09-02",
         latestDate: "2026-09-02",
@@ -169,7 +169,7 @@ describe("bank repository queries", () => {
       rowCount: 1,
     });
     expect(acknowledged.query.mock.calls[7]?.[0]).toMatch(
-      /UPDATE .*source_artifacts.*state='available'/s,
+      /UPDATE .*source_artifacts.*state='available'.*checksum_sha256=\$2.*confirmed_at IS NOT NULL/s,
     );
     expect(acknowledged.query.mock.calls[8]?.[0]).toMatch(
       /INSERT INTO .*bank_transactions/,
@@ -191,8 +191,8 @@ describe("bank repository queries", () => {
             id: "11111111-1111-4111-8111-111111111111",
             artifact_profile: "commbank_transaction_history_csv_v1",
             state: "awaiting_review",
-            version_id: "synthetic-version",
             checksum_sha256: "synthetic-checksum",
+            confirmed_at: new Date("2026-09-02T00:00:00Z"),
           },
         ],
       })
@@ -213,7 +213,7 @@ describe("bank repository queries", () => {
     ).confirmImport({
       actorId: "33333333-3333-4333-8333-333333333333",
       artifactId: "11111111-1111-4111-8111-111111111111",
-      versionId: "synthetic-version",
+      checksumSha256: "synthetic-checksum",
       rows: [
         {
           sourceRow: 1,
@@ -253,8 +253,8 @@ describe("bank repository queries", () => {
             id: "11111111-1111-4111-8111-111111111111",
             artifact_profile: "commbank_transaction_history_csv_v1",
             state: "awaiting_review",
-            version_id: "synthetic-version",
             checksum_sha256: "synthetic-checksum",
+            confirmed_at: new Date("2026-09-02T00:00:00Z"),
           },
         ],
       })
@@ -273,7 +273,7 @@ describe("bank repository queries", () => {
     ).confirmImport({
       actorId: "33333333-3333-4333-8333-333333333333",
       artifactId: "11111111-1111-4111-8111-111111111111",
-      versionId: "synthetic-version",
+      checksumSha256: "synthetic-checksum",
       rows: [],
       earliestDate: "2026-09-02",
       latestDate: "2026-09-02",

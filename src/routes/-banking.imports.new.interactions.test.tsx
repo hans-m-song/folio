@@ -58,6 +58,17 @@ beforeEach(() => {
               : "33333333-3333-4333-8333-333333333333",
       },
       uploadUrl: "http://127.0.0.1/upload",
+      uploadHeaders: {
+        "Content-Type": data.mediaType,
+        "x-amz-checksum-sha256": data.checksumSha256,
+        "x-amz-meta-folio-artifact-id":
+          data.filename === "bank-b.csv"
+            ? "22222222-2222-4222-8222-222222222222"
+            : data.filename === "bank-a.csv"
+              ? "11111111-1111-4111-8111-111111111111"
+              : "33333333-3333-4333-8333-333333333333",
+        "If-None-Match": "*",
+      },
     }),
   );
   mocks.previewBankCsv.mockReset().mockResolvedValue({
@@ -230,12 +241,12 @@ describe("CommBank batch import interaction", () => {
     expect(mocks.startArtifactUpload).toHaveBeenCalledOnce();
   });
 
-  it("uploads and previews a CommBank CSV when SubtleCrypto is unavailable", async () => {
+  it("confirms a preexisting matching CommBank CSV after a 412 without SubtleCrypto", async () => {
     const checksumSha256 = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=";
     const artifactId = "33333333-3333-4333-8333-333333333333";
     const uploadUrl = "http://127.0.0.1/upload";
     const file = makeFile("bank.csv", [97, 98, 99]);
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 412 });
     vi.stubGlobal("crypto", {});
     vi.stubGlobal("fetch", fetchMock);
     expect(crypto.subtle).toBeUndefined();
@@ -261,9 +272,10 @@ describe("CommBank batch import interaction", () => {
         method: "PUT",
         body: file,
         headers: expect.objectContaining({
-          "content-type": "text/csv",
+          "Content-Type": "text/csv",
           "x-amz-checksum-sha256": checksumSha256,
           "x-amz-meta-folio-artifact-id": artifactId,
+          "If-None-Match": "*",
         }),
       }),
     );

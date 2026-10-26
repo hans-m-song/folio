@@ -17,4 +17,7 @@ export const requiredMigrationIds = [
   "0016_folio_owner_loan_repayments",
   "0017_folio_recurring_bills",
   "0018_folio_recurring_bill_rules",
+  "0019_folio_unversioned_artifacts",
+  "0020_folio_artifact_metadata",
+  "0021_folio_artifact_supplier",
 ] as const;

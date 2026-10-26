@@ -153,11 +153,12 @@ describe("proposal domain", () => {
       id: "11111111-1111-4111-8111-111111111111",
       artifactProfile: "commbank_transaction_history_csv_v1",
       objectKey: "private/commbank/object",
-      versionId: "version-1",
       mediaType: "text/csv",
       byteSize: "10",
       checksumSha256: "checksum",
       state: "awaiting_review",
+      confirmedAt: "2026-09-02T00:00:00.000Z",
+      uploadExpiresAt: null,
     };
     expect(
       validatePreImportCommBankLocator({

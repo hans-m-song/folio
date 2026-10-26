@@ -317,7 +317,7 @@ export class ProposalRepository {
     artifactId: string,
   ): Promise<void> {
     const result = await client.query(
-      `SELECT artifact_profile, state, version_id FROM ${this.artifactsTable} WHERE id=$1 FOR SHARE`,
+      `SELECT artifact_profile, state, checksum_sha256, confirmed_at FROM ${this.artifactsTable} WHERE id=$1 FOR SHARE`,
       [artifactId],
     );
     const artifact = result.rows[0];
@@ -325,7 +325,8 @@ export class ProposalRepository {
       !artifact ||
       artifact.artifact_profile !== "commbank_transaction_history_csv_v1" ||
       !["awaiting_review", "available"].includes(String(artifact.state)) ||
-      !artifact.version_id
+      !artifact.checksum_sha256 ||
+      artifact.confirmed_at == null
     )
       throw new Error("Pinned CommBank locator artifact not found");
   }
@@ -335,7 +336,7 @@ export class ProposalRepository {
     artifactId: string,
   ): Promise<void> {
     const result = await client.query(
-      `SELECT artifact_profile, state, version_id FROM ${this.artifactsTable} WHERE id=$1 FOR SHARE`,
+      `SELECT artifact_profile, state, checksum_sha256, confirmed_at FROM ${this.artifactsTable} WHERE id=$1 FOR SHARE`,
       [artifactId],
     );
     const artifact = result.rows[0];
@@ -343,7 +344,8 @@ export class ProposalRepository {
       !artifact ||
       artifact.artifact_profile !== "manual_invoice_pdf_v1" ||
       !["awaiting_review", "available"].includes(String(artifact.state)) ||
-      !artifact.version_id
+      !artifact.checksum_sha256 ||
+      artifact.confirmed_at == null
     )
       throw new Error("Proposed invoice evidence not found");
   }

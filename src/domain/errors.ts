@@ -289,6 +289,11 @@ export const errorPolicyCatalog = {
     ...conflict,
     message: "The selected bank row is stale or already resolved.",
   },
+  ARTIFACT_METADATA_CONFLICT: {
+    ...conflict,
+    message:
+      "Artifact metadata changed or is no longer editable. Reload before saving again.",
+  },
   ARTIFACT_NOT_CONFIRMABLE: validation,
   INVALID_BANK_ROW_LOCATOR: validation,
   MATCH_CANDIDATE_NOT_ELIGIBLE: {

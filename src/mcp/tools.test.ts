@@ -37,13 +37,14 @@ const artifact = {
   artifactProfile: "commbank_transaction_history_csv_v1" as const,
   kind: undefined,
   objectKey: "private/internal-object-key",
-  versionId: "immutable-version-1",
   mediaType: "text/csv",
   byteSize: "42",
   checksumSha256: `${"A".repeat(43)}=`,
   state: "awaiting_review" as const,
   filename: "statement.csv",
   originalFilename: "statement.csv",
+  confirmedAt: "2026-01-01T00:00:00.000Z",
+  uploadExpiresAt: null,
 };
 
 const csvWarningReport = {
@@ -140,6 +141,12 @@ const createDependencies = () => {
       status: "upload_ready" as const,
       artifact,
       uploadUrl: "http://storage.test/signed-put",
+      uploadHeaders: {
+        "Content-Type": "text/csv",
+        "x-amz-checksum-sha256": artifact.checksumSha256,
+        "x-amz-meta-folio-artifact-id": artifact.id,
+        "If-None-Match": "*",
+      },
       replayed: false,
     })),
     confirmUpload: vi.fn(async () => ({
@@ -148,7 +155,7 @@ const createDependencies = () => {
     })),
     readReviewText: vi.fn(async () => ({
       artifact,
-      versionId: artifact.versionId,
+      confirmedAt: artifact.confirmedAt,
       text: "01/01/2026,-1.00,Synthetic row,10.00",
     })),
   };
@@ -485,6 +492,12 @@ describe("Folio MCP tools", () => {
       );
       expect(value?.status).toBe("upload_ready");
       expect(value?.replayed).toBe(false);
+      expect(value?.uploadHeaders).toEqual({
+        "Content-Type": "text/csv",
+        "x-amz-checksum-sha256": artifact.checksumSha256,
+        "x-amz-meta-folio-artifact-id": artifact.id,
+        "If-None-Match": "*",
+      });
 
       for (const [profile, mediaType, filename] of [
         ["manual_invoice_pdf_v1", "application/pdf", "invoice.pdf"],

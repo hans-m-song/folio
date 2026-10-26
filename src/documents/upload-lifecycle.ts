@@ -1,0 +1,2 @@
+export const UPLOAD_URL_TTL_SECONDS = 300;
+export const UPLOAD_EXPIRY_GRACE_SECONDS = 60;

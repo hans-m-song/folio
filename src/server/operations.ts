@@ -8,6 +8,11 @@ import {
   artifactProfileSchema,
   isBankArtifactProfile,
 } from "../artifacts/profiles";
+import {
+  artifactMetadataEditSchema,
+  artifactMetadataFieldsSchema,
+  validateArtifactMetadataPeriod,
+} from "../artifacts/metadata";
 import { buildBalanceSeries, buildReport, reportCsv } from "../domain/reports";
 import {
   manualTransactionSavePayloadSchema,
@@ -675,19 +680,19 @@ export const updateUser = createServerFn({ method: "POST" })
     ),
   );
 
-const uploadSchema = z
-  .object({
+const uploadSchema = artifactMetadataFieldsSchema
+  .extend({
     ownerId: z.string().uuid().nullable(),
     artifactProfile: artifactProfileSchema.optional(),
     /** @deprecated existing browser callers may still send the legacy kind. */
     kind: z.enum(["pdf", "stripe_csv"]).optional(),
-    filename: z.string().trim().min(1).max(255),
     mediaType: z.enum(["application/pdf", "text/csv"]),
     byteSize: z.number().int().positive(),
     checksumSha256: z.string(),
   })
   .strict()
   .superRefine((value, context) => {
+    validateArtifactMetadataPeriod(value, context);
     if (!value.artifactProfile && !value.kind)
       context.addIssue({
         code: "custom",
@@ -719,6 +724,30 @@ export const startArtifactUpload = createServerFn({ method: "POST" })
         });
         setDiagnosticContext({ ids: { artifactId: result?.artifact?.id } });
         return result;
+      },
+      {},
+      { mutation: true },
+    ),
+  );
+
+export const updateArtifactMetadata = createServerFn({ method: "POST" })
+  .validator(validateInput(artifactMetadataEditSchema))
+  .handler(async ({ data }) =>
+    runOperation(
+      "Update artifact metadata",
+      async () => {
+        const { actor, current } = await authorize(
+          operationPermissions.updateArtifactMetadata,
+        );
+        const artifact = await current.repository.getArtifact(data.id);
+        if (
+          artifact?.artifactProfile &&
+          isBankArtifactProfile(artifact.artifactProfile)
+        )
+          requirePermission(actor, permissions.bankActivityImport);
+        const updated = await current.documents.updateMetadata(actor.id, data);
+        setDiagnosticContext({ ids: { artifactId: updated.id } });
+        return updated;
       },
       {},
       { mutation: true },
@@ -830,6 +859,23 @@ export const listAvailableInvoiceArtifacts = createServerFn({
     return current.repository.listAvailableInvoiceArtifacts(actor.id);
   }),
 );
+
+export const getArtifactDetails = createServerFn({ method: "GET" })
+  .validator(validateInput(z.object({ id: z.string().uuid() }).strict()))
+  .handler(async ({ data }) =>
+    runOperation("Get artifact details", async () => {
+      const { actor, current } = await authorize(
+        operationPermissions.listArtifacts,
+      );
+      const details = await current.repository.getArtifactDetails(
+        actor.id,
+        data.id,
+      );
+      if (details && isBankArtifactProfile(details.artifactProfile))
+        requirePermission(actor, permissions.bankActivityView);
+      return details;
+    }),
+  );
 
 const artifactListFilterSchema = z.union([
   z
@@ -1096,6 +1142,7 @@ export const importStripeCsv = createServerFn({ method: "POST" })
           data.artifactId,
           rows,
           current.config.reportingTimezone,
+          object.artifact.checksumSha256,
         );
       },
       {},

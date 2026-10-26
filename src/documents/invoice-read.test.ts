@@ -13,7 +13,8 @@ const invoice: ArtifactRecord = {
   id: "11111111-1111-4111-8111-111111111111",
   artifactProfile: "manual_invoice_pdf_v1",
   objectKey: "synthetic/invoice.pdf",
-  versionId: "confirmed-version",
+  confirmedAt: "2040-01-01T00:00:00.000Z",
+  uploadExpiresAt: "2040-01-01T00:05:00.000Z",
   mediaType: "application/pdf",
   byteSize: String(bytes.byteLength),
   checksumSha256: createHash("sha256").update(bytes).digest("base64"),
@@ -27,10 +28,9 @@ const setup = (overrides: Partial<ArtifactRecord> = {}) => {
     getArtifact: vi.fn().mockResolvedValue(record),
   };
   const storage = {
-    headVersion: vi.fn().mockResolvedValue({
+    head: vi.fn().mockResolvedValue({
       contentLength: bytes.byteLength,
       contentType: "application/pdf",
-      versionId: invoice.versionId,
       checksumSha256: invoice.checksumSha256,
       metadata: { "folio-artifact-id": invoice.id },
     }),
@@ -50,22 +50,22 @@ const setup = (overrides: Partial<ArtifactRecord> = {}) => {
 
 describe("confirmed invoice extraction read", () => {
   it.each(["awaiting_review", "available"] as const)(
-    "verifies actor, pinned metadata and bytes for a %s invoice without approving it",
+    "verifies actor, current object metadata and full bytes for a %s invoice",
     async (state) => {
       const { repository, storage, service } = setup({ state });
       await expect(
         service.readInvoicePdf("actor", invoice.id),
       ).resolves.toEqual({
         artifactId: invoice.id,
-        versionId: invoice.versionId,
+        confirmedAt: invoice.confirmedAt,
         checksumSha256: invoice.checksumSha256,
         bytes,
       });
       expect(repository.requireActiveActorId).toHaveBeenCalledWith("actor");
+      expect(storage.head).toHaveBeenCalledWith("synthetic", invoice.objectKey);
       expect(storage.readPrefix).toHaveBeenCalledWith(
         "synthetic",
         invoice.objectKey,
-        invoice.versionId,
         bytes.byteLength,
       );
       expect(repository.getArtifact).toHaveBeenCalledTimes(2);
@@ -76,8 +76,7 @@ describe("confirmed invoice extraction read", () => {
     { state: "pending" },
     { state: "rejected" },
     { state: "deleting" },
-    { versionId: null },
-    { versionId: "null" },
+    { confirmedAt: null },
     { artifactProfile: "stripe_balance_itemised_csv_v1" },
     { mediaType: "text/csv" },
     { byteSize: "10485761" },
@@ -89,7 +88,7 @@ describe("confirmed invoice extraction read", () => {
       await expect(
         service.readInvoicePdf("actor", invoice.id),
       ).rejects.toThrow();
-      expect(storage.headVersion).not.toHaveBeenCalled();
+      expect(storage.head).not.toHaveBeenCalled();
       expect(storage.readPrefix).not.toHaveBeenCalled();
     },
   );
@@ -105,7 +104,7 @@ describe("confirmed invoice extraction read", () => {
     expect(repository.getArtifact).not.toHaveBeenCalled();
     await expect(
       service.readInvoicePdf("actor", invoice.id, {
-        versionId: "other-version",
+        confirmedAt: "2040-01-02T00:00:00.000Z",
       }),
     ).rejects.toThrow("identity has changed");
     await expect(
@@ -113,15 +112,14 @@ describe("confirmed invoice extraction read", () => {
         checksumSha256: "different",
       }),
     ).rejects.toThrow("identity has changed");
-    expect(storage.headVersion).not.toHaveBeenCalled();
+    expect(storage.head).not.toHaveBeenCalled();
   });
 
-  it("rejects a mismatched head and mismatched bytes without parsing", async () => {
+  it("rejects mismatched head metadata and mismatched bytes before extraction", async () => {
     const { storage, service } = setup();
-    storage.headVersion.mockResolvedValueOnce({
-      contentLength: bytes.byteLength,
+    storage.head.mockResolvedValueOnce({
+      contentLength: bytes.byteLength + 1,
       contentType: "application/pdf",
-      versionId: "other-version",
       checksumSha256: invoice.checksumSha256,
       metadata: { "folio-artifact-id": invoice.id },
     });
@@ -129,8 +127,9 @@ describe("confirmed invoice extraction read", () => {
       "metadata",
     );
     expect(storage.readPrefix).not.toHaveBeenCalled();
+
     storage.readPrefix.mockResolvedValueOnce(
-      Buffer.from("%PDF-1.7\naltered bytes"),
+      Buffer.from("%PDF-1.7\nchanged invoice bytes"),
     );
     await expect(service.readInvoicePdf("actor", invoice.id)).rejects.toThrow(
       "checksum",

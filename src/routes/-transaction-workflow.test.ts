@@ -151,6 +151,17 @@ import {
   safeTransactionWorkflowError,
 } from "./-transaction-workflow";
 
+const uploadHeadersFor = (
+  artifactId: string,
+  mediaType = "text/csv",
+  checksumSha256 = "synthetic-checksum",
+) => ({
+  "Content-Type": mediaType,
+  "x-amz-checksum-sha256": checksumSha256,
+  "x-amz-meta-folio-artifact-id": artifactId,
+  "If-None-Match": "*",
+});
+
 it("retains actionable matched-edit guidance with its diagnostic reference", () => {
   const message =
     "Keep the recorded AUD amount/direction, or unmatch the bank row before changing it. Code BANK_MATCH_EDIT_CONFLICT. Reference 00000000-0000-4000-8000-000000000000.";
@@ -196,10 +207,15 @@ beforeEach(() => {
   operations.discardProposedDraftEvidence.mockResolvedValue(null);
   operations.listAvailableInvoiceArtifacts.mockResolvedValue([]);
   operations.listArtifacts.mockResolvedValue({ total: 0, rows: [] });
-  operations.startArtifactUpload.mockResolvedValue({
+  operations.startArtifactUpload.mockImplementation(async ({ data }) => ({
     artifact: { id: "44444444-4444-4444-8444-444444444444" },
     uploadUrl: "https://uploads.example.test/stripe.csv",
-  });
+    uploadHeaders: uploadHeadersFor(
+      { id: "44444444-4444-4444-8444-444444444444" }.id,
+      data.mediaType,
+      data.checksumSha256,
+    ),
+  }));
   operations.findArtifactFilenameMatches.mockResolvedValue([]);
   operations.confirmArtifactUpload.mockResolvedValue({});
   operations.approveArtifact.mockResolvedValue({});
@@ -661,7 +677,7 @@ describe("transaction workflow route safety", () => {
         method: "PUT",
         body: file,
         headers: expect.objectContaining({
-          "content-type": "text/csv",
+          "Content-Type": "text/csv",
           "x-amz-checksum-sha256": checksumSha256,
           "x-amz-meta-folio-artifact-id": artifactId,
         }),
@@ -984,10 +1000,15 @@ describe("transaction workflow route safety", () => {
   it("keeps an unsupported file visible and imports only the reviewed file", async () => {
     const validArtifactId = "55555555-5555-4555-8555-555555555555";
     operations.startArtifactUpload
-      .mockResolvedValueOnce({
+      .mockImplementationOnce(async ({ data }) => ({
         artifact: { id: "44444444-4444-4444-8444-444444444444" },
         uploadUrl: "https://uploads.example.test/all-activity.csv",
-      })
+        uploadHeaders: uploadHeadersFor(
+          { id: "44444444-4444-4444-8444-444444444444" }.id,
+          data.mediaType,
+          data.checksumSha256,
+        ),
+      }))
       .mockResolvedValueOnce({
         artifact: { id: validArtifactId },
         uploadUrl: "https://uploads.example.test/balance.csv",
@@ -1172,10 +1193,15 @@ describe("transaction workflow route safety", () => {
       ],
     });
     operations.startArtifactUpload
-      .mockResolvedValueOnce({
+      .mockImplementationOnce(async ({ data }) => ({
         artifact: { id: firstArtifactId },
         uploadUrl: "https://uploads.example.test/first.csv",
-      })
+        uploadHeaders: uploadHeadersFor(
+          { id: firstArtifactId }.id,
+          data.mediaType,
+          data.checksumSha256,
+        ),
+      }))
       .mockResolvedValueOnce({
         artifact: { id: secondArtifactId },
         uploadUrl: "https://uploads.example.test/second.csv",
@@ -1246,10 +1272,15 @@ describe("transaction workflow route safety", () => {
     const firstArtifactId = "44444444-4444-4444-8444-444444444444";
     const secondArtifactId = "55555555-5555-4555-8555-555555555555";
     operations.startArtifactUpload
-      .mockResolvedValueOnce({
+      .mockImplementationOnce(async ({ data }) => ({
         artifact: { id: firstArtifactId },
         uploadUrl: "https://uploads.example.test/first.csv",
-      })
+        uploadHeaders: uploadHeadersFor(
+          { id: firstArtifactId }.id,
+          data.mediaType,
+          data.checksumSha256,
+        ),
+      }))
       .mockResolvedValueOnce({
         artifact: { id: secondArtifactId },
         uploadUrl: "https://uploads.example.test/second.csv",

@@ -998,7 +998,8 @@ describe("proposal repository", () => {
           {
             artifact_profile: "commbank_transaction_history_csv_v1",
             state: "awaiting_review",
-            version_id: "commbank-version",
+            checksum_sha256: "commbank-checksum",
+            confirmed_at: "2026-09-02T00:00:00.000Z",
           },
         ],
       })
@@ -1007,7 +1008,8 @@ describe("proposal repository", () => {
           {
             artifact_profile: "manual_invoice_pdf_v1",
             state: "awaiting_review",
-            version_id: "invoice-version",
+            checksum_sha256: "invoice-checksum",
+            confirmed_at: "2026-09-02T00:00:00.000Z",
           },
         ],
       })
@@ -1022,11 +1024,12 @@ describe("proposal repository", () => {
         id: commBankArtifactId,
         artifactProfile: "commbank_transaction_history_csv_v1",
         objectKey: "private/commbank/object",
-        versionId: "commbank-version",
         mediaType: "text/csv",
         byteSize: "10",
-        checksumSha256: "checksum",
+        checksumSha256: "commbank-checksum",
         state: "awaiting_review",
+        confirmedAt: "2026-09-02T00:00:00.000Z",
+        uploadExpiresAt: null,
       },
       parsedRows: [
         {
@@ -1078,7 +1081,8 @@ describe("proposal repository", () => {
           {
             artifact_profile: "stripe_balance_itemised_csv_v1",
             state: "awaiting_review",
-            version_id: "stripe-version",
+            checksum_sha256: "stripe-checksum",
+            confirmed_at: "2026-09-02T00:00:00.000Z",
           },
         ],
       })

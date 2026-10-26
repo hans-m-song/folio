@@ -36,6 +36,9 @@ describe("authorization policy", () => {
     expect(hasPermission("member", permissions.reportReview)).toBe(true);
     expect(hasPermission("administrator", permissions.sessionAdmin)).toBe(true);
     expect(operationPermissions.createUser).toEqual([permissions.userAdmin]);
+    expect(operationPermissions.updateArtifactMetadata).toEqual([
+      permissions.artifactUpload,
+    ]);
     expect(operationPermissions.exportReport).toEqual([
       permissions.reportRead,
       permissions.reportExport,
@@ -74,6 +77,7 @@ describe("authorization policy", () => {
       "createUser",
       "updateUser",
       "startArtifactUpload",
+      "updateArtifactMetadata",
       "confirmArtifactUpload",
       "downloadArtifact",
       "extractInvoiceFields",

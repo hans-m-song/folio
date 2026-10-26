@@ -569,13 +569,10 @@ export function NewBankImportPage({
         method: "PUT",
         body: file,
         signal: controller.signal,
-        headers: {
-          "content-type": "text/csv",
-          "x-amz-checksum-sha256": checksumSha256,
-          "x-amz-meta-folio-artifact-id": started.artifact.id,
-        },
+        headers: started.uploadHeaders,
       });
-      if (!response.ok) throw new Error("The CSV upload failed");
+      if (!response.ok && response.status !== 412)
+        throw new Error("The CSV upload failed");
       if (cancellationRequested.current.has(id))
         throw new Error("The import was cancelled");
       failureStage = "confirm";

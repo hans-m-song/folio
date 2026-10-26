@@ -328,6 +328,7 @@ interface PendingReconciliationAdvance {
 interface InvoiceUploadIntent {
   artifactId: string;
   uploadUrl: string;
+  uploadHeaders: Readonly<Record<string, string>>;
   stage: "started" | "uploaded" | "confirmed";
 }
 
@@ -576,6 +577,7 @@ function BankReconcilePage() {
       intent = {
         artifactId: started.artifact.id,
         uploadUrl: started.uploadUrl,
+        uploadHeaders: started.uploadHeaders,
         stage: "started",
       };
       uploadIntents.current.set(checksumSha256, intent);
@@ -588,13 +590,9 @@ function BankReconcilePage() {
       const response = await fetch(intent.uploadUrl, {
         method: "PUT",
         body: file,
-        headers: {
-          "content-type": "application/pdf",
-          "x-amz-checksum-sha256": checksumSha256,
-          "x-amz-meta-folio-artifact-id": intent.artifactId,
-        },
+        headers: intent.uploadHeaders,
       });
-      if (!response.ok)
+      if (!response.ok && response.status !== 412)
         throw new Error(`Invoice PDF upload failed (${response.status}).`);
       intent = { ...intent, stage: "uploaded" };
       uploadIntents.current.set(checksumSha256, intent);

@@ -97,7 +97,7 @@ export const runReconcileUploads = async ({
     stage = "reconcile";
     mutation = values.recover;
     const result = await pool.query(
-      `SELECT id, artifact_profile, object_key, version_id, media_type, byte_size, checksum_sha256, state FROM "${config.databaseSchema}"."source_artifacts" WHERE state='pending' AND version_id IS NULL ORDER BY created_at, id LIMIT $1`,
+      `SELECT id, artifact_profile, object_key, confirmed_at, upload_expires_at, media_type, byte_size, checksum_sha256, state FROM "${config.databaseSchema}"."source_artifacts" WHERE state='pending' AND confirmed_at IS NULL ORDER BY created_at, id LIMIT $1`,
       [maximum],
     );
     const artifacts = result.rows.map(
@@ -105,7 +105,8 @@ export const runReconcileUploads = async ({
         id: row.id,
         artifactProfile: row.artifact_profile,
         objectKey: row.object_key,
-        versionId: row.version_id,
+        confirmedAt: row.confirmed_at,
+        uploadExpiresAt: row.upload_expires_at,
         mediaType: row.media_type,
         byteSize: row.byte_size,
         checksumSha256: row.checksum_sha256,

@@ -53,8 +53,14 @@ export function createFolioSchema(schemaName: string) {
         .references(() => users.id),
       artifactProfile: text("artifact_profile").notNull(),
       objectKey: text("object_key").notNull().unique(),
-      versionId: text("version_id"),
       filename: text().notNull(),
+      originalFilename: text("original_filename"),
+      periodStart: date("period_start"),
+      periodEnd: date("period_end"),
+      documentDate: date("document_date"),
+      reference: text(),
+      notes: text(),
+      supplier: text(),
       mediaType: text("media_type").notNull(),
       byteSize: bigint("byte_size", { mode: "bigint" }).notNull(),
       checksumSha256: text("checksum_sha256").notNull(),
@@ -63,6 +69,7 @@ export function createFolioSchema(schemaName: string) {
         .notNull()
         .defaultNow(),
       confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+      uploadExpiresAt: timestamp("upload_expires_at", { withTimezone: true }),
     },
     (table) => [
       check(
@@ -74,6 +81,22 @@ export function createFolioSchema(schemaName: string) {
         sql`${table.state} in ('pending', 'awaiting_review', 'available', 'rejected', 'superseded', 'abandoned', 'deleting')`,
       ),
       check("source_artifacts_byte_size_check", sql`${table.byteSize} > 0`),
+      check(
+        "source_artifacts_period_order_check",
+        sql`${table.periodStart} is null or ${table.periodEnd} is null or ${table.periodStart} <= ${table.periodEnd}`,
+      ),
+      check(
+        "source_artifacts_reference_length_check",
+        sql`${table.reference} is null or char_length(${table.reference}) <= 200`,
+      ),
+      check(
+        "source_artifacts_notes_length_check",
+        sql`${table.notes} is null or char_length(${table.notes}) <= 2000`,
+      ),
+      check(
+        "source_artifacts_supplier_length_check",
+        sql`${table.supplier} is null or char_length(${table.supplier}) <= 200`,
+      ),
       index("source_artifacts_owner_id_idx").on(table.ownerId),
       index("source_artifacts_created_by_id_idx").on(table.createdById),
       check(
@@ -82,7 +105,7 @@ export function createFolioSchema(schemaName: string) {
       ),
       check(
         "source_artifacts_confirmation_check",
-        sql`(${table.state} in ('pending', 'abandoned') and ${table.versionId} is null and ${table.confirmedAt} is null) or (${table.state} in ('awaiting_review', 'available', 'rejected', 'superseded') and ${table.versionId} is not null and ${table.confirmedAt} is not null) or (${table.state} = 'deleting' and ((${table.versionId} is null and ${table.confirmedAt} is null) or (${table.versionId} is not null and ${table.confirmedAt} is not null)))`,
+        sql`(${table.state} in ('pending', 'abandoned') and ${table.confirmedAt} is null) or (${table.state} in ('awaiting_review', 'available', 'rejected', 'superseded') and ${table.confirmedAt} is not null) or ${table.state} = 'deleting'`,
       ),
       check(
         "source_artifacts_checksum_check",

@@ -3,7 +3,6 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import {
   classifyStripeReportingCategory,
-  formatStripeImportFilename,
   type StripeImportRow,
   type StripeImportPreviewStatus,
 } from "../domain/stripe-csv";
@@ -40,9 +39,11 @@ import type { ManualTransactionAction } from "../domain/manual-transaction";
 import {
   artifactProfileOf,
   ArtifactUploadIdempotencyConflictError,
+  type ArtifactDetails,
   type ArtifactRecord,
   type ArtifactRepository,
 } from "../documents/service";
+import type { ArtifactMetadataEdit } from "../artifacts/metadata";
 import { FolioDiagnosticError } from "../domain/diagnostics";
 import { manualCashEffectAudMinor } from "../domain/cash-effect";
 import { parseDecimal } from "../domain/money";
@@ -52,9 +53,21 @@ import type {
   CsvDuplicateProfile,
   CsvDuplicateRowIdentity,
 } from "../domain/csv-duplicates";
+import { AppError } from "../domain/errors";
+import { parseWithDiagnostics } from "../domain/validation-diagnostics";
 import { requiredMigrationIds } from "./migrations";
+import { withDatabaseTransactionClient } from "./transaction-cleanup";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
+
+const artifactDateTextProjection = (alias?: string): string => {
+  const column = (name: string) => `${alias ? `${alias}.` : ""}${name}`;
+  return [
+    `${column("period_start")}::text AS period_start_text`,
+    `${column("period_end")}::text AS period_end_text`,
+    `${column("document_date")}::text AS document_date_text`,
+  ].join(", ");
+};
 
 const bankMatchEditConflict = () =>
   new FolioDiagnosticError({
@@ -64,13 +77,17 @@ const bankMatchEditConflict = () =>
     retryable: false,
   });
 
-const bulkTransactionConflict = () =>
-  new FolioDiagnosticError({
-    category: "validation",
-    code: "BULK_TRANSACTION_CONFLICT",
-    httpStatus: 409,
-    retryable: false,
-  });
+const bulkTransactionConflict = (cause?: unknown) =>
+  new FolioDiagnosticError(
+    {
+      category: "validation",
+      code: "BULK_TRANSACTION_CONFLICT",
+      httpStatus: 409,
+      retryable: false,
+    },
+    undefined,
+    cause === undefined ? undefined : { cause },
+  );
 
 const bulkTransactionIneligible = () =>
   new FolioDiagnosticError({
@@ -167,7 +184,7 @@ const assertBulkTransactionSelection = (
         error instanceof FolioDiagnosticError &&
         error.code === "REVISION_CONFLICT"
       )
-        throw bulkTransactionConflict();
+        throw bulkTransactionConflict(error);
       throw error;
     }
   }
@@ -379,6 +396,15 @@ function mapArtifact(row: QueryResultRow): ArtifactRecord {
   const artifactProfile =
     row.artifact_profile ??
     (row.kind ? legacyArtifactProfile(row.kind as "pdf" | "stripe_csv") : null);
+  const periodStart =
+    row.period_start_text ??
+    (typeof row.period_start === "string" ? row.period_start : undefined);
+  const periodEnd =
+    row.period_end_text ??
+    (typeof row.period_end === "string" ? row.period_end : undefined);
+  const documentDate =
+    row.document_date_text ??
+    (typeof row.document_date === "string" ? row.document_date : undefined);
   return {
     id: row.id,
     artifactProfile: artifactProfile ?? undefined,
@@ -386,15 +412,31 @@ function mapArtifact(row: QueryResultRow): ArtifactRecord {
       ? legacyArtifactKind(artifactProfile as ArtifactProfile)
       : row.kind,
     objectKey: row.object_key,
-    versionId: row.version_id,
     mediaType: row.media_type,
     filename: row.filename,
     originalFilename: row.original_filename ?? undefined,
     byteSize: String(row.byte_size),
     checksumSha256: row.checksum_sha256,
     state: row.state,
+    confirmedAt: timestampIso(row.confirmed_at),
+    uploadExpiresAt: timestampIso(row.upload_expires_at),
+    ...(periodStart === undefined ? {} : { periodStart }),
+    ...(periodEnd === undefined ? {} : { periodEnd }),
+    ...(documentDate === undefined ? {} : { documentDate }),
+    ...(row.reference == null ? {} : { reference: row.reference }),
+    ...(row.notes == null ? {} : { notes: row.notes }),
+    ...(row.supplier == null ? {} : { supplier: row.supplier }),
   };
 }
+
+const timestampIso = (
+  value: Date | string | null | undefined,
+): string | null => {
+  if (value == null) return null;
+  return value instanceof Date
+    ? value.toISOString()
+    : new Date(value).toISOString();
+};
 
 export class FolioRepository implements ArtifactRepository {
   private readonly usersTable: string;
@@ -688,7 +730,10 @@ export class FolioRepository implements ArtifactRepository {
     actorId: string,
     request: BulkTransactionRequest,
   ): Promise<BulkTransactionPreview> {
-    const parsedRequest = bulkTransactionRequestSchema.parse(request);
+    const parsedRequest = parseWithDiagnostics(
+      bulkTransactionRequestSchema,
+      request,
+    );
     await this.requireBulkActor(this.pool, actorId);
     const rows = await this.bulkTransactionRows(
       this.pool,
@@ -717,50 +762,56 @@ export class FolioRepository implements ArtifactRepository {
     actorId: string,
     request: BulkTransactionRequest,
   ): Promise<BulkTransactionResult> {
-    const parsedRequest = bulkTransactionRequestSchema.parse(request);
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const activeActorId = await this.requireBulkActor(client, actorId);
-      const rows = await this.bulkTransactionRows(client, parsedRequest, true);
-      const rowsById = assertBulkTransactionSelection(rows, parsedRequest);
-
-      if (parsedRequest.change.field === "ownerId")
-        await this.requireBulkOwner(client, parsedRequest.change.value, true);
-
-      const changedIds = parsedRequest.transactions
-        .map(({ id }) => rowsById.get(id.toLowerCase())!)
-        .filter(
-          (row) => bulkTransactionPreviewRow(row, parsedRequest.change).changed,
-        )
-        .map(({ id }) => id);
-
-      if (changedIds.length > 0) {
-        const column =
-          parsedRequest.change.field === "ownerId"
-            ? "owner_id"
-            : parsedRequest.change.field;
-        const valueType =
-          parsedRequest.change.field === "ownerId" ? "uuid" : "text";
-        const update = await client.query(
-          `UPDATE ${this.transactionsTable} SET ${column}=$2::${valueType}, updated_by_id=$3::uuid, updated_at=GREATEST(clock_timestamp(), updated_at + interval '1 microsecond') WHERE id = ANY($1::uuid[])`,
-          [changedIds, parsedRequest.change.value, activeActorId],
+    const parsedRequest = parseWithDiagnostics(
+      bulkTransactionRequestSchema,
+      request,
+    );
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const activeActorId = await this.requireBulkActor(client, actorId);
+        const rows = await this.bulkTransactionRows(
+          client,
+          parsedRequest,
+          true,
         );
-        if (update.rowCount !== changedIds.length)
-          throw bulkTransactionConflict();
-      }
+        const rowsById = assertBulkTransactionSelection(rows, parsedRequest);
 
-      await client.query("COMMIT");
-      return {
-        selectedCount: parsedRequest.transactions.length,
-        updatedCount: changedIds.length,
-      };
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+        if (parsedRequest.change.field === "ownerId")
+          await this.requireBulkOwner(client, parsedRequest.change.value, true);
+
+        const changedIds = parsedRequest.transactions
+          .map(({ id }) => rowsById.get(id.toLowerCase())!)
+          .filter(
+            (row) =>
+              bulkTransactionPreviewRow(row, parsedRequest.change).changed,
+          )
+          .map(({ id }) => id);
+
+        if (changedIds.length > 0) {
+          const column =
+            parsedRequest.change.field === "ownerId"
+              ? "owner_id"
+              : parsedRequest.change.field;
+          const valueType =
+            parsedRequest.change.field === "ownerId" ? "uuid" : "text";
+          const update = await client.query(
+            `UPDATE ${this.transactionsTable} SET ${column}=$2::${valueType}, updated_by_id=$3::uuid, updated_at=GREATEST(clock_timestamp(), updated_at + interval '1 microsecond') WHERE id = ANY($1::uuid[])`,
+            [changedIds, parsedRequest.change.value, activeActorId],
+          );
+          if (update.rowCount !== changedIds.length)
+            throw bulkTransactionConflict();
+        }
+
+        await client.query("COMMIT");
+        return {
+          selectedCount: parsedRequest.transactions.length,
+          updatedCount: changedIds.length,
+        };
+      },
+    );
   }
 
   async listTransactionPage(
@@ -1000,7 +1051,7 @@ export class FolioRepository implements ArtifactRepository {
   ): Promise<ArtifactRecord[]> {
     await this.actorById(this.pool, actorId);
     const result = await this.pool.query(
-      `SELECT * FROM ${this.artifactsTable} WHERE artifact_profile='manual_invoice_pdf_v1' AND state='available' ORDER BY created_at DESC, id DESC`,
+      `SELECT artifact.*, ${artifactDateTextProjection("artifact")} FROM ${this.artifactsTable} artifact WHERE artifact_profile='manual_invoice_pdf_v1' AND state='available' ORDER BY created_at DESC, id DESC`,
     );
     return result.rows.map(mapArtifact);
   }
@@ -1061,11 +1112,18 @@ export class FolioRepository implements ArtifactRepository {
     rows: {
       id: string;
       filename: string;
+      originalFilename: string | null;
       artifactProfile: string;
       mediaType: string;
       state: string;
       byteSize: string;
       checksumSha256: string;
+      periodStart: string | null;
+      periodEnd: string | null;
+      documentDate: string | null;
+      reference: string | null;
+      notes: string | null;
+      supplier: string | null;
       createdAt: string;
       transactionCount: number;
       bankRowCount: number;
@@ -1213,7 +1271,11 @@ export class FolioRepository implements ArtifactRepository {
         parameters,
       ),
       this.pool.query(
-        `SELECT artifact.id, artifact.filename, artifact.artifact_profile, artifact.media_type, artifact.state, artifact.byte_size, artifact.checksum_sha256, artifact.created_at,
+        `SELECT artifact.id, artifact.filename, artifact.original_filename,
+          artifact.artifact_profile, artifact.media_type, artifact.state,
+          artifact.byte_size, artifact.checksum_sha256,
+          ${artifactDateTextProjection("artifact")}, artifact.reference,
+          artifact.notes, artifact.supplier, artifact.created_at,
           ${transactionCount} AS transaction_count,
           ${bankRowCount} AS bank_row_count
          FROM ${this.artifactsTable} artifact ${conditionsSql}
@@ -1226,11 +1288,18 @@ export class FolioRepository implements ArtifactRepository {
       rows: result.rows.map((row) => ({
         id: String(row.id),
         filename: String(row.filename),
+        originalFilename: row.original_filename ?? null,
         artifactProfile: String(row.artifact_profile),
         mediaType: String(row.media_type),
         state: String(row.state),
         byteSize: String(row.byte_size),
         checksumSha256: String(row.checksum_sha256),
+        periodStart: row.period_start_text ?? null,
+        periodEnd: row.period_end_text ?? null,
+        documentDate: row.document_date_text ?? null,
+        reference: row.reference ?? null,
+        notes: row.notes ?? null,
+        supplier: row.supplier ?? null,
         createdAt: row.created_at.toISOString(),
         transactionCount: Number(row.transaction_count),
         bankRowCount: Number(row.bank_row_count),
@@ -1540,65 +1609,63 @@ export class FolioRepository implements ArtifactRepository {
     input: TransactionInput,
     sourceArtifactIds?: readonly string[],
   ): Promise<TransactionRecord> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const actor = await this.actorById(client, actorId);
-      const artifactIds = this.artifactIdsForInput(input, sourceArtifactIds);
-      await this.assertManualArtifacts(client, artifactIds);
-      const primaryArtifactId = artifactIds[0] ?? null;
-      const evidence = primaryArtifactId
-        ? await this.getEvidence(client, primaryArtifactId)
-        : null;
-      assertTransactionRules(
-        { ...input, sourceArtifactId: primaryArtifactId },
-        this.gstRegistered,
-        evidence,
-      );
-      const result = await client.query(
-        `INSERT INTO ${this.transactionsTable} (owner_id, created_by_id, updated_by_id, source_system, kind, reference, counterparty, description, status, category, notes, occurred_at, available_at, invoice_date, settled_at, document_currency, document_amount, document_tax_amount, tax_treatment, settlement_currency, settlement_amount, gst_credit_status, claimable_gst_aud) VALUES ($1,$2,$2,'manual',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *, ${invoiceDateTextProjection("invoice_date")}, ${updatedAtTokenProjection("updated_at")}`,
-        [
-          input.ownerId,
-          actor.id,
-          input.kind,
-          input.reference,
-          input.counterparty,
-          input.description,
-          input.status,
-          input.category,
-          input.notes,
-          input.occurredAt,
-          input.availableAt,
-          input.invoiceDate,
-          input.settledAt,
-          input.documentCurrency,
-          input.documentAmount,
-          input.documentTaxAmount,
-          input.taxTreatment,
-          input.settlementCurrency,
-          input.settlementAmount,
-          input.gstCreditStatus,
-          input.claimableGstAud,
-        ],
-      );
-      for (const artifactId of artifactIds)
-        await this.linkTransactionArtifactInternal(
-          client,
-          result.rows[0]!.id,
-          artifactId,
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const actor = await this.actorById(client, actorId);
+        const artifactIds = this.artifactIdsForInput(input, sourceArtifactIds);
+        await this.assertManualArtifacts(client, artifactIds);
+        const primaryArtifactId = artifactIds[0] ?? null;
+        const evidence = primaryArtifactId
+          ? await this.getEvidence(client, primaryArtifactId)
+          : null;
+        assertTransactionRules(
+          { ...input, sourceArtifactId: primaryArtifactId },
+          this.gstRegistered,
+          evidence,
         );
-      await client.query("COMMIT");
-      return mapTransaction({
-        ...result.rows[0],
-        source_artifact_id: artifactIds[0] ?? null,
-        source_artifacts: [],
-      });
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+        const result = await client.query(
+          `INSERT INTO ${this.transactionsTable} (owner_id, created_by_id, updated_by_id, source_system, kind, reference, counterparty, description, status, category, notes, occurred_at, available_at, invoice_date, settled_at, document_currency, document_amount, document_tax_amount, tax_treatment, settlement_currency, settlement_amount, gst_credit_status, claimable_gst_aud) VALUES ($1,$2,$2,'manual',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *, ${invoiceDateTextProjection("invoice_date")}, ${updatedAtTokenProjection("updated_at")}`,
+          [
+            input.ownerId,
+            actor.id,
+            input.kind,
+            input.reference,
+            input.counterparty,
+            input.description,
+            input.status,
+            input.category,
+            input.notes,
+            input.occurredAt,
+            input.availableAt,
+            input.invoiceDate,
+            input.settledAt,
+            input.documentCurrency,
+            input.documentAmount,
+            input.documentTaxAmount,
+            input.taxTreatment,
+            input.settlementCurrency,
+            input.settlementAmount,
+            input.gstCreditStatus,
+            input.claimableGstAud,
+          ],
+        );
+        for (const artifactId of artifactIds)
+          await this.linkTransactionArtifactInternal(
+            client,
+            result.rows[0]!.id,
+            artifactId,
+          );
+        await client.query("COMMIT");
+        return mapTransaction({
+          ...result.rows[0],
+          source_artifact_id: artifactIds[0] ?? null,
+          source_artifacts: [],
+        });
+      },
+    );
   }
 
   async updateManual(
@@ -1611,103 +1678,105 @@ export class FolioRepository implements ArtifactRepository {
       : "save_draft",
     sourceArtifactIds?: readonly string[],
   ): Promise<TransactionRecord> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const actor = await this.actorById(client, actorId);
-      const matches = await client.query(
-        `SELECT id, amount_aud FROM ${this.bankTransactionsTable} WHERE matched_transaction_id=$1 ORDER BY id FOR UPDATE`,
-        [id],
-      );
-      const existing = await client.query(
-        `SELECT transactions.*, (SELECT links.source_artifact_id FROM ${this.transactionArtifactsTable} links WHERE links.transaction_id = transactions.id ORDER BY links.source_artifact_id LIMIT 1) AS source_artifact_id, (SELECT coalesce(array_agg(links.source_artifact_id ORDER BY links.source_artifact_id), '{}') FROM ${this.transactionArtifactsTable} links WHERE links.transaction_id = transactions.id) AS source_artifact_ids, ${updatedAtTokenProjection("transactions.updated_at")} FROM ${this.transactionsTable} transactions WHERE transactions.id = $1 FOR UPDATE`,
-        [id],
-      );
-      if (!existing.rows[0] || existing.rows[0].source_system !== "manual")
-        throw new Error("Manual transaction not found");
-      assertExpectedRevision(
-        existing.rows[0].updated_at_token,
-        expectedUpdatedAt,
-      );
-      assertStatusTransition(existing.rows[0].status, input.status, action);
-      if (matches.rows.length) {
-        const cashEffect = manualCashEffectAudMinor({
-          ...input,
-          sourceSystem: "manual",
-        });
-        if (
-          cashEffect === null ||
-          matches.rows.some(
-            (match) => parseDecimal(match.amount_aud) !== cashEffect,
-          )
-        )
-          throw bankMatchEditConflict();
-      }
-      const artifactIds = this.artifactIdsForInput(input, sourceArtifactIds);
-      await this.assertManualArtifacts(client, artifactIds);
-      const primaryArtifactId = artifactIds[0] ?? null;
-      const evidence = primaryArtifactId
-        ? await this.getEvidence(client, primaryArtifactId)
-        : null;
-      assertTransactionRules(
-        { ...input, sourceArtifactId: primaryArtifactId },
-        this.gstRegistered,
-        evidence,
-      );
-      const result = await client.query(
-        `UPDATE ${this.transactionsTable} SET owner_id=$2, updated_by_id=$3, kind=$4, reference=$5, counterparty=$6, description=$7, status=$8, category=$9, notes=$10, occurred_at=$11, available_at=$12, invoice_date=$13, settled_at=$14, document_currency=$15, document_amount=$16, document_tax_amount=$17, tax_treatment=$18, settlement_currency=$19, settlement_amount=$20, gst_credit_status=$21, claimable_gst_aud=$22, updated_at=now() WHERE id=$1 AND updated_at = $23::timestamptz RETURNING *, ${invoiceDateTextProjection("invoice_date")}, ${updatedAtTokenProjection("updated_at")}`,
-        [
-          id,
-          input.ownerId,
-          actor.id,
-          input.kind,
-          input.reference,
-          input.counterparty,
-          input.description,
-          input.status,
-          input.category,
-          input.notes,
-          input.occurredAt,
-          input.availableAt,
-          input.invoiceDate,
-          input.settledAt,
-          input.documentCurrency,
-          input.documentAmount,
-          input.documentTaxAmount,
-          input.taxTreatment,
-          input.settlementCurrency,
-          input.settlementAmount,
-          input.gstCreditStatus,
-          input.claimableGstAud,
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const actor = await this.actorById(client, actorId);
+        const matches = await client.query(
+          `SELECT id, amount_aud FROM ${this.bankTransactionsTable} WHERE matched_transaction_id=$1 ORDER BY id FOR UPDATE`,
+          [id],
+        );
+        const existing = await client.query(
+          `SELECT transactions.*, (SELECT links.source_artifact_id FROM ${this.transactionArtifactsTable} links WHERE links.transaction_id = transactions.id ORDER BY links.source_artifact_id LIMIT 1) AS source_artifact_id, (SELECT coalesce(array_agg(links.source_artifact_id ORDER BY links.source_artifact_id), '{}') FROM ${this.transactionArtifactsTable} links WHERE links.transaction_id = transactions.id) AS source_artifact_ids, ${updatedAtTokenProjection("transactions.updated_at")} FROM ${this.transactionsTable} transactions WHERE transactions.id = $1 FOR UPDATE`,
+          [id],
+        );
+        if (!existing.rows[0] || existing.rows[0].source_system !== "manual")
+          throw new Error("Manual transaction not found");
+        assertExpectedRevision(
+          existing.rows[0].updated_at_token,
           expectedUpdatedAt,
-        ],
-      );
-      if (!result.rows[0]) throw revisionConflictError();
-      const existingArtifactIds = Array.isArray(
-        existing.rows[0].source_artifact_ids,
-      )
-        ? (existing.rows[0].source_artifact_ids as string[])
-        : existing.rows[0].source_artifact_id
-          ? [String(existing.rows[0].source_artifact_id)]
-          : [];
-      for (const artifactId of artifactIds)
-        if (!existingArtifactIds.includes(artifactId))
-          await this.linkTransactionArtifactInternal(client, id, artifactId);
-      for (const artifactId of existingArtifactIds)
-        if (!artifactIds.includes(artifactId))
-          await this.unlinkTransactionArtifactInternal(client, id, artifactId);
-      await client.query("COMMIT");
-      return mapTransaction({
-        ...result.rows[0],
-        source_artifact_id: artifactIds[0] ?? null,
-        source_artifacts: [],
-      });
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+        );
+        assertStatusTransition(existing.rows[0].status, input.status, action);
+        if (matches.rows.length) {
+          const cashEffect = manualCashEffectAudMinor({
+            ...input,
+            sourceSystem: "manual",
+          });
+          if (
+            cashEffect === null ||
+            matches.rows.some(
+              (match) => parseDecimal(match.amount_aud) !== cashEffect,
+            )
+          )
+            throw bankMatchEditConflict();
+        }
+        const artifactIds = this.artifactIdsForInput(input, sourceArtifactIds);
+        await this.assertManualArtifacts(client, artifactIds);
+        const primaryArtifactId = artifactIds[0] ?? null;
+        const evidence = primaryArtifactId
+          ? await this.getEvidence(client, primaryArtifactId)
+          : null;
+        assertTransactionRules(
+          { ...input, sourceArtifactId: primaryArtifactId },
+          this.gstRegistered,
+          evidence,
+        );
+        const result = await client.query(
+          `UPDATE ${this.transactionsTable} SET owner_id=$2, updated_by_id=$3, kind=$4, reference=$5, counterparty=$6, description=$7, status=$8, category=$9, notes=$10, occurred_at=$11, available_at=$12, invoice_date=$13, settled_at=$14, document_currency=$15, document_amount=$16, document_tax_amount=$17, tax_treatment=$18, settlement_currency=$19, settlement_amount=$20, gst_credit_status=$21, claimable_gst_aud=$22, updated_at=now() WHERE id=$1 AND updated_at = $23::timestamptz RETURNING *, ${invoiceDateTextProjection("invoice_date")}, ${updatedAtTokenProjection("updated_at")}`,
+          [
+            id,
+            input.ownerId,
+            actor.id,
+            input.kind,
+            input.reference,
+            input.counterparty,
+            input.description,
+            input.status,
+            input.category,
+            input.notes,
+            input.occurredAt,
+            input.availableAt,
+            input.invoiceDate,
+            input.settledAt,
+            input.documentCurrency,
+            input.documentAmount,
+            input.documentTaxAmount,
+            input.taxTreatment,
+            input.settlementCurrency,
+            input.settlementAmount,
+            input.gstCreditStatus,
+            input.claimableGstAud,
+            expectedUpdatedAt,
+          ],
+        );
+        if (!result.rows[0]) throw revisionConflictError();
+        const existingArtifactIds = Array.isArray(
+          existing.rows[0].source_artifact_ids,
+        )
+          ? (existing.rows[0].source_artifact_ids as string[])
+          : existing.rows[0].source_artifact_id
+            ? [String(existing.rows[0].source_artifact_id)]
+            : [];
+        for (const artifactId of artifactIds)
+          if (!existingArtifactIds.includes(artifactId))
+            await this.linkTransactionArtifactInternal(client, id, artifactId);
+        for (const artifactId of existingArtifactIds)
+          if (!artifactIds.includes(artifactId))
+            await this.unlinkTransactionArtifactInternal(
+              client,
+              id,
+              artifactId,
+            );
+        await client.query("COMMIT");
+        return mapTransaction({
+          ...result.rows[0],
+          source_artifact_id: artifactIds[0] ?? null,
+          source_artifacts: [],
+        });
+      },
+    );
   }
 
   async voidTransaction(
@@ -1715,27 +1784,25 @@ export class FolioRepository implements ArtifactRepository {
     id: string,
     expectedUpdatedAt: string,
   ): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const actor = await this.actorById(client, actorId);
-      const matches = await client.query(
-        `SELECT id FROM ${this.bankTransactionsTable} WHERE matched_transaction_id=$1 ORDER BY id FOR UPDATE`,
-        [id],
-      );
-      if (matches.rows.length) throw bankMatchEditConflict();
-      const result = await client.query(
-        `UPDATE ${this.transactionsTable} SET status='void', updated_by_id=$2, updated_at=now() WHERE id=$1 AND status <> 'void' AND updated_at = $3::timestamptz`,
-        [id, actor.id, expectedUpdatedAt],
-      );
-      if (result.rowCount !== 1) throw revisionConflictError();
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const actor = await this.actorById(client, actorId);
+        const matches = await client.query(
+          `SELECT id FROM ${this.bankTransactionsTable} WHERE matched_transaction_id=$1 ORDER BY id FOR UPDATE`,
+          [id],
+        );
+        if (matches.rows.length) throw bankMatchEditConflict();
+        const result = await client.query(
+          `UPDATE ${this.transactionsTable} SET status='void', updated_by_id=$2, updated_at=now() WHERE id=$1 AND status <> 'void' AND updated_at = $3::timestamptz`,
+          [id, actor.id, expectedUpdatedAt],
+        );
+        if (result.rowCount !== 1) throw revisionConflictError();
+        await client.query("COMMIT");
+      },
+    );
   }
 
   async deleteDraftTransaction(
@@ -1743,133 +1810,124 @@ export class FolioRepository implements ArtifactRepository {
     id: string,
     expectedUpdatedAt: string,
   ): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.actorById(client, actorId);
-      const draft = await client.query(
-        `SELECT id FROM ${this.transactionsTable} WHERE id=$1 AND source_system='manual' AND status='draft' AND updated_at=$2::timestamptz FOR UPDATE`,
-        [id, expectedUpdatedAt],
-      );
-      if (!draft.rows[0]) throw revisionConflictError();
-      await client.query(
-        `DELETE FROM ${this.mcpSubmissionsTable} WHERE draft_transaction_id=$1`,
-        [id],
-      );
-      const deleted = await client.query(
-        `DELETE FROM ${this.transactionsTable} WHERE id=$1 AND source_system='manual' AND status='draft' AND updated_at=$2::timestamptz`,
-        [id, expectedUpdatedAt],
-      );
-      if (deleted.rowCount !== 1) throw revisionConflictError();
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        await this.actorById(client, actorId);
+        const draft = await client.query(
+          `SELECT id FROM ${this.transactionsTable} WHERE id=$1 AND source_system='manual' AND status='draft' AND updated_at=$2::timestamptz FOR UPDATE`,
+          [id, expectedUpdatedAt],
+        );
+        if (!draft.rows[0]) throw revisionConflictError();
+        await client.query(
+          `DELETE FROM ${this.mcpSubmissionsTable} WHERE draft_transaction_id=$1`,
+          [id],
+        );
+        const deleted = await client.query(
+          `DELETE FROM ${this.transactionsTable} WHERE id=$1 AND source_system='manual' AND status='draft' AND updated_at=$2::timestamptz`,
+          [id, expectedUpdatedAt],
+        );
+        if (deleted.rowCount !== 1) throw revisionConflictError();
+        await client.query("COMMIT");
+      },
+    );
   }
 
   async importStripe(
     actorId: string,
     artifactId: string,
     rows: readonly StripeImportRow[],
-    reportingTimezone: string,
+    _reportingTimezone: string,
+    expectedChecksumSha256: string,
   ): Promise<number> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const actor = await this.actorById(client, actorId);
-      const artifactResult = await client.query(
-        `SELECT * FROM ${this.artifactsTable} WHERE id=$1 FOR UPDATE`,
-        [artifactId],
-      );
-      const artifact = artifactResult.rows[0]
-        ? mapArtifact(artifactResult.rows[0])
-        : null;
-      if (
-        !artifact ||
-        artifactProfileOf(artifact) !== "stripe_balance_itemised_csv_v1" ||
-        !artifact.versionId ||
-        (artifact.state !== "awaiting_review" && artifact.state !== "available")
-      )
-        throw new Error("Reviewable Stripe CSV artifact not found");
-      if (artifact.state === "awaiting_review") {
-        const available = await client.query(
-          `UPDATE ${this.artifactsTable} SET state='available' WHERE id=$1 AND state='awaiting_review' AND version_id=$2`,
-          [artifactId, artifact.versionId],
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const actor = await this.actorById(client, actorId);
+        const artifactResult = await client.query(
+          `SELECT * FROM ${this.artifactsTable} WHERE id=$1 FOR UPDATE`,
+          [artifactId],
         );
-        if (available.rowCount !== 1)
-          throw new Error("Reviewable Stripe CSV artifact not found");
-      }
-      let imported = 0;
-      for (const row of rows) {
-        const classification = classifyStripeReportingCategory(
-          row.reportingCategory,
-        );
-        const inserted = await client.query(
-          `WITH inserted AS (INSERT INTO ${this.transactionsTable} (created_by_id, updated_by_id, source_system, kind, reference, description, status, occurred_at, available_at, source_currency, source_gross, source_fee, source_net, metadata) VALUES ($1,$1,'stripe',$3,$4,$5,'recorded',$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING RETURNING id) INSERT INTO ${this.transactionArtifactsTable} (transaction_id, source_artifact_id) SELECT inserted.id, $2 FROM inserted RETURNING transaction_id AS id`,
-          [
-            actor.id,
-            artifactId,
-            classification.kind,
-            row.reference,
-            row.description,
-            row.occurredAt,
-            row.availableAt,
-            row.sourceCurrency,
-            row.sourceGross,
-            row.sourceFee,
-            row.sourceNet,
-            { reportingCategory: row.reportingCategory },
-          ],
-        );
-        if (inserted.rowCount === 1) {
-          imported += 1;
-          continue;
-        }
-
-        const existing = await client.query(
-          `SELECT id, kind, description, occurred_at, available_at, source_currency, source_gross, source_fee, source_net, metadata FROM ${this.transactionsTable} WHERE source_system='stripe' AND reference=$1`,
-          [row.reference],
-        );
-        const existingRow = existing.rows[0];
+        const artifact = artifactResult.rows[0]
+          ? mapArtifact(artifactResult.rows[0])
+          : null;
         if (
-          !existingRow ||
-          !sameStripeImport(existingRow, row, classification.kind)
+          !artifact ||
+          artifactProfileOf(artifact) !== "stripe_balance_itemised_csv_v1" ||
+          !artifact.confirmedAt ||
+          !artifact.checksumSha256 ||
+          artifact.checksumSha256 !== expectedChecksumSha256 ||
+          (artifact.state !== "awaiting_review" &&
+            artifact.state !== "available")
         )
-          throw new FolioDiagnosticError(
-            {
-              category: "validation",
-              code: "STRIPE_IMPORT_CONFLICT",
-              retryable: false,
-            },
-            "Stripe balance transaction conflicts with an existing import",
+          throw new Error("Reviewable Stripe CSV artifact not found");
+        if (artifact.state === "awaiting_review") {
+          const available = await client.query(
+            `UPDATE ${this.artifactsTable} SET state='available' WHERE id=$1 AND state='awaiting_review' AND checksum_sha256=$2 AND confirmed_at IS NOT NULL`,
+            [artifactId, artifact.checksumSha256],
           );
-        if (existingRow.id)
-          await this.linkTransactionArtifactInternal(
-            client,
-            existingRow.id,
-            artifactId,
+          if (available.rowCount !== 1)
+            throw new Error("Reviewable Stripe CSV artifact not found");
+        }
+        let imported = 0;
+        for (const row of rows) {
+          const classification = classifyStripeReportingCategory(
+            row.reportingCategory,
           );
-      }
-      const filename = formatStripeImportFilename(rows, reportingTimezone);
-      if (filename) {
-        const renamed = await client.query(
-          `UPDATE ${this.artifactsTable} SET filename=$2 WHERE id=$1 AND artifact_profile='stripe_balance_itemised_csv_v1' AND state='available'`,
-          [artifactId, filename],
-        );
-        if (renamed.rowCount !== 1)
-          throw new Error("Available Stripe CSV artifact not found");
-      }
-      await client.query("COMMIT");
-      return imported;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+          const inserted = await client.query(
+            `WITH inserted AS (INSERT INTO ${this.transactionsTable} (created_by_id, updated_by_id, source_system, kind, reference, description, status, occurred_at, available_at, source_currency, source_gross, source_fee, source_net, metadata) VALUES ($1,$1,'stripe',$3,$4,$5,'recorded',$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING RETURNING id) INSERT INTO ${this.transactionArtifactsTable} (transaction_id, source_artifact_id) SELECT inserted.id, $2 FROM inserted RETURNING transaction_id AS id`,
+            [
+              actor.id,
+              artifactId,
+              classification.kind,
+              row.reference,
+              row.description,
+              row.occurredAt,
+              row.availableAt,
+              row.sourceCurrency,
+              row.sourceGross,
+              row.sourceFee,
+              row.sourceNet,
+              { reportingCategory: row.reportingCategory },
+            ],
+          );
+          if (inserted.rowCount === 1) {
+            imported += 1;
+            continue;
+          }
+
+          const existing = await client.query(
+            `SELECT id, kind, description, occurred_at, available_at, source_currency, source_gross, source_fee, source_net, metadata FROM ${this.transactionsTable} WHERE source_system='stripe' AND reference=$1`,
+            [row.reference],
+          );
+          const existingRow = existing.rows[0];
+          if (
+            !existingRow ||
+            !sameStripeImport(existingRow, row, classification.kind)
+          )
+            throw new FolioDiagnosticError(
+              {
+                category: "validation",
+                code: "STRIPE_IMPORT_CONFLICT",
+                retryable: false,
+              },
+              "Stripe balance transaction conflicts with an existing import",
+            );
+          if (existingRow.id)
+            await this.linkTransactionArtifactInternal(
+              client,
+              existingRow.id,
+              artifactId,
+            );
+        }
+        await client.query("COMMIT");
+        return imported;
+      },
+    );
   }
 
   async previewStripeImport(
@@ -1924,10 +1982,92 @@ export class FolioRepository implements ArtifactRepository {
     id: string,
   ): Promise<ArtifactRecord | null> {
     const result = await queryable.query(
-      `SELECT * FROM ${this.artifactsTable} WHERE id=$1`,
+      `SELECT artifact.*, ${artifactDateTextProjection("artifact")} FROM ${this.artifactsTable} artifact WHERE artifact.id=$1`,
       [id],
     );
     return result.rows[0] ? mapArtifact(result.rows[0]) : null;
+  }
+
+  async getArtifactDetails(
+    actorId: string,
+    id: string,
+  ): Promise<ArtifactDetails | null> {
+    await this.actorById(this.pool, actorId);
+    const result = await this.pool.query(
+      `SELECT artifact.id, artifact.artifact_profile, artifact.filename,
+         artifact.original_filename, artifact.media_type, artifact.state,
+         artifact.byte_size::text AS byte_size, artifact.checksum_sha256,
+         artifact.confirmed_at, artifact.period_start::text AS period_start,
+         artifact.period_end::text AS period_end,
+         artifact.document_date::text AS document_date, artifact.reference,
+         artifact.notes, artifact.supplier, artifact.created_at,
+         COALESCE((
+           SELECT array_agg(link.transaction_id::text ORDER BY link.transaction_id)
+           FROM ${this.transactionArtifactsTable} link
+           WHERE link.source_artifact_id=artifact.id
+         ), ARRAY[]::text[]) AS linked_transaction_ids,
+         (SELECT count(*)::integer
+          FROM ${this.bankTransactionArtifactsTable} link
+          WHERE link.source_artifact_id=artifact.id) AS bank_row_count
+       FROM ${this.artifactsTable} artifact WHERE artifact.id=$1`,
+      [id],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      artifactProfile: row.artifact_profile,
+      filename: row.filename,
+      originalFilename: row.original_filename ?? null,
+      mediaType: row.media_type,
+      state: row.state,
+      byteSize: String(row.byte_size),
+      checksumSha256: row.checksum_sha256,
+      confirmedAt: timestampIso(row.confirmed_at),
+      periodStart: row.period_start ?? null,
+      periodEnd: row.period_end ?? null,
+      documentDate: row.document_date ?? null,
+      reference: row.reference ?? null,
+      notes: row.notes ?? null,
+      supplier: row.supplier ?? null,
+      createdAt: timestampIso(row.created_at)!,
+      linkedTransactionIds: Array.isArray(row.linked_transaction_ids)
+        ? row.linked_transaction_ids.map(String)
+        : [],
+      bankRowCount: Number(row.bank_row_count),
+    };
+  }
+
+  async updateArtifactMetadata(
+    input: ArtifactMetadataEdit,
+  ): Promise<ArtifactRecord> {
+    const result = await this.pool.query(
+      `UPDATE ${this.artifactsTable}
+       SET filename=$2, period_start=$3::date, period_end=$4::date
+       WHERE id=$1
+         AND filename IS NOT DISTINCT FROM $5
+         AND period_start IS NOT DISTINCT FROM $6::date
+         AND period_end IS NOT DISTINCT FROM $7::date
+         AND state IN ('awaiting_review', 'available')
+         AND confirmed_at IS NOT NULL
+       RETURNING *, ${artifactDateTextProjection()}`,
+      [
+        input.id,
+        input.filename,
+        input.periodStart,
+        input.periodEnd,
+        input.expected.filename,
+        input.expected.periodStart,
+        input.expected.periodEnd,
+      ],
+    );
+    const row = result.rows[0];
+    if (!row)
+      throw new AppError({
+        code: "ARTIFACT_METADATA_CONFLICT",
+        stage: "artifact_metadata",
+      });
+    return mapArtifact(row);
   }
 
   async createPending(
@@ -1940,7 +2080,7 @@ export class FolioRepository implements ArtifactRepository {
     if (!artifactProfile) throw new Error("Artifact profile is required");
     const id = input.id ?? randomUUID();
     const result = await this.pool.query(
-      `INSERT INTO ${this.artifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, original_filename, media_type, byte_size, checksum_sha256) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      `INSERT INTO ${this.artifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, original_filename, period_start, period_end, document_date, reference, notes, supplier, media_type, byte_size, checksum_sha256) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *, ${artifactDateTextProjection()}`,
       [
         id,
         input.ownerId,
@@ -1948,7 +2088,13 @@ export class FolioRepository implements ArtifactRepository {
         artifactProfile,
         input.objectKey,
         input.filename,
-        input.filename,
+        input.originalFilename ?? input.filename,
+        input.periodStart ?? null,
+        input.periodEnd ?? null,
+        input.documentDate ?? null,
+        input.reference ?? null,
+        input.notes ?? null,
+        input.supplier ?? null,
         input.mediaType,
         input.byteSize,
         input.checksumSha256,
@@ -1960,84 +2106,90 @@ export class FolioRepository implements ArtifactRepository {
   async createPendingUploadIntent(
     input: Parameters<ArtifactRepository["createPendingUploadIntent"]>[0],
   ): ReturnType<ArtifactRepository["createPendingUploadIntent"]> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const credentialResult = await client.query(
-        `SELECT credential.actor_user_id, credential.default_owner_id
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const credentialResult = await client.query(
+          `SELECT credential.actor_user_id, credential.default_owner_id
          FROM ${this.mcpCredentialsTable} credential
          JOIN ${this.usersTable} actor ON actor.id=credential.actor_user_id AND actor.active=true
          JOIN ${this.usersTable} owner ON owner.id=credential.default_owner_id AND owner.active=true
          WHERE credential.id=$1 AND credential.revoked_at IS NULL
            AND 'artifacts:upload'=ANY(credential.scopes)
          FOR SHARE OF credential, actor, owner`,
-        [input.credentialId],
-      );
-      const credential = credentialResult.rows[0];
-      if (
-        !credential ||
-        String(credential.actor_user_id) !== input.actorId ||
-        String(credential.default_owner_id) !== input.ownerId
-      )
-        throw new Error("Upload credential is not authorized");
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        [`${input.credentialId}:${input.requestKey}`],
-      );
-      const existingResult = await client.query(
-        `SELECT intent.payload_sha256 AS intent_payload_sha256,
-           intent.artifact_id AS intent_artifact_id, artifact.*
+          [input.credentialId],
+        );
+        const credential = credentialResult.rows[0];
+        if (
+          !credential ||
+          String(credential.actor_user_id) !== input.actorId ||
+          String(credential.default_owner_id) !== input.ownerId
+        )
+          throw new Error("Upload credential is not authorized");
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`${input.credentialId}:${input.requestKey}`],
+        );
+        const existingResult = await client.query(
+          `SELECT intent.payload_sha256 AS intent_payload_sha256,
+           intent.artifact_id AS intent_artifact_id, artifact.*,
+           ${artifactDateTextProjection("artifact")}
          FROM ${this.mcpUploadIntentsTable} intent
          LEFT JOIN ${this.artifactsTable} artifact ON artifact.id=intent.artifact_id
          WHERE intent.credential_id=$1 AND intent.request_key=$2`,
-        [input.credentialId, input.requestKey],
-      );
-      const existing = existingResult.rows[0];
-      if (existing) {
-        if (String(existing.intent_payload_sha256) !== input.payloadSha256)
-          throw new ArtifactUploadIdempotencyConflictError();
-        await client.query("COMMIT");
-        if (!existing.id || existing.state !== "pending")
-          return {
-            status: "not_uploadable",
-            artifactId: String(existing.intent_artifact_id),
-            artifactState: existing.state
-              ? (String(existing.state) as ArtifactRecord["state"])
-              : "deleted",
-          };
-        return { status: "replayed", artifact: mapArtifact(existing) };
-      }
-      const artifactResult = await client.query(
-        `INSERT INTO ${this.artifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, original_filename, media_type, byte_size, checksum_sha256)
-         VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9) RETURNING *`,
-        [
-          input.id,
-          input.ownerId,
-          input.actorId,
-          input.artifactProfile,
-          input.objectKey,
-          input.filename,
-          input.mediaType,
-          input.byteSize,
-          input.checksumSha256,
-        ],
-      );
-      await client.query(
-        `INSERT INTO ${this.mcpUploadIntentsTable} (credential_id, request_key, payload_sha256, artifact_id)
+          [input.credentialId, input.requestKey],
+        );
+        const existing = existingResult.rows[0];
+        if (existing) {
+          if (String(existing.intent_payload_sha256) !== input.payloadSha256)
+            throw new ArtifactUploadIdempotencyConflictError();
+          await client.query("COMMIT");
+          if (!existing.id || existing.state !== "pending")
+            return {
+              status: "not_uploadable",
+              artifactId: String(existing.intent_artifact_id),
+              artifactState: existing.state
+                ? (String(existing.state) as ArtifactRecord["state"])
+                : "deleted",
+            };
+          return { status: "replayed", artifact: mapArtifact(existing) };
+        }
+        const artifactResult = await client.query(
+          `INSERT INTO ${this.artifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, original_filename, period_start, period_end, document_date, reference, notes, supplier, media_type, byte_size, checksum_sha256)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *, ${artifactDateTextProjection()}`,
+          [
+            input.id,
+            input.ownerId,
+            input.actorId,
+            input.artifactProfile,
+            input.objectKey,
+            input.filename,
+            input.originalFilename ?? input.filename,
+            input.periodStart ?? null,
+            input.periodEnd ?? null,
+            input.documentDate ?? null,
+            input.reference ?? null,
+            input.notes ?? null,
+            input.supplier ?? null,
+            input.mediaType,
+            input.byteSize,
+            input.checksumSha256,
+          ],
+        );
+        await client.query(
+          `INSERT INTO ${this.mcpUploadIntentsTable} (credential_id, request_key, payload_sha256, artifact_id)
          VALUES ($1,$2,$3,$4)`,
-        [input.credentialId, input.requestKey, input.payloadSha256, input.id],
-      );
-      await client.query("COMMIT");
-      return {
-        status: "created",
-        artifact: mapArtifact(artifactResult.rows[0]!),
-      };
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+          [input.credentialId, input.requestKey, input.payloadSha256, input.id],
+        );
+        await client.query("COMMIT");
+        return {
+          status: "created",
+          artifact: mapArtifact(artifactResult.rows[0]!),
+        };
+      },
+    );
   }
 
   async getArtifact(id: string): Promise<ArtifactRecord | null> {
@@ -2052,86 +2204,108 @@ export class FolioRepository implements ArtifactRepository {
     if (result.rowCount !== 1) throw new Error("Pending artifact not found");
   }
 
-  async confirmAwaitingReview(id: string, versionId: string): Promise<void> {
+  async registerUploadExpiry(id: string, expiresAt: string): Promise<void> {
     const result = await this.pool.query(
-      `UPDATE ${this.artifactsTable} SET state='awaiting_review', version_id=$2, confirmed_at=now() WHERE id=$1 AND state='pending'`,
-      [id, versionId],
+      `UPDATE ${this.artifactsTable} SET upload_expires_at=greatest(upload_expires_at, $2::timestamptz) WHERE id=$1 AND state='pending'`,
+      [id, expiresAt],
+    );
+    if (result.rowCount !== 1) throw new Error("Pending artifact not found");
+  }
+
+  async confirmAwaitingReview(
+    id: string,
+    checksumSha256: string,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE ${this.artifactsTable} SET state='awaiting_review', confirmed_at=now() WHERE id=$1 AND state='pending' AND checksum_sha256=$2 AND confirmed_at IS NULL`,
+      [id, checksumSha256],
     );
     if (result.rowCount !== 1) throw new Error("Pending artifact not found");
   }
 
   async approveArtifact(
     id: string,
-    versionId: string,
+    checksumSha256: string,
   ): Promise<ArtifactRecord> {
     const result = await this.pool.query(
       `UPDATE ${this.artifactsTable} artifact SET state='available'
-       WHERE artifact.id=$1 AND artifact.state='awaiting_review' AND artifact.version_id=$2 AND artifact.artifact_profile='manual_invoice_pdf_v1'
+       WHERE artifact.id=$1 AND artifact.state='awaiting_review' AND artifact.checksum_sha256=$2 AND artifact.confirmed_at IS NOT NULL AND artifact.artifact_profile='manual_invoice_pdf_v1'
        RETURNING artifact.*`,
-      [id, versionId],
+      [id, checksumSha256],
     );
     if (!result.rows[0]) throw new Error("Reviewable PDF artifact not found");
     return mapArtifact(result.rows[0]);
   }
 
-  async rejectArtifact(id: string, versionId: string): Promise<ArtifactRecord> {
+  async rejectArtifact(
+    id: string,
+    checksumSha256: string,
+  ): Promise<ArtifactRecord> {
     const result = await this.pool.query(
-      `UPDATE ${this.artifactsTable} artifact SET state='rejected', version_id=coalesce(artifact.version_id, $2), confirmed_at=coalesce(artifact.confirmed_at, now())
+      `UPDATE ${this.artifactsTable} artifact SET state='rejected'
        WHERE artifact.id=$1
          AND (
-           (artifact.state='awaiting_review' AND artifact.version_id=$2 AND artifact.media_type IN ('application/pdf', 'text/csv'))
-           OR (artifact.state IN ('available', 'rejected') AND artifact.version_id=$2 AND artifact.media_type='text/csv')
+           (artifact.state='awaiting_review' AND artifact.checksum_sha256=$2 AND artifact.confirmed_at IS NOT NULL AND artifact.media_type IN ('application/pdf', 'text/csv'))
+           OR (artifact.state IN ('available', 'rejected') AND artifact.checksum_sha256=$2 AND artifact.confirmed_at IS NOT NULL AND artifact.media_type='text/csv')
          )
          AND NOT EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} link WHERE link.source_artifact_id=artifact.id)
          AND NOT EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} link WHERE link.source_artifact_id=artifact.id)
        RETURNING artifact.*`,
-      [id, versionId],
+      [id, checksumSha256],
     );
     if (!result.rows[0]) throw new Error("Unlinked review artifact not found");
     return mapArtifact(result.rows[0]);
   }
 
   async claimArtifactDeletion(id: string): Promise<ArtifactRecord | null> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const artifactResult = await client.query(
-        `SELECT * FROM ${this.artifactsTable} WHERE id=$1 FOR UPDATE`,
-        [id],
-      );
-      if (!artifactResult.rows[0]) {
-        await client.query("COMMIT");
-        return null;
-      }
-      const links = await client.query(
-        `SELECT EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} WHERE source_artifact_id=$1)
-             OR EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} WHERE source_artifact_id=$1) AS linked`,
-        [id],
-      );
-      if (links.rows[0]?.linked)
-        throw new Error(
-          "Cannot delete an artifact referenced by a transaction or bank row",
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const artifactResult = await client.query(
+          `SELECT * FROM ${this.artifactsTable} WHERE id=$1 FOR UPDATE`,
+          [id],
         );
-      const claimed = await client.query(
-        `UPDATE ${this.artifactsTable} SET state='deleting' WHERE id=$1 RETURNING *`,
-        [id],
-      );
-      await client.query("COMMIT");
-      return mapArtifact(claimed.rows[0]!);
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+        if (!artifactResult.rows[0]) {
+          await client.query("COMMIT");
+          return null;
+        }
+        const links = await client.query(
+          `SELECT EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} WHERE source_artifact_id=$1)
+             OR EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} WHERE source_artifact_id=$1)
+             OR EXISTS (
+               SELECT 1 FROM ${this.mcpSubmissionsTable}
+               WHERE source_artifact_id=$1 OR proposed_evidence_artifact_id=$1
+             ) AS linked`,
+          [id],
+        );
+        if (links.rows[0]?.linked)
+          throw new Error(
+            "Cannot delete an artifact referenced by a transaction or bank row",
+          );
+        const claimed = await client.query(
+          `UPDATE ${this.artifactsTable} SET state='deleting' WHERE id=$1 RETURNING *`,
+          [id],
+        );
+        await client.query("COMMIT");
+        return mapArtifact(claimed.rows[0]!);
+      },
+    );
   }
 
   async deleteClaimedArtifact(id: string, objectKey: string): Promise<void> {
     const result = await this.pool.query(
       `DELETE FROM ${this.artifactsTable} artifact
        WHERE artifact.id=$1 AND artifact.object_key=$2 AND artifact.state='deleting'
+         AND (artifact.upload_expires_at IS NULL OR artifact.upload_expires_at + interval '60 seconds' <= now())
          AND NOT EXISTS (SELECT 1 FROM ${this.transactionArtifactsTable} link WHERE link.source_artifact_id=artifact.id)
-         AND NOT EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} link WHERE link.source_artifact_id=artifact.id)`,
+         AND NOT EXISTS (SELECT 1 FROM ${this.bankTransactionArtifactsTable} link WHERE link.source_artifact_id=artifact.id)
+         AND NOT EXISTS (
+           SELECT 1 FROM ${this.mcpSubmissionsTable} submission
+           WHERE submission.source_artifact_id=artifact.id
+             OR submission.proposed_evidence_artifact_id=artifact.id
+         )`,
       [id, objectKey],
     );
     if (result.rowCount === 1) return;
@@ -2143,53 +2317,51 @@ export class FolioRepository implements ArtifactRepository {
   }
 
   async supersede(previousId: string, replacementId: string): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const artifacts = await client.query(
-        `SELECT id, state, artifact_profile FROM ${this.artifactsTable} WHERE id IN ($1, $2) ORDER BY id FOR UPDATE`,
-        [previousId, replacementId],
-      );
-      const previous = artifacts.rows.find(
-        (row) => String(row.id) === previousId,
-      );
-      const replacement = artifacts.rows.find(
-        (row) => String(row.id) === replacementId,
-      );
-      if (
-        previousId === replacementId ||
-        !previous ||
-        !replacement ||
-        previous.state !== "available" ||
-        replacement.state !== "available"
-      )
-        throw new Error("Available replacement pair not found");
-      if (previous.artifact_profile !== replacement.artifact_profile)
-        throw new Error(
-          "Replacement artifact profile must match superseded artifact profile",
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const artifacts = await client.query(
+          `SELECT id, state, artifact_profile FROM ${this.artifactsTable} WHERE id IN ($1, $2) ORDER BY id FOR UPDATE`,
+          [previousId, replacementId],
         );
-
-      const links = await client.query(
-        `SELECT 1 FROM ${this.transactionArtifactsTable} WHERE source_artifact_id=$1 UNION ALL SELECT 1 FROM ${this.bankTransactionArtifactsTable} WHERE source_artifact_id=$1 LIMIT 1`,
-        [previousId],
-      );
-      if (links.rowCount)
-        throw new Error(
-          "Cannot supersede an artifact referenced by a transaction",
+        const previous = artifacts.rows.find(
+          (row) => String(row.id) === previousId,
         );
+        const replacement = artifacts.rows.find(
+          (row) => String(row.id) === replacementId,
+        );
+        if (
+          previousId === replacementId ||
+          !previous ||
+          !replacement ||
+          previous.state !== "available" ||
+          replacement.state !== "available"
+        )
+          throw new Error("Available replacement pair not found");
+        if (previous.artifact_profile !== replacement.artifact_profile)
+          throw new Error(
+            "Replacement artifact profile must match superseded artifact profile",
+          );
 
-      const result = await client.query(
-        `UPDATE ${this.artifactsTable} SET state='superseded' WHERE id=$1 AND state='available'`,
-        [previousId],
-      );
-      if (result.rowCount !== 1)
-        throw new Error("Available replacement pair not found");
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+        const links = await client.query(
+          `SELECT 1 FROM ${this.transactionArtifactsTable} WHERE source_artifact_id=$1 UNION ALL SELECT 1 FROM ${this.bankTransactionArtifactsTable} WHERE source_artifact_id=$1 LIMIT 1`,
+          [previousId],
+        );
+        if (links.rowCount)
+          throw new Error(
+            "Cannot supersede an artifact referenced by a transaction",
+          );
+
+        const result = await client.query(
+          `UPDATE ${this.artifactsTable} SET state='superseded' WHERE id=$1 AND state='available'`,
+          [previousId],
+        );
+        if (result.rowCount !== 1)
+          throw new Error("Available replacement pair not found");
+        await client.query("COMMIT");
+      },
+    );
   }
 }

@@ -3,8 +3,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
 
-import { extractInvoicePdf } from "../documents/invoice-extraction";
-import { parseSupplierInvoice } from "../domain/invoice-parser";
+import { createInvoiceFieldReader } from "../documents/invoice-field-reader";
 import {
   operationPermissions,
   requirePermission,
@@ -25,7 +24,6 @@ export const extractInvoiceFields = createServerFn({ method: "POST" })
             .string()
             .regex(/^[A-Za-z0-9+/]{43}=$/)
             .optional(),
-          expectedVersionId: z.string().min(1).max(1_024).optional(),
         })
         .strict(),
     ),
@@ -44,48 +42,23 @@ export const extractInvoiceFields = createServerFn({ method: "POST" })
       setDiagnosticContext({
         ids: { actorId: actor.id, artifactId: data.artifactId },
       });
-      const invoice = await current.documents.readInvoicePdf(
-        actor.id,
-        data.artifactId,
-        {
-          checksumSha256: data.expectedChecksumSha256,
-          versionId: data.expectedVersionId,
-        },
-      );
-      const identity = {
-        artifactId: invoice.artifactId,
-        checksumSha256: invoice.checksumSha256,
-        versionId: invoice.versionId,
-      };
-      const extraction = await extractInvoicePdf(invoice.bytes);
-      if (extraction.status === "unsupported") {
+      const result = await createInvoiceFieldReader(current)(actor.id, data);
+      if (result.status === "unsupported") {
         reportServerFailure(
           new AppError({
             code:
-              extraction.reason === "extraction_failed" ||
-              extraction.reason === "deadline_exceeded"
+              result.reason === "extraction_failed" ||
+              result.reason === "deadline_exceeded"
                 ? "PDF_EXTRACTION_FAILED"
                 : "PDF_EXTRACTION_UNSUPPORTED",
             stage: "pdf_extraction",
           }),
           {
             operation: "extract_invoice_fields",
-            metadata: { reason: extraction.reason },
+            metadata: { reason: result.reason },
           },
         );
-        return {
-          status: "unsupported" as const,
-          ...identity,
-          reason: extraction.reason,
-        };
       }
-      const result = parseSupplierInvoice(extraction.normalizedDocument);
-      const duplicateHints = await current.repository.invoiceDuplicateHints(
-        actor.id,
-        invoice.artifactId,
-        result.fields.reference,
-        invoice.checksumSha256,
-      );
-      return { status: "parsed" as const, ...identity, result, duplicateHints };
+      return result;
     }),
   );

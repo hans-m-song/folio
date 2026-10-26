@@ -13,6 +13,7 @@ import { parseDecimal } from "../domain/money";
 import type { TransactionInput } from "../domain/types";
 import { assertTransactionRules } from "../domain/workflow";
 import { revisionConflictError } from "../domain/revisions";
+import { withDatabaseTransactionClient } from "./transaction-cleanup";
 import { FolioDiagnosticError } from "../domain/diagnostics";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
@@ -434,115 +435,119 @@ export class BankRepository {
   async confirmImport(input: {
     actorId: string;
     artifactId: string;
-    versionId: string;
+    checksumSha256: string;
     rows: readonly ParsedBankTransaction[];
     earliestDate: string;
     latestDate: string;
     acknowledgedOverlapFingerprint: string | null;
   }): Promise<ConfirmBankImportResult> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.requireActor(client, input.actorId);
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        [`${profile}:imports`],
-      );
-      const artifactResult = await client.query(
-        `SELECT * FROM ${this.artifactsTable} WHERE id=$1 FOR UPDATE`,
-        [input.artifactId],
-      );
-      const artifact = artifactResult.rows[0];
-      if (!artifact || artifact.artifact_profile !== profile)
-        throw new Error("CommBank import artifact not found");
-      if (artifact.state === "available") {
-        const rowCount = await this.countRows(client, input.artifactId);
-        await client.query("COMMIT");
-        return {
-          status: "already_imported",
-          artifactId: input.artifactId,
-          rowCount,
-        };
-      }
-      if (
-        artifact.state !== "awaiting_review" ||
-        artifact.version_id !== input.versionId
-      )
-        throw new Error("Reviewable CommBank import artifact not found");
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        [`${profile}:${String(artifact.checksum_sha256)}`],
-      );
-      const duplicate = await client.query(
-        `SELECT id FROM ${this.artifactsTable} WHERE id<>$1 AND artifact_profile=$2 AND checksum_sha256=$3 AND state='available' ORDER BY confirmed_at LIMIT 1 FOR UPDATE`,
-        [input.artifactId, profile, artifact.checksum_sha256],
-      );
-      if (duplicate.rows[0]) {
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        await this.requireActor(client, input.actorId);
         await client.query(
-          `UPDATE ${this.artifactsTable} SET state='rejected' WHERE id=$1 AND state='awaiting_review'`,
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`${profile}:imports`],
+        );
+        const artifactResult = await client.query(
+          `SELECT * FROM ${this.artifactsTable} WHERE id=$1 FOR UPDATE`,
           [input.artifactId],
         );
-        const existingId = String(duplicate.rows[0].id);
-        const rowCount = await this.countRows(client, existingId);
-        await client.query("COMMIT");
-        return {
-          status: "already_imported",
-          artifactId: existingId,
-          rowCount,
-        };
-      }
-      const overlaps = await this.overlaps(
-        client,
-        input.artifactId,
-        input.earliestDate,
-        input.latestDate,
-      );
-      const overlapFingerprint = bankOverlapFingerprint(overlaps);
-      if (
-        overlaps.length &&
-        input.acknowledgedOverlapFingerprint !== overlapFingerprint
-      ) {
-        await client.query("COMMIT");
-        return {
-          status: "overlap_acknowledgement_required",
-          overlapFingerprint,
-          overlaps,
-        };
-      }
-      const available = await client.query(
-        `UPDATE ${this.artifactsTable} SET state='available' WHERE id=$1 AND state='awaiting_review' AND version_id=$2`,
-        [input.artifactId, input.versionId],
-      );
-      if (available.rowCount !== 1)
-        throw new Error("Reviewable CommBank import artifact not found");
-      for (const row of input.rows) {
-        const inserted = await client.query(
-          `INSERT INTO ${this.bankTransactionsTable} (posted_date, amount_aud, description, metadata, created_by_id, updated_by_id) VALUES ($1,$2,$3,$4,$5,$5) RETURNING id`,
-          [
-            row.postedDate,
-            row.amountAud,
-            row.description,
-            row.metadata,
-            input.actorId,
-          ],
-        );
+        const artifact = artifactResult.rows[0];
+        if (!artifact || artifact.artifact_profile !== profile)
+          throw new Error("CommBank import artifact not found");
+        if (artifact.state === "available") {
+          if (
+            artifact.checksum_sha256 !== input.checksumSha256 ||
+            artifact.confirmed_at == null
+          )
+            throw new Error("Reviewable CommBank import artifact not found");
+          const rowCount = await this.countRows(client, input.artifactId);
+          await client.query("COMMIT");
+          return {
+            status: "already_imported",
+            artifactId: input.artifactId,
+            rowCount,
+          };
+        }
+        if (
+          artifact.state !== "awaiting_review" ||
+          artifact.checksum_sha256 !== input.checksumSha256 ||
+          artifact.confirmed_at == null
+        )
+          throw new Error("Reviewable CommBank import artifact not found");
         await client.query(
-          `INSERT INTO ${this.bankArtifactsTable} (bank_transaction_id, source_artifact_id, metadata) VALUES ($1,$2,$3)`,
-          [inserted.rows[0]!.id, input.artifactId, { row: row.sourceRow }],
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`${profile}:${String(artifact.checksum_sha256)}`],
         );
-      }
-      await client.query("COMMIT");
-      return {
-        status: "imported",
-        artifactId: input.artifactId,
-        rowCount: input.rows.length,
-      };
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+        const duplicate = await client.query(
+          `SELECT id FROM ${this.artifactsTable} WHERE id<>$1 AND artifact_profile=$2 AND checksum_sha256=$3 AND state='available' ORDER BY confirmed_at LIMIT 1 FOR UPDATE`,
+          [input.artifactId, profile, artifact.checksum_sha256],
+        );
+        if (duplicate.rows[0]) {
+          await client.query(
+            `UPDATE ${this.artifactsTable} SET state='rejected' WHERE id=$1 AND state='awaiting_review' AND checksum_sha256=$2 AND confirmed_at IS NOT NULL`,
+            [input.artifactId, input.checksumSha256],
+          );
+          const existingId = String(duplicate.rows[0].id);
+          const rowCount = await this.countRows(client, existingId);
+          await client.query("COMMIT");
+          return {
+            status: "already_imported",
+            artifactId: existingId,
+            rowCount,
+          };
+        }
+        const overlaps = await this.overlaps(
+          client,
+          input.artifactId,
+          input.earliestDate,
+          input.latestDate,
+        );
+        const overlapFingerprint = bankOverlapFingerprint(overlaps);
+        if (
+          overlaps.length &&
+          input.acknowledgedOverlapFingerprint !== overlapFingerprint
+        ) {
+          await client.query("COMMIT");
+          return {
+            status: "overlap_acknowledgement_required",
+            overlapFingerprint,
+            overlaps,
+          };
+        }
+        const available = await client.query(
+          `UPDATE ${this.artifactsTable} SET state='available' WHERE id=$1 AND state='awaiting_review' AND checksum_sha256=$2 AND confirmed_at IS NOT NULL`,
+          [input.artifactId, input.checksumSha256],
+        );
+        if (available.rowCount !== 1)
+          throw new Error("Reviewable CommBank import artifact not found");
+        for (const row of input.rows) {
+          const inserted = await client.query(
+            `INSERT INTO ${this.bankTransactionsTable} (posted_date, amount_aud, description, metadata, created_by_id, updated_by_id) VALUES ($1,$2,$3,$4,$5,$5) RETURNING id`,
+            [
+              row.postedDate,
+              row.amountAud,
+              row.description,
+              row.metadata,
+              input.actorId,
+            ],
+          );
+          await client.query(
+            `INSERT INTO ${this.bankArtifactsTable} (bank_transaction_id, source_artifact_id, metadata) VALUES ($1,$2,$3)`,
+            [inserted.rows[0]!.id, input.artifactId, { row: row.sourceRow }],
+          );
+        }
+        await client.query("COMMIT");
+        return {
+          status: "imported",
+          artifactId: input.artifactId,
+          rowCount: input.rows.length,
+        };
+      },
+    );
   }
 
   async abandonPending(actorId: string, artifactId: string): Promise<void> {

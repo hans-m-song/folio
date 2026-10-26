@@ -41,14 +41,13 @@ const insertArtifact = async (
   const checksum = createHash("sha256").update(id).digest("base64");
 
   await pool.query(
-    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, version_id, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
-     VALUES ($1,$2,$2,$3,$4,$5,$6,$7,1,$8,'available',now())`,
+    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
+     VALUES ($1,$2,$2,$3,$4,$5,$6,1,$7,'available',now())`,
     [
       id,
       actorId,
       artifactProfile,
       `tests/bill-t28/${id}`,
-      `synthetic-version-${id}`,
       isPdf ? "synthetic-invoice.pdf" : "synthetic-bank-history.csv",
       isPdf ? "application/pdf" : "text/csv",
       checksum,
@@ -63,12 +62,12 @@ const insertAwaitingBankArtifact = async () => {
   const checksum = createHash("sha256").update(id).digest("base64");
 
   await pool.query(
-    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, version_id, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
-     VALUES ($1,$2,$2,'commbank_transaction_history_csv_v1',$3,$4,'synthetic-bank-history.csv','text/csv',1,$5,'awaiting_review',now())`,
-    [id, actorId, `tests/bill-t41/${id}`, `synthetic-version-${id}`, checksum],
+    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
+     VALUES ($1,$2,$2,'commbank_transaction_history_csv_v1',$3,'synthetic-bank-history.csv','text/csv',1,$4,'awaiting_review',now())`,
+    [id, actorId, `tests/bill-t41/${id}`, checksum],
   );
   createdArtifactIds.push(id);
-  return id;
+  return { id, checksum };
 };
 
 const importedBankRow = (artifactId: string) => ({
@@ -254,13 +253,14 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
   });
 
   it("publishes an awaiting-review CommBank artifact with its imported rows", async () => {
-    const artifactId = await insertAwaitingBankArtifact();
+    const { id: artifactId, checksum: checksumSha256 } =
+      await insertAwaitingBankArtifact();
     const row = importedBankRow(artifactId);
 
     const result = await bankRepository.confirmImport({
       actorId,
       artifactId,
-      versionId: `synthetic-version-${artifactId}`,
+      checksumSha256,
       rows: [row],
       earliestDate: row.postedDate,
       latestDate: row.postedDate,
@@ -274,7 +274,7 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
       ...links.rows.map((linkedRow) => String(linkedRow.bank_transaction_id)),
     );
     const imported = await pool.query(
-      `SELECT state, version_id, confirmed_at,
+      `SELECT state, confirmed_at,
          (SELECT count(*)::integer FROM ${bankArtifactsTable} WHERE source_artifact_id=$1) AS link_count
        FROM ${sourceArtifactsTable} WHERE id=$1`,
       [artifactId],
@@ -283,7 +283,6 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
     expect(result).toEqual({ status: "imported", artifactId, rowCount: 1 });
     expect(imported.rows[0]).toMatchObject({
       state: "available",
-      version_id: `synthetic-version-${artifactId}`,
       link_count: 1,
       confirmed_at: expect.any(Date),
     });
@@ -291,7 +290,8 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
   });
 
   it("rolls back artifact confirmation and inserted rows when a bank link fails", async () => {
-    const artifactId = await insertAwaitingBankArtifact();
+    const { id: artifactId, checksum: checksumSha256 } =
+      await insertAwaitingBankArtifact();
     const row = importedBankRow(artifactId);
 
     await pool.query(`
@@ -310,7 +310,7 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
       bankRepository.confirmImport({
         actorId,
         artifactId,
-        versionId: `synthetic-version-${artifactId}`,
+        checksumSha256,
         rows: [row],
         earliestDate: row.postedDate,
         latestDate: row.postedDate,
@@ -319,7 +319,7 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
     ).rejects.toThrow("Synthetic CommBank link failure");
 
     const persisted = await pool.query(
-      `SELECT state, version_id, confirmed_at,
+      `SELECT state, confirmed_at,
          (SELECT count(*)::integer FROM ${bankArtifactsTable} WHERE source_artifact_id=$1) AS link_count,
          (SELECT count(*)::integer FROM ${bankTransactionsTable} WHERE description=$2) AS bank_row_count
        FROM ${sourceArtifactsTable} WHERE id=$1`,
@@ -327,7 +327,6 @@ describe("bank reconciliation against disposable PostgreSQL", () => {
     );
     expect(persisted.rows[0]).toMatchObject({
       state: "awaiting_review",
-      version_id: `synthetic-version-${artifactId}`,
       confirmed_at: expect.any(Date),
       link_count: 0,
       bank_row_count: 0,

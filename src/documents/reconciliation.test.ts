@@ -9,35 +9,36 @@ import type { ObjectStorage } from "./storage";
 
 const artifact: ArtifactRecord = {
   id: "0f935296-35b3-43bd-bc3d-0caa0b0a2510",
-  kind: "pdf",
+  artifactProfile: "manual_invoice_pdf_v1",
   objectKey: "private/pdf/opaque",
-  versionId: null,
+  confirmedAt: null,
+  uploadExpiresAt: null,
   mediaType: "application/pdf",
   byteSize: "5",
   checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   state: "pending",
 };
 
-function boundaries(overrides: Partial<ObjectStorage> = {}) {
+const matchingHead = (record: ArtifactRecord) => ({
+  contentLength: Number(record.byteSize),
+  contentType: record.mediaType,
+  checksumSha256: record.checksumSha256,
+  metadata: { "folio-artifact-id": record.id },
+});
+
+const boundaries = (overrides: Partial<ObjectStorage> = {}) => {
   const repository = {
     requireActiveActor: vi.fn(),
     confirmAwaitingReview: vi.fn(),
     getArtifact: vi.fn().mockResolvedValue(artifact),
   } as unknown as ArtifactRepository;
   const storage = {
-    latestVersionId: vi.fn().mockResolvedValue("v1"),
-    headVersion: vi.fn().mockResolvedValue({
-      versionId: "v1",
-      contentLength: 5,
-      contentType: artifact.mediaType,
-      checksumSha256: artifact.checksumSha256,
-      metadata: { "folio-artifact-id": artifact.id },
-    }),
+    head: vi.fn().mockResolvedValue(matchingHead(artifact)),
     readPrefix: vi.fn().mockResolvedValue(Buffer.from("%PDF-")),
     ...overrides,
   } as unknown as ObjectStorage;
   return { repository, storage };
-}
+};
 
 describe("pending upload reconciliation", () => {
   it("defaults to a non-mutating dry-run result", async () => {
@@ -55,9 +56,10 @@ describe("pending upload reconciliation", () => {
     ]);
     expect(repository.requireActiveActor).not.toHaveBeenCalled();
     expect(repository.confirmAwaitingReview).not.toHaveBeenCalled();
+    expect(storage.head).toHaveBeenCalledWith("test", artifact.objectKey);
   });
 
-  it("recovers only after actor and deliberate confirmation checks", async () => {
+  it("recovers only after actor, checksum, and deliberate confirmation checks", async () => {
     const { repository, storage } = boundaries();
     await expect(
       reconcilePendingUploads({
@@ -75,18 +77,63 @@ describe("pending upload reconciliation", () => {
     );
     expect(repository.confirmAwaitingReview).toHaveBeenCalledWith(
       artifact.id,
-      "v1",
+      artifact.checksumSha256,
+    );
+    expect(storage.readPrefix).toHaveBeenCalledWith(
+      "test",
+      artifact.objectKey,
+      5,
     );
   });
 
-  it("refuses mismatches and invalid recovery confirmation", async () => {
+  it("reports missing objects separately from unavailable or denied storage", async () => {
+    const absent = boundaries({
+      head: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error("missing"), { name: "NoSuchKey" }),
+        ),
+    });
+    await expect(
+      reconcilePendingUploads({
+        artifacts: [artifact],
+        repository: absent.repository,
+        storage: absent.storage,
+        bucket: "test",
+        recover: false,
+      }),
+    ).resolves.toEqual([{ artifactId: artifact.id, status: "missing_object" }]);
+
+    const denied = boundaries({
+      head: vi
+        .fn()
+        .mockRejectedValue(new Error("access denied token=synthetic-secret")),
+    });
+    const diagnosticLog = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      await expect(
+        reconcilePendingUploads({
+          artifacts: [artifact],
+          repository: denied.repository,
+          storage: denied.storage,
+          bucket: "test",
+          recover: false,
+        }),
+      ).resolves.toEqual([
+        { artifactId: artifact.id, status: "object_unavailable_or_denied" },
+      ]);
+    } finally {
+      diagnosticLog.mockRestore();
+    }
+  });
+
+  it("refuses integrity mismatches and invalid recovery confirmation", async () => {
     const { repository, storage } = boundaries({
-      headVersion: vi.fn().mockResolvedValue({
-        versionId: "v1",
+      head: vi.fn().mockResolvedValue({
+        ...matchingHead(artifact),
         contentLength: 6,
-        contentType: artifact.mediaType,
-        checksumSha256: artifact.checksumSha256,
-        metadata: { "folio-artifact-id": artifact.id },
       }),
     });
     await expect(
@@ -120,7 +167,13 @@ describe("pending upload reconciliation", () => {
     const { repository, storage } = boundaries();
     await expect(
       reconcilePendingUploads({
-        artifacts: [{ ...artifact, state: "available", versionId: "v1" }],
+        artifacts: [
+          {
+            ...artifact,
+            state: "available",
+            confirmedAt: "2040-01-01T00:00:00.000Z",
+          },
+        ],
         repository,
         storage,
         bucket: "test",
@@ -129,7 +182,7 @@ describe("pending upload reconciliation", () => {
     ).resolves.toEqual([
       { artifactId: artifact.id, status: "already_resolved" },
     ]);
-    expect(storage.latestVersionId).not.toHaveBeenCalled();
+    expect(storage.head).not.toHaveBeenCalled();
     expect(repository.confirmAwaitingReview).not.toHaveBeenCalled();
   });
 
@@ -137,17 +190,10 @@ describe("pending upload reconciliation", () => {
     const bankArtifact: ArtifactRecord = {
       ...artifact,
       artifactProfile: "nab_transaction_history_csv_v1",
-      kind: undefined,
       mediaType: "text/csv",
     };
     const { repository, storage } = boundaries({
-      headVersion: vi.fn().mockResolvedValue({
-        versionId: "v1",
-        contentLength: 5,
-        contentType: "text/csv",
-        checksumSha256: bankArtifact.checksumSha256,
-        metadata: { "folio-artifact-id": bankArtifact.id },
-      }),
+      head: vi.fn().mockResolvedValue(matchingHead(bankArtifact)),
     });
     await expect(
       reconcilePendingUploads({
@@ -159,12 +205,11 @@ describe("pending upload reconciliation", () => {
         actorEmail: "operator@example.test",
         confirmation: RECOVERY_CONFIRMATION,
       }),
-    ).resolves.toEqual([
-      { artifactId: bankArtifact.id, status: "recovered" },
-    ]);
+    ).resolves.toEqual([{ artifactId: bankArtifact.id, status: "recovered" }]);
+    expect(storage.readPrefix).not.toHaveBeenCalled();
     expect(repository.confirmAwaitingReview).toHaveBeenCalledWith(
       bankArtifact.id,
-      "v1",
+      bankArtifact.checksumSha256,
     );
   });
 });

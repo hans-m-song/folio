@@ -2,17 +2,17 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
-  ListObjectVersionsCommand,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
+import { UPLOAD_URL_TTL_SECONDS } from "./upload-lifecycle";
+
 export interface StoredObjectHead {
   contentLength: number | undefined;
   contentType: string | undefined;
   checksumSha256: string | undefined;
-  versionId: string | undefined;
   metadata: Record<string, string> | undefined;
 }
 
@@ -24,33 +24,13 @@ export interface ObjectStorage {
     checksumSha256: string;
     byteSize: number;
     artifactId: string;
+    expiresAt: string;
   }): Promise<string>;
-  latestVersionId(bucket: string, key: string): Promise<string | undefined>;
-  headVersion(
-    bucket: string,
-    key: string,
-    versionId: string,
-  ): Promise<StoredObjectHead>;
-  readPrefix(
-    bucket: string,
-    key: string,
-    versionId: string,
-    bytes: number,
-  ): Promise<Uint8Array>;
-  listVersions(bucket: string, key: string): Promise<string[]>;
-  deleteVersion(bucket: string, key: string, versionId: string): Promise<void>;
-  presignGet(
-    bucket: string,
-    key: string,
-    versionId: string,
-    filename: string,
-  ): Promise<string>;
-  presignInline(
-    bucket: string,
-    key: string,
-    versionId: string,
-    filename: string,
-  ): Promise<string>;
+  head(bucket: string, key: string): Promise<StoredObjectHead>;
+  readPrefix(bucket: string, key: string, bytes: number): Promise<Uint8Array>;
+  deleteObject(bucket: string, key: string): Promise<void>;
+  presignGet(bucket: string, key: string, filename: string): Promise<string>;
+  presignInline(bucket: string, key: string, filename: string): Promise<string>;
 }
 
 const contentDisposition = (
@@ -87,6 +67,17 @@ const contentDisposition = (
   return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 };
 
+const isMissingObject = (error: unknown): boolean =>
+  error !== null &&
+  typeof error === "object" &&
+  (("name" in error &&
+    (error.name === "NoSuchKey" || error.name === "NotFound")) ||
+    ("$metadata" in error &&
+      error.$metadata !== null &&
+      typeof error.$metadata === "object" &&
+      "httpStatusCode" in error.$metadata &&
+      error.$metadata.httpStatusCode === 404));
+
 export class S3ObjectStorage implements ObjectStorage {
   constructor(
     private readonly client: S3Client,
@@ -100,7 +91,15 @@ export class S3ObjectStorage implements ObjectStorage {
     checksumSha256: string;
     byteSize: number;
     artifactId: string;
+    expiresAt: string;
   }): Promise<string> {
+    const expiryMilliseconds = Date.parse(input.expiresAt);
+    if (!Number.isFinite(expiryMilliseconds))
+      throw new Error("Upload expiry is invalid");
+    const signingDate = new Date(
+      expiryMilliseconds - UPLOAD_URL_TTL_SECONDS * 1000,
+    );
+
     return getSignedUrl(
       this.presignClient,
       new PutObjectCommand({
@@ -110,9 +109,16 @@ export class S3ObjectStorage implements ObjectStorage {
         ContentLength: input.byteSize,
         ChecksumSHA256: input.checksumSha256,
         Metadata: { "folio-artifact-id": input.artifactId },
+        IfNoneMatch: "*",
       }),
       {
-        expiresIn: 300,
+        expiresIn: UPLOAD_URL_TTL_SECONDS,
+        signingDate,
+        signableHeaders: new Set([
+          "if-none-match",
+          "content-type",
+          "content-length",
+        ]),
         unhoistableHeaders: new Set([
           "x-amz-checksum-sha256",
           "x-amz-meta-folio-artifact-id",
@@ -121,26 +127,11 @@ export class S3ObjectStorage implements ObjectStorage {
     );
   }
 
-  async latestVersionId(
-    bucket: string,
-    key: string,
-  ): Promise<string | undefined> {
-    const result = await this.client.send(
-      new HeadObjectCommand({ Bucket: bucket, Key: key }),
-    );
-    return result.VersionId;
-  }
-
-  async headVersion(
-    bucket: string,
-    key: string,
-    versionId: string,
-  ): Promise<StoredObjectHead> {
+  async head(bucket: string, key: string): Promise<StoredObjectHead> {
     const result = await this.client.send(
       new HeadObjectCommand({
         Bucket: bucket,
         Key: key,
-        VersionId: versionId,
         ChecksumMode: "ENABLED",
       }),
     );
@@ -148,7 +139,6 @@ export class S3ObjectStorage implements ObjectStorage {
       contentLength: result.ContentLength,
       contentType: result.ContentType,
       checksumSha256: result.ChecksumSHA256,
-      versionId: result.VersionId,
       metadata: result.Metadata,
     };
   }
@@ -156,14 +146,12 @@ export class S3ObjectStorage implements ObjectStorage {
   async readPrefix(
     bucket: string,
     key: string,
-    versionId: string,
     bytes: number,
   ): Promise<Uint8Array> {
     const result = await this.client.send(
       new GetObjectCommand({
         Bucket: bucket,
         Key: key,
-        VersionId: versionId,
         Range: `bytes=0-${bytes - 1}`,
       }),
     );
@@ -171,67 +159,20 @@ export class S3ObjectStorage implements ObjectStorage {
     return result.Body.transformToByteArray();
   }
 
-  async deleteVersion(
-    bucket: string,
-    key: string,
-    versionId: string,
-  ): Promise<void> {
+  async deleteObject(bucket: string, key: string): Promise<void> {
     try {
       await this.client.send(
-        new DeleteObjectCommand({
-          Bucket: bucket,
-          Key: key,
-          VersionId: versionId,
-        }),
+        new DeleteObjectCommand({ Bucket: bucket, Key: key }),
       );
     } catch (error) {
-      if (
-        error !== null &&
-        typeof error === "object" &&
-        "name" in error &&
-        error.name === "NoSuchVersion"
-      )
-        return;
+      if (isMissingObject(error)) return;
       throw error;
     }
-  }
-
-  async listVersions(bucket: string, key: string): Promise<string[]> {
-    const versionIds: string[] = [];
-    let keyMarker: string | undefined;
-    let versionIdMarker: string | undefined;
-    let truncated = true;
-    while (truncated) {
-      const result = await this.client.send(
-        new ListObjectVersionsCommand({
-          Bucket: bucket,
-          Prefix: key,
-          KeyMarker: keyMarker,
-          VersionIdMarker: versionIdMarker,
-        }),
-      );
-      for (const entry of [
-        ...(result.Versions ?? []),
-        ...(result.DeleteMarkers ?? []),
-      ])
-        if (entry.Key === key && entry.VersionId)
-          versionIds.push(entry.VersionId);
-      truncated = result.IsTruncated === true;
-      if (!truncated) break;
-      keyMarker = result.NextKeyMarker;
-      versionIdMarker = result.NextVersionIdMarker;
-      if (!keyMarker)
-        throw new Error(
-          "Object version listing did not provide a next page marker",
-        );
-    }
-    return versionIds;
   }
 
   async presignGet(
     bucket: string,
     key: string,
-    versionId: string,
     filename: string,
   ): Promise<string> {
     return getSignedUrl(
@@ -239,7 +180,6 @@ export class S3ObjectStorage implements ObjectStorage {
       new GetObjectCommand({
         Bucket: bucket,
         Key: key,
-        VersionId: versionId,
         ResponseContentDisposition: contentDisposition("attachment", filename),
       }),
       { expiresIn: 300 },
@@ -249,7 +189,6 @@ export class S3ObjectStorage implements ObjectStorage {
   async presignInline(
     bucket: string,
     key: string,
-    versionId: string,
     filename: string,
   ): Promise<string> {
     return getSignedUrl(
@@ -257,7 +196,6 @@ export class S3ObjectStorage implements ObjectStorage {
       new GetObjectCommand({
         Bucket: bucket,
         Key: key,
-        VersionId: versionId,
         ResponseContentDisposition: contentDisposition("inline", filename),
       }),
       { expiresIn: 300 },

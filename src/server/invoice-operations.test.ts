@@ -44,7 +44,7 @@ const bytes = new Uint8Array([37, 80, 68, 70, 45]);
 const identity = {
   artifactId,
   checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-  versionId: "synthetic-v1",
+  confirmedAt: "2026-10-07T01:23:00.000Z",
 };
 const normalizedDocument = {
   schemaVersion: normalizedInvoiceDocumentVersion,
@@ -81,11 +81,10 @@ beforeEach(() => {
 });
 
 describe("authorized invoice suggestions", () => {
-  it("returns fields and immutable provenance without bytes or normalized raw text", async () => {
+  it("returns fields and confirmed artifact identity without bytes or normalized raw text", async () => {
     const response = await extractInvoiceFields({
       data: {
         artifactId,
-        expectedVersionId: "synthetic-v1",
         expectedChecksumSha256: identity.checksumSha256,
       },
     });
@@ -105,7 +104,7 @@ describe("authorized invoice suggestions", () => {
     expect(fixture.documents.readInvoicePdf).toHaveBeenCalledWith(
       "actor",
       artifactId,
-      { versionId: "synthetic-v1", checksumSha256: identity.checksumSha256 },
+      { checksumSha256: identity.checksumSha256 },
     );
     expect(extractor).toHaveBeenCalledWith(bytes);
     expect(fixture.repository.invoiceDuplicateHints).toHaveBeenCalledWith(
@@ -152,6 +151,7 @@ describe("authorized invoice suggestions", () => {
       { url: "https://example.test/invoice.pdf" },
       { path: "/synthetic/invoice.pdf" },
       { bytes },
+      { expectedVersionId: "synthetic-version" },
     ]) {
       await expect(
         extractInvoiceFields({ data: { artifactId, ...extra } } as never),

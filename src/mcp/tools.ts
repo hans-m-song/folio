@@ -643,7 +643,7 @@ const registerToolsForPrincipal = (
       "begin_artifact_upload",
       {
         description:
-          "Create a bounded direct-to-storage upload intent for a supported artifact profile.",
+          "Create a bounded direct-to-storage upload intent for a supported artifact profile. For upload_ready, PUT the file bytes to uploadUrl with every exact name and value in uploadHeaders. If the PUT returns HTTP 412, call confirm_artifact_upload to confirm the existing object. Treat every other non-2xx response as a failed upload.",
         inputSchema: fromJsonSchema<{
           idempotencyKey: string;
           profile: (typeof uploadProfiles)[number];
@@ -720,6 +720,7 @@ const registerToolsForPrincipal = (
               status: result.status,
               artifact: publicArtifact(result.artifact),
               uploadUrl: result.uploadUrl,
+              uploadHeaders: result.uploadHeaders,
               replayed: result.replayed,
             };
           },
@@ -730,7 +731,7 @@ const registerToolsForPrincipal = (
       "confirm_artifact_upload",
       {
         description:
-          "Confirm an actor-owned immutable upload version and queue it for human review.",
+          "Confirm an actor-owned upload whose stored object identity matches the artifact and queue it for human review.",
         inputSchema: fromJsonSchema<{ artifactId: string }>(
           jsonObject({ artifactId: { type: "string", format: "uuid" } }, [
             "artifactId",
@@ -1103,7 +1104,7 @@ const publicArtifact = (artifact: {
   byteSize: string;
   checksumSha256: string;
   state: string;
-  versionId: string | null;
+  confirmedAt?: string | null;
 }) => ({
   id: artifact.id,
   profile: artifact.artifactProfile ?? artifact.kind ?? null,
@@ -1112,7 +1113,7 @@ const publicArtifact = (artifact: {
   byteSize: artifact.byteSize,
   checksumSha256: artifact.checksumSha256,
   state: artifact.state,
-  versionId: artifact.versionId,
+  confirmedAt: artifact.confirmedAt ?? null,
 });
 
 export interface McpToolDependencies {

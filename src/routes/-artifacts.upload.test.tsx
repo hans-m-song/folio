@@ -96,10 +96,23 @@ beforeEach(() => {
   let id = 0;
   operations.findArtifactFilenameMatches.mockResolvedValue([]);
   operations.startArtifactUpload.mockImplementation(
-    async ({ data }: { data: { filename: string } }) => ({
-      artifact: { id: `artifact-${++id}` },
-      uploadUrl: `https://upload.example.test/${encodeURIComponent(data.filename)}`,
-    }),
+    async ({
+      data,
+    }: {
+      data: { filename: string; mediaType: string; checksumSha256: string };
+    }) => {
+      const artifactId = `artifact-${++id}`;
+      return {
+        artifact: { id: artifactId },
+        uploadUrl: `https://upload.example.test/${encodeURIComponent(data.filename)}`,
+        uploadHeaders: {
+          "Content-Type": data.mediaType,
+          "x-amz-checksum-sha256": data.checksumSha256,
+          "x-amz-meta-folio-artifact-id": artifactId,
+          "If-None-Match": "*",
+        },
+      };
+    },
   );
   operations.confirmArtifactUpload.mockImplementation(async ({ data }) => ({
     ...data,
@@ -208,6 +221,11 @@ describe("bulk invoice PDF upload", () => {
     expect(firstRequest.headers.get("x-amz-checksum-sha256")).toBe(
       checksumSha256,
     );
+    expect(firstRequest.headers.get("Content-Type")).toBe("application/pdf");
+    expect(firstRequest.headers.get("x-amz-meta-folio-artifact-id")).toBe(
+      "artifact-1",
+    );
+    expect(firstRequest.headers.get("If-None-Match")).toBe("*");
     firstRequest.progress(first.size / 2, first.size);
     await screen.findByText("50%");
     firstRequest.finish(503);
@@ -241,6 +259,33 @@ describe("bulk invoice PDF upload", () => {
       expect(screen.getAllByText("Awaiting review").length).toBe(2),
     );
     expect(operations.confirmArtifactUpload).toHaveBeenCalledTimes(2);
+  });
+
+  it("confirms an existing matching PDF after a storage precondition conflict", async () => {
+    const file = new File(["%PDF-1.7\n"], "existing.pdf", {
+      type: "application/pdf",
+    });
+    render(
+      createElement(ArtifactPdfUploadPage, { session: authenticatedSession }),
+    );
+    const input = screen.getByLabelText("Invoice or evidence PDFs");
+    fireEvent.change(input, { target: { files: [file] } });
+    fireEvent.submit(input.closest("form")!);
+
+    await waitFor(() => expect(FakeXmlHttpRequest.requests).toHaveLength(1));
+    const request = FakeXmlHttpRequest.requests[0]!;
+    expect(request.headers.get("Content-Type")).toBe("application/pdf");
+    expect(request.headers.get("If-None-Match")).toBe("*");
+    request.finish(412);
+
+    expect(
+      await screen.findByText(
+        "Upload confirmed. This PDF is awaiting human review and is not available as evidence yet.",
+      ),
+    ).toBeTruthy();
+    expect(operations.confirmArtifactUpload).toHaveBeenCalledWith({
+      data: { id: "artifact-1" },
+    });
   });
 
   it("keeps unauthenticated visitors out of the upload workflow", () => {

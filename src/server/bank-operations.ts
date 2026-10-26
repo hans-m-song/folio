@@ -143,7 +143,7 @@ export const confirmBankImport = createServerFn({ method: "POST" })
           return current.bankRepository.confirmImport({
             actorId: actor.id,
             artifactId: data.artifactId,
-            versionId: artifact.versionId ?? "",
+            checksumSha256: artifact.checksumSha256,
             rows: [],
             earliestDate: "1970-01-01",
             latestDate: "1970-01-01",
@@ -173,7 +173,7 @@ export const confirmBankImport = createServerFn({ method: "POST" })
         return current.bankRepository.confirmImport({
           actorId: actor.id,
           artifactId: data.artifactId,
-          versionId: object.versionId,
+          checksumSha256: object.artifact.checksumSha256,
           rows: preview.rows,
           earliestDate: preview.earliestDate,
           latestDate: preview.latestDate,

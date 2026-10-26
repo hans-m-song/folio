@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { requiredMigrationIds } from "./migrations";
 
 describe("artifact relationship migration", () => {
   it("migrates profiles and creates a many-to-many evidence table", async () => {
@@ -94,5 +95,71 @@ describe("artifact relationship migration", () => {
       'DROP CONSTRAINT "source_artifacts_rejected_csv_check"',
     );
     expect(migration).not.toMatch(/UPDATE\s+"__FOLIO_SCHEMA__"/);
+  });
+
+  it("requires an empty artifact table before removing storage versions", async () => {
+    const migration = await readFile(
+      fileURLToPath(
+        new URL(
+          "../../migrations/0019_folio_unversioned_artifacts.sql",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    expect(migration).toMatch(
+      /IF EXISTS \([\s\S]*FROM "__FOLIO_SCHEMA__"\."source_artifacts"[\s\S]*\) THEN[\s\S]*RAISE EXCEPTION[\s\S]*source_artifacts must be empty/,
+    );
+    expect(migration.indexOf("LOCK TABLE")).toBeLessThan(
+      migration.indexOf("DO $$"),
+    );
+    expect(migration).toContain('DROP COLUMN "version_id"');
+    expect(migration).toContain('ADD COLUMN "upload_expires_at" timestamptz');
+    expect(migration).toContain('"confirmed_at" IS NOT NULL');
+    expect(migration).not.toMatch(/DELETE FROM|TRUNCATE/i);
+  });
+
+  it("adds nullable source artifact metadata without replacing existing rows", async () => {
+    const migration = await readFile(
+      fileURLToPath(
+        new URL(
+          "../../migrations/0020_folio_artifact_metadata.sql",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+
+    expect(requiredMigrationIds).toContain("0020_folio_artifact_metadata");
+    expect(migration).toContain('ADD COLUMN "period_start" date');
+    expect(migration).toContain('ADD COLUMN "period_end" date');
+    expect(migration).toContain('ADD COLUMN "document_date" date');
+    expect(migration).toContain('ADD COLUMN "reference" text');
+    expect(migration).toContain('ADD COLUMN "notes" text');
+    expect(migration).toMatch(/"period_start" <= "period_end"/);
+    expect(migration).not.toMatch(
+      /DELETE FROM|TRUNCATE|UPDATE\s+"__FOLIO_SCHEMA__"/i,
+    );
+  });
+
+  it("adds an optional bounded supplier field without rewriting existing rows", async () => {
+    const migration = await readFile(
+      fileURLToPath(
+        new URL(
+          "../../migrations/0021_folio_artifact_supplier.sql",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+
+    expect(requiredMigrationIds).toContain("0021_folio_artifact_supplier");
+    expect(migration).toContain('ADD COLUMN "supplier" text');
+    expect(migration).toMatch(
+      /source_artifacts_supplier_length_check[\s\S]*char_length\("supplier"\) <= 200/,
+    );
+    expect(migration).not.toMatch(
+      /DELETE FROM|TRUNCATE|UPDATE\s+"__FOLIO_SCHEMA__"/i,
+    );
   });
 });

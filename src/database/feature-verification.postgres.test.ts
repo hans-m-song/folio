@@ -97,9 +97,9 @@ const createBankArtifact = async () => {
   const id = randomUUID();
   const checksum = createHash("sha256").update(id).digest("base64");
   await pool.query(
-    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, version_id, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
-     VALUES ($1,$2,$2,'commbank_transaction_history_csv_v1',$3,$4,'synthetic-bank-history.csv','text/csv',1,$5,'available',now())`,
-    [id, actorId, `tests/bill-t86/${id}`, `synthetic-version-${id}`, checksum],
+    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
+     VALUES ($1,$2,$2,'commbank_transaction_history_csv_v1',$3,'synthetic-bank-history.csv','text/csv',1,$4,'available',now())`,
+    [id, actorId, `tests/bill-t86/${id}`, checksum],
   );
   createdArtifactIds.push(id);
   return id;

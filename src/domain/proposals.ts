@@ -1,3 +1,4 @@
+import { parseWithDiagnostics } from "./validation-diagnostics";
 import { createHash, randomBytes } from "node:crypto";
 
 import { z } from "zod";
@@ -209,7 +210,7 @@ export const parseProposalSubmission = (input: unknown): ProposalSubmission => {
     Buffer.byteLength(serialized, "utf8") > MAX_PROPOSAL_REQUEST_BYTES
   )
     throw new Error("Proposal request exceeds the configured size limit");
-  const parsed = proposalSubmissionSchema.parse(input);
+  const parsed = parseWithDiagnostics(proposalSubmissionSchema, input);
   if (parsed.kind === "draft_transaction")
     proposalDraftNotes(parsed.transaction.notes, parsed.note);
   return parsed;
@@ -237,12 +238,16 @@ export const validatePreImportCommBankLocator = (input: {
   artifact: ArtifactRecord;
   parsedRows: readonly ParsedBankTransaction[];
 }): ValidatedCommBankArtifactRowLocator => {
-  const locator = commBankArtifactRowLocatorSchema.parse(input.locator);
+  const locator = parseWithDiagnostics(
+    commBankArtifactRowLocatorSchema,
+    input.locator,
+  );
   if (
     input.artifact.id !== locator.artifactId ||
     input.artifact.artifactProfile !== "commbank_transaction_history_csv_v1" ||
     input.artifact.state !== "awaiting_review" ||
-    !input.artifact.versionId
+    !input.artifact.checksumSha256 ||
+    !input.artifact.confirmedAt
   )
     throw new Error("Pinned CommBank artifact is not awaiting review");
   if (!input.parsedRows.some((row) => row.sourceRow === locator.sourceRow))

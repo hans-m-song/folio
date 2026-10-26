@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as Authorization from "./authorization";
+import { setResponseStatus } from "@tanstack/react-start/server";
 
 const current = vi.hoisted(() => ({
   authConfig: { sessionCookieName: "folio_session" },
@@ -9,6 +10,8 @@ const current = vi.hoisted(() => ({
     listUsers: vi.fn().mockResolvedValue([]),
     listTransactions: vi.fn().mockResolvedValue([]),
     listArtifacts: vi.fn().mockResolvedValue({ rows: [], total: 0 }),
+    getArtifact: vi.fn(),
+    getArtifactDetails: vi.fn(),
     findArtifactFilenameMatches: vi.fn(),
     listTransactionPage: vi
       .fn()
@@ -30,6 +33,7 @@ const current = vi.hoisted(() => ({
     applyBulkTransactionEdit: vi.fn(),
     deleteDraftTransaction: vi.fn(),
     createUser: vi.fn(),
+    updateUser: vi.fn(),
     previewStripeImport: vi.fn(),
   },
   bankRepository: {
@@ -45,6 +49,7 @@ const current = vi.hoisted(() => ({
   },
   documents: {
     startUpload: vi.fn(),
+    updateMetadata: vi.fn(),
     readReviewText: vi.fn(),
     rejectArtifact: vi.fn(),
     deleteArtifact: vi.fn(),
@@ -93,6 +98,7 @@ vi.mock("./runtime", () => ({ runtime: () => current }));
 
 import { permissions } from "./authorization";
 import { FolioDiagnosticError } from "../domain/diagnostics";
+import { AppError } from "../domain/errors";
 import { ArtifactPresignRecoveryError } from "../documents/service";
 import {
   applyBulkTransactionEdit,
@@ -108,12 +114,14 @@ import {
   listTransactionPage,
   listWorkspace,
   listArtifacts,
+  getArtifactDetails,
   findArtifactFilenameMatches,
   previewStripeCsv,
   reportClientRenderFailure,
   rejectArtifact,
   saveManualTransaction,
   startArtifactUpload,
+  updateArtifactMetadata,
 } from "./operations";
 
 const member = {
@@ -281,7 +289,9 @@ describe("server operation authorization", () => {
     });
     current.repository.createManual.mockReset();
     current.repository.updateManual.mockReset();
+    current.repository.getArtifact.mockReset();
     current.documents.startUpload.mockReset();
+    current.documents.updateMetadata.mockReset();
     current.documents.readReviewText.mockReset();
     current.documents.rejectArtifact.mockReset();
     current.documents.deleteArtifact.mockReset();
@@ -321,6 +331,210 @@ describe("server operation authorization", () => {
     await expect(
       discardProposedDraftEvidence({ data: { transactionId } }),
     ).rejects.toThrow("Code PERMISSION_DENIED");
+  });
+
+  it("authorizes artifact details and additionally requires bank activity view for bank profiles", async () => {
+    const artifactId = "33333333-3333-4333-8333-333333333333";
+    const details = {
+      artifactProfile: "commbank_statement_pdf_v1",
+      id: artifactId,
+    };
+    current.repository.getArtifactDetails.mockResolvedValue(details);
+
+    await expect(
+      getArtifactDetails({ data: { id: artifactId } }),
+    ).resolves.toBe(details);
+    expect(current.repository.getArtifactDetails).toHaveBeenCalledWith(
+      member.id,
+      artifactId,
+    );
+    expect(permissionProbe.requirePermission).toHaveBeenCalledWith(
+      member,
+      permissions.bankActivityView,
+    );
+
+    permissionProbe.requirePermission.mockImplementationOnce(
+      (_actor, permission) => {
+        if (permission === permissions.bankActivityView)
+          throw new Error("Bank activity access denied");
+      },
+    );
+    await expect(
+      getArtifactDetails({ data: { id: artifactId } }),
+    ).rejects.toThrow();
+  });
+
+  it("validates and forwards artifact metadata with upload requests", async () => {
+    const data = {
+      ownerId: null,
+      artifactProfile: "manual_invoice_pdf_v1" as const,
+      filename: "Selected invoice.pdf",
+      originalFilename: "scan.pdf",
+      mediaType: "application/pdf" as const,
+      byteSize: 5,
+      checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      periodStart: "2026-07-01",
+      periodEnd: "2026-09-30",
+      documentDate: "2026-09-15",
+      reference: "INV-42",
+      notes: "Quarterly invoice",
+      supplier: "  Northwind Systems  ",
+    };
+    current.documents.startUpload.mockResolvedValue({
+      artifact: { id: "saved" },
+    });
+
+    await startArtifactUpload({ data });
+
+    expect(current.documents.startUpload).toHaveBeenCalledWith({
+      ...data,
+      supplier: "Northwind Systems",
+      actorId: member.id,
+    });
+    expect(() =>
+      startArtifactUpload({
+        data: {
+          ...data,
+          filename: "folder/invoice.pdf",
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      startArtifactUpload({
+        data: {
+          ...data,
+          periodStart: "2026-10-01",
+          periodEnd: "2026-09-30",
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      startArtifactUpload({
+        data: { ...data, supplier: "S".repeat(201) },
+      }),
+    ).toThrow();
+  });
+
+  it("updates artifact metadata through the authenticated document service", async () => {
+    const id = "33333333-3333-4333-8333-333333333333";
+    const data = {
+      id,
+      filename: "October statement.csv",
+      periodStart: "2026-10-01",
+      periodEnd: "2026-10-31",
+      expected: {
+        filename: "statement.csv",
+        periodStart: null,
+        periodEnd: null,
+      },
+    };
+    const artifact = {
+      id,
+      artifactProfile: "commbank_transaction_history_csv_v1",
+      state: "available",
+    };
+    const updated = { ...artifact, filename: data.filename };
+    current.repository.getArtifact.mockResolvedValue(artifact);
+    current.documents.updateMetadata.mockResolvedValue(updated);
+
+    await expect(updateArtifactMetadata({ data })).resolves.toEqual(updated);
+
+    expect(current.repository.getArtifact).toHaveBeenCalledWith(id);
+    expect(current.documents.updateMetadata).toHaveBeenCalledWith(
+      member.id,
+      data,
+    );
+    expect(permissionProbe.requirePermission).toHaveBeenCalledWith(
+      member,
+      permissions.bankActivityImport,
+    );
+  });
+
+  it("returns a 409 when the metadata compare-and-set is stale", async () => {
+    const id = "33333333-3333-4333-8333-333333333333";
+    const data = {
+      id,
+      filename: "renamed.pdf",
+      periodStart: null,
+      periodEnd: null,
+      expected: {
+        filename: "invoice.pdf",
+        periodStart: null,
+        periodEnd: null,
+      },
+    };
+    current.repository.getArtifact.mockResolvedValue({
+      id,
+      artifactProfile: "manual_invoice_pdf_v1",
+      state: "available",
+    });
+    current.documents.updateMetadata.mockRejectedValue(
+      new AppError({
+        code: "ARTIFACT_METADATA_CONFLICT",
+        stage: "artifact_metadata",
+      }),
+    );
+
+    await expect(updateArtifactMetadata({ data })).rejects.toThrow(
+      "Code ARTIFACT_METADATA_CONFLICT",
+    );
+    expect(setResponseStatus).toHaveBeenCalledWith(409);
+  });
+
+  it("denies bank artifact metadata edits before mutation when bank import access is missing", async () => {
+    const id = "33333333-3333-4333-8333-333333333333";
+    const data = {
+      id,
+      filename: "October statement.csv",
+      periodStart: null,
+      periodEnd: null,
+      expected: {
+        filename: "statement.csv",
+        periodStart: null,
+        periodEnd: null,
+      },
+    };
+    current.repository.getArtifact.mockResolvedValue({
+      id,
+      artifactProfile: "commbank_transaction_history_csv_v1",
+      state: "available",
+    });
+    permissionProbe.requirePermission.mockImplementationOnce(() => {
+      throw new FolioDiagnosticError({
+        category: "actor",
+        code: "PERMISSION_DENIED",
+        retryable: false,
+      });
+    });
+
+    await expect(updateArtifactMetadata({ data })).rejects.toThrow(
+      "Code PERMISSION_DENIED",
+    );
+
+    expect(current.documents.updateMetadata).not.toHaveBeenCalled();
+  });
+
+  it("denies viewers before reading or mutating artifact metadata", async () => {
+    current.auth.session.mockResolvedValue(viewer);
+
+    await expect(
+      updateArtifactMetadata({
+        data: {
+          id: "33333333-3333-4333-8333-333333333333",
+          filename: "invoice.pdf",
+          periodStart: null,
+          periodEnd: null,
+          expected: {
+            filename: "invoice.pdf",
+            periodStart: null,
+            periodEnd: null,
+          },
+        },
+      }),
+    ).rejects.toThrow("Code PERMISSION_DENIED");
+
+    expect(current.repository.getArtifact).not.toHaveBeenCalled();
+    expect(current.documents.updateMetadata).not.toHaveBeenCalled();
   });
 
   it("fails a protected operation closed without an authenticated session", async () => {

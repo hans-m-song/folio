@@ -53,6 +53,17 @@ vi.mock("./-transaction-workflow", () => ({
 
 import { Route } from "./banking.reconcile";
 
+const uploadHeadersFor = (
+  artifactId: string,
+  mediaType = "text/csv",
+  checksumSha256 = "synthetic-checksum",
+) => ({
+  "Content-Type": mediaType,
+  "x-amz-checksum-sha256": checksumSha256,
+  "x-amz-meta-folio-artifact-id": artifactId,
+  "If-None-Match": "*",
+});
+
 interface TestBankRow {
   id: string;
   postedDate: string;
@@ -1008,10 +1019,15 @@ describe("bank reconciliation actions", () => {
     const getRandomValues = crypto.getRandomValues.bind(crypto);
     vi.stubGlobal("crypto", { getRandomValues });
     vi.stubGlobal("fetch", fetchMock);
-    mocks.startArtifactUpload.mockResolvedValue({
+    mocks.startArtifactUpload.mockImplementation(async ({ data }) => ({
       artifact: { id: artifactId },
       uploadUrl,
-    });
+      uploadHeaders: uploadHeadersFor(
+        { id: artifactId }.id,
+        data.mediaType,
+        data.checksumSha256,
+      ),
+    }));
     mocks.confirmArtifactUpload.mockResolvedValue({ id: artifactId });
     mocks.createAndMatchBankTransaction
       .mockRejectedValueOnce(new Error("The match request was interrupted."))
@@ -1093,10 +1109,15 @@ describe("bank reconciliation actions", () => {
     vi.spyOn(crypto.subtle, "digest").mockResolvedValue(digest);
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
-    mocks.startArtifactUpload.mockResolvedValue({
+    mocks.startArtifactUpload.mockImplementation(async ({ data }) => ({
       artifact: { id: artifactId },
       uploadUrl,
-    });
+      uploadHeaders: uploadHeadersFor(
+        { id: artifactId }.id,
+        data.mediaType,
+        data.checksumSha256,
+      ),
+    }));
     mocks.confirmArtifactUpload.mockResolvedValue({ id: artifactId });
     mocks.extractInvoiceFields.mockResolvedValue({
       status: "unsupported",

@@ -76,23 +76,24 @@ const checksumSha256 = async (file: File): Promise<string> => {
 const putPdfWithProgress = (
   uploadUrl: string,
   file: File,
-  checksum: string,
-  artifactId: string,
+  uploadHeaders: Readonly<Record<string, string>>,
   onProgress: (progress: number) => void,
 ): Promise<void> =>
   new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open("PUT", uploadUrl);
-    request.setRequestHeader("content-type", "application/pdf");
-    request.setRequestHeader("x-amz-checksum-sha256", checksum);
-    request.setRequestHeader("x-amz-meta-folio-artifact-id", artifactId);
+    for (const [name, value] of Object.entries(uploadHeaders))
+      request.setRequestHeader(name, value);
     request.upload.onprogress = (event) => {
       if (!event.lengthComputable || event.total <= 0) return;
       onProgress(Math.min(99, Math.floor((event.loaded / event.total) * 100)));
     };
     request.onload = () => {
-      if (request.status >= 200 && request.status < 300) {
-        onProgress(100);
+      if (
+        (request.status >= 200 && request.status < 300) ||
+        request.status === 412
+      ) {
+        if (request.status !== 412) onProgress(100);
         resolve();
         return;
       }
@@ -242,8 +243,7 @@ export const ArtifactPdfUploadPage = ({
       await putPdfWithProgress(
         started.uploadUrl,
         upload.file,
-        checksum,
-        artifactId,
+        started.uploadHeaders,
         (progress) => updateUpload(id, (current) => ({ ...current, progress })),
       );
       updateUpload(id, (current) => ({

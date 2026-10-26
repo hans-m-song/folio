@@ -27,13 +27,12 @@ const insertArtifact = async (state: "pending" | "available") => {
   const id = randomUUID();
   const checksum = createHash("sha256").update(id).digest("base64");
   await pool.query(
-    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, version_id, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
-     VALUES ($1,$2,$2,'manual_invoice_pdf_v1',$3,$4,'synthetic.pdf','application/pdf',1,$5,$6,$7)`,
+    `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, media_type, byte_size, checksum_sha256, state, confirmed_at)
+     VALUES ($1,$2,$2,'manual_invoice_pdf_v1',$3,'synthetic.pdf','application/pdf',1,$4,$5,$6)`,
     [
       id,
       actorId,
       `tests/bill-t42/${id}`,
-      state === "available" ? `synthetic-version-${id}` : null,
       checksum,
       state,
       state === "available" ? new Date() : null,
@@ -123,6 +122,47 @@ describe("artifact deletion against disposable PostgreSQL", () => {
       await expect(repository.getArtifact(artifactId)).resolves.toBeNull();
     },
   );
+
+  it("rejects upload expiry registration after deletion has been claimed", async () => {
+    const artifactId = await insertArtifact("pending");
+    const claimed = await repository.claimArtifactDeletion(artifactId);
+
+    await expect(
+      repository.registerUploadExpiry(artifactId, new Date().toISOString()),
+    ).rejects.toThrow("Pending artifact not found");
+    expect(claimed).toMatchObject({ id: artifactId, state: "deleting" });
+  });
+
+  it("keeps deleting metadata until the upload expiry grace period has elapsed", async () => {
+    const artifactId = randomUUID();
+    const checksum = createHash("sha256").update(artifactId).digest("base64");
+    const uploadExpiresAt = new Date(Date.now() + 5 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO ${sourceArtifactsTable} (id, owner_id, created_by_id, artifact_profile, object_key, filename, media_type, byte_size, checksum_sha256, state, upload_expires_at)
+       VALUES ($1,$2,$2,'manual_invoice_pdf_v1',$3,'synthetic.pdf','application/pdf',1,$4,'pending',$5)`,
+      [
+        artifactId,
+        actorId,
+        `tests/bill-t42/${artifactId}`,
+        checksum,
+        uploadExpiresAt,
+      ],
+    );
+    artifactIds.push(artifactId);
+    const claimed = await repository.claimArtifactDeletion(artifactId);
+    expect(claimed).toMatchObject({ id: artifactId, state: "deleting" });
+
+    await expect(
+      repository.deleteClaimedArtifact(artifactId, claimed!.objectKey),
+    ).rejects.toThrow("Claimed artifact not found");
+    await pool.query(
+      `UPDATE ${sourceArtifactsTable} SET upload_expires_at=now() - interval '61 seconds' WHERE id=$1`,
+      [artifactId],
+    );
+    await expect(
+      repository.deleteClaimedArtifact(artifactId, claimed!.objectKey),
+    ).resolves.toBeUndefined();
+  });
 
   it("sees a committed link after waiting for its row-share lock", async () => {
     const artifactId = await insertArtifact("available");
