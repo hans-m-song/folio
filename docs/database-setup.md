@@ -1,5 +1,8 @@
 # Database setup
 
+For flag-only user provisioning and name/role editing, see
+[User administration](./user-administration.md).
+
 ```text
 Provisioning admin    -> owns schema, controls schema ACLs, runs manual setup
 folio_admin           -> schema USAGE/CREATE, owns objects, applies migrations
@@ -99,7 +102,7 @@ the privilege-based runner.
 Update the migration connection URL username to `folio_admin`. Remove or change
 an explicit `FOLIO_DATABASE_ADMIN_ROLE=folio_migrate` override. The setting
 names remain `FOLIO_DATABASE_ADMIN_URL` and
-`FOLIO_DATABASE_ADMIN_PASSWORD`; `FOLIO_DATABASE_APP_URL` remains the app connection.
+`FOLIO_DATABASE_ADMIN_PASSWORD`; `FOLIO_DATABASE_APP_URL` is the application connection.
 
 Then run migrations before restarting the application. The upgrade sets ownership
 and future defaults; the migration runner resets existing table/sequence grants

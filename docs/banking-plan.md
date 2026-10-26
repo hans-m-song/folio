@@ -2,6 +2,53 @@
 
 Status: **approved implementation architecture on 23 September 2026**
 
+## Bank-led invoice creation amendment — 18 October 2026
+
+Create transaction during reconciliation embeds invoice PDF upload, preview and
+explicit approval beside the existing transaction form. The shared uploader
+retains chosen and original filenames, filename suggestions, coverage dates,
+document date, reference and notes. Approved PDFs become selectable without
+reloading the form; existing filename inference and PDF extraction remain.
+
+Bank posted date and AUD movement supply settlement facts. PDF suggestions fill
+reviewed document facts and do not replace the protected bank settlement.
+Pending evidence blocks save/match until approved or cleared. Only approved
+invoice IDs reach the existing atomic create-and-match operation. Preview,
+upload and approval do not create a financial transaction. Cancellation or save
+failure preserves the artifact for reuse. Standalone Files remains available.
+
+## Approved invoice-matching amendment — 18 October 2026
+
+This amendment supersedes the original fully-settled-only candidate restriction
+below. Matching remains explicit, one-to-one and limited to recorded manual
+transactions. Existing exact signed-AUD settlement matches remain supported.
+
+Unsettled invoices can be proposed using document totals: AUD invoices require
+exact amount and direction against the bank movement; foreign invoices require
+an exact positive document amount/currency match to the bank's parsed foreign
+hint and compatible movement direction. Foreign hints are unverified proposals,
+not an exchange-rate determination. The default date window is ±31 days; explicit
+±14 days and all dates remain available. Unsettled candidates use invoice date, falling back to activity date;
+settled candidates use settlement date. Bank value date is preferred for candidate
+comparison, falling back to posted date. Candidates require a usable date.
+The date window filters discovery; it is not a settlement authorization rule.
+
+Invoice matches require explicit settlement acknowledgement. Under bank-then-
+transaction row locks, the server revalidates eligibility and fills missing
+settlement date/currency/amount from the bank posted date, AUD and absolute AUD
+movement. The settlement update and bank link commit atomically. Existing
+conflicting settlement values are rejected, invoice facts are preserved and
+transaction update attribution/timestamp are advanced. No writes occur while
+listing proposals. Reset/undo removes the link but preserves recorded settlement.
+Confirmed settlement requires transaction-write permission as well as bank
+reconciliation permission. UI acknowledgement is bound to the displayed bank and
+candidate facts and date window; changing them requires fresh acknowledgement.
+
+No schema migration, live database inspection or automatic matching is part of
+this amendment. Cash reports continue to use actual settlement facts, not invoice
+candidate assessment. Local mocked-query tests do not establish PostgreSQL runtime
+or live-data acceptance.
+
 This document is the implementation architecture for the approved BILL-T24 and
 BILL-T28 vertical slice. BILL-T30 remains deferred until the CSV workflow is accepted.
 
@@ -115,7 +162,7 @@ original_filename
 byte_size
 checksum_sha256
 state
-version_id
+upload_expires_at
 owner_id
 created_by_id
 created_at
@@ -277,7 +324,8 @@ superseded existing replacement semantics where applicable
 Bank confirmation:
 
 1. locks the pending artifact;
-2. verifies the uploaded S3 object and version;
+2. verifies the uploaded object against its expected checksum, size, media type
+   and artifact metadata;
 3. inserts every validated bank transaction;
 4. inserts every artifact attribution;
 5. changes the artifact to available;
@@ -353,7 +401,7 @@ necessarily the bank settlement event.
 
 Eligibility requires exact signed-AUD equality. Dates, description, counterparty, and
 reference rank candidates but never override amount or direction. The default window
-is plus or minus 14 days, with 31-day and search-all options.
+is plus or minus 31 days, with 14-day and search-all options.
 
 Split, aggregate, partial, tolerance, combined-fee/refund, and many-to-many cases remain
 unresolved. Folio never encourages synthetic balancing transactions.
@@ -470,7 +518,8 @@ bank artifacts never count as invoice evidence.
 
 ## Provisional implementation plan
 
-Identifiers are local to this candidate plan until final review and roadmap promotion.
+The identifiers below record the original candidate plan; its subsequent resolution
+and promotion are recorded later in this document.
 
 ### BANK-I01 — Artifact profiles and canonical keys
 
@@ -581,8 +630,10 @@ wait for command/query contracts.
 
 Testing dependencies run in disposable Docker containers. Use PostgreSQL 17 for real
 constraint, transaction, trigger, and concurrency tests and an S3-compatible container
-with versioning enabled for object-integrity, presign, confirmation, and recovery
-tests. Tests must not depend on the development database, production database, or live
+with an unversioned bucket for object-integrity, presign, confirmation, and recovery
+tests. Verify create-only uploads, required headers, replay rejection and
+expiry-deferred deletion against the [storage contract](./unversioned-storage.md).
+Tests must not depend on the development database, production database, or live
 S3. Container images are pinned during implementation, state is isolated per run, and
 fixtures contain no real financial or personal data.
 

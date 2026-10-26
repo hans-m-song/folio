@@ -1,8 +1,17 @@
 # Folio
 
-Folio is a private transaction-preparation workspace. It stores original evidence in the configured versioned S3 bucket and keeps browser-facing errors generic.
+Folio is a private transaction-preparation workspace. It stores original evidence
+under immutable UUID keys in an unversioned S3 bucket and keeps browser-facing
+errors generic. Unversioned storage removes the versioning dependency to support
+other S3-compatible backends. Server diagnostics retain redacted error messages
+and causes to help explain failures. See [unversioned storage cutover](docs/unversioned-storage.md)
+before deploying this storage change.
 
 ## Local Docker deployment
+
+The Compose instructions below describe the existing MinIO configuration. The
+unversioned application storage contract requires separate provider acceptance
+and an explicit deployment cutover; source commits do not establish deployment.
 
 The Compose stack runs Folio, PostgreSQL and a versioned MinIO bucket behind the
 existing Traefik on the external `services_public` Docker network. Tailscale Serve
@@ -98,7 +107,7 @@ Match a browser error to the corresponding failure record using its `Reference` 
 `category`, and `retryable` value, plus an allow-listed provider and HTTP status when
 known.
 
-Common codes are `ACTOR_NOT_FOUND`, `DB_PERMISSION_DENIED`, `MIGRATION_REQUIRED`,
+Common codes are `CONFIG_INVALID`, `INPUT_INVALID`, `ACTOR_NOT_FOUND`, `DB_PERMISSION_DENIED`, `MIGRATION_REQUIRED`,
 `DATABASE_UNAVAILABLE`, `DB_OUTCOME_UNKNOWN`, `AWS_CREDENTIALS_UNAVAILABLE`,
 `S3_ACCESS_DENIED`, `S3_OBJECT_NOT_FOUND`, `S3_UNAVAILABLE`, and
 `STRIPE_CSV_INVALID`. A conflicting reimport emits `STRIPE_IMPORT_CONFLICT` without
@@ -106,15 +115,23 @@ exposing row contents. `DB_OUTCOME_UNKNOWN` means a database mutation may have
 committed; inspect Folio before resubmitting it. CSV validation failures include only
 the safe reason, row number, and required missing header names, never row contents.
 
-Request validation occurs in the framework before the operation handler and is not
-included in these lifecycle records. The browser uploads directly to a presigned S3
-URL, so the Folio server observes upload preparation and confirmation, not the PUT
-request itself. Logs intentionally omit actor details, filenames, record and object
-identifiers, bucket configuration, URLs, SQL, document content, raw exception
-details, and stack traces from ordinary lifecycle fields. Failure records include a
-server-only `sourceError`: ordinary errors retain their name, scalar code, message,
-and stack, while Zod validation errors include only their issue array. These details
-must remain in access-controlled server logs and never enter client responses.
+Framework request validation is captured by the server-function middleware before
+the operation handler runs. Runtime configuration schema failures use `CONFIG_INVALID`.
+The browser uploads directly to a presigned S3 URL, so Folio observes upload
+preparation and confirmation rather than the PUT request itself.
+
+Failure records contain a server-only structured `error` tree with redacted messages,
+exception types/codes, stack frames, causes and aggregate children. Schema validation
+retains codes, constraints and schema-owned paths without submitted values, dynamic
+record keys or arbitrary custom messages. Truncation and cycles are explicitly marked.
+For configuration failures, inspect `error.cause.issues` for the invalid fields.
+
+Logs omit request bodies and query strings. Selected UUID resource identifiers are
+allowlisted for correlation; arbitrary provider objects are excluded. Known credential
+patterns, URLs, email addresses and home-directory owners are redacted. This is not
+a universal detector for unlabelled secrets or personal data in third-party messages.
+Keep server logs access-controlled; these details never enter client responses. See
+[the logging contract](docs/overview.md#error-and-operational-logging-contract).
 
 ## Stripe CSV export
 

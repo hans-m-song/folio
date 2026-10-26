@@ -31,6 +31,7 @@ docs/
 |-- structure.md         ownership and dependency boundaries
 |-- implementation-candidates.md  investigated boundaries, acceptance cases and approval gates
 |-- recurring-bills-plan.md       approved recurrence and independent document-status boundaries
+|-- account-attribution-plan.md  proposed bank/card attribution and personalized reporting
 |-- ui-plan.md           approved directional information architecture and workflow
 `-- roadmap.md           stable milestones, gates, and progress
 
@@ -42,15 +43,47 @@ docs/
 TanStack generates `src/routeTree.gen.ts`; build output and framework-generated
 temporary files are ignored.
 
-`src/routes/imports.tsx` owns the shared Sources shell and
-`src/routes/imports.{stripe,commbank,pdf,library}.tsx` embed the source-specific
-flows and artifact library.
-The Stripe batch logic lives in `src/routes/-transaction-workflow.tsx`, CommBank
-batch logic in `src/routes/banking.imports.new.tsx`, and PDF-only upload in
-`src/routes/-artifacts.upload.tsx`. The older source-specific URLs redirect to
-the Sources tabs. `src/components/import-profile-tabs.tsx` owns tab navigation;
-each flow retains its own review state and invokes source-specific server
-operations. Rejected-artifact persistence and exact-version storage operations
+The root `GLOSSARY.md` defines confirmed domain terminology. Proposed account and
+reporting behavior lives in `docs/account-attribution-plan.md`, not in the glossary.
+
+`src/routes/imports.tsx` owns the Files shell. `imports.upload.tsx` delegates the
+single-file form to `-file-upload.tsx`; `imports.files.$artifactId.tsx` loads safe
+metadata for `-file-detail.tsx`, which owns PDF review and CSV proposals.
+`imports.library.tsx` links to reopenable file details. Legacy source-specific
+routes redirect to the unified upload form with a selected profile.
+`artifacts/library-query.ts` owns shared library filter/sort validation and defaults;
+the library route preserves its existing query exports. `artifacts/file-review-queue.ts`
+loads ordered metadata across bounded pages using those exact filters and sorts.
+`components/file-review-actions.tsx` owns the common Confirm, Confirm and next,
+and Skip row plus queue feedback. PDF approval and CSV import controllers retain
+their own validation and outcome state and supply the same action view.
+`src/components/import-profile-tabs.tsx` owns navigation. `artifacts/metadata.ts`
+validates descriptive metadata; migration 0020 adds nullable fields and 0021 adds
+optional document supplier. The existing
+document and import operations retain storage verification and financial writes.
+`components/transaction-pdf-preview.tsx` owns authorized selected-PDF preview,
+refresh and stale-request handling beside the existing manual transaction form.
+Its peek variant places proposed evidence and selected PDFs in transaction edit
+views above the form at full width,
+uses nominal half-A4 sizing and requests hidden browser PDF toolbar controls.
+`components/bank-invoice-evidence.tsx` embeds the invoice-only shared uploader,
+validates local PDF previews and owns confirmed-upload review and explicit
+approval. The reconciliation route keeps approved evidence selection and pending
+state scoped to the bank transaction draft. It reuses the manual form rather than
+creating a second transaction editor.
+Explicit upload filename suggestions cross the panel through a context-guarded
+callback. The route sends a numbered request naming one target field to the
+mounted manual form, which consumes it once and fills only that blank field,
+without deriving an activity date. Coverage-date shortcuts
+remain local to the uploader and never change bank payment facts.
+`domain/file-filename.ts` owns conservative original-name metadata suggestions;
+the upload form applies them only to blank fields.
+`domain/bank-transactions.ts` assesses settlement/invoice candidate facts.
+`database/bank-repository.ts` bounds candidate queries and atomically confirms
+missing settlement facts plus the bank link under locks; the route owns explicit
+acknowledgement and basis labels. Confirmed settlement requires transaction-write
+permission in the bank operation handler.
+Rejected-artifact persistence and exact-key unversioned storage operations
 are owned by `database` and `documents`, respectively.
 
 ## Ownership boundaries
@@ -58,6 +91,12 @@ are owned by `database` and `documents`, respectively.
 `domain/errors.ts` owns the error policy catalog and public failure contract.
 `server/error-handling.ts` owns classification, sanitization, correlation,
 deduplication and asynchronous diagnostic context without a framework dependency.
+`server/error-details.ts` owns bounded internal exception serialization and text
+redaction. `domain/validation-diagnostics.ts` tracks originating schemas privately
+so diagnostic paths distinguish declared fields from submitted record keys.
+`server/runtime-configuration.ts` classifies runtime schema failures.
+`database/transaction-cleanup.ts` preserves transaction, rollback and release
+failures together.
 `server/diagnostics.ts` adapts operations to that interface. Authentication routes,
 MCP and commands use the same logging interface while retaining their own transport
 protocols. `server/error-middleware.ts` handles framework input/request failures;
@@ -122,6 +161,10 @@ it only to validate an active actor for exact pending-upload recovery.
 Google authorization requests the `profile` scope in addition to identity and email.
 A verified, nonblank name may fill a null or blank `users.display_name` during login;
 an existing curated display name is preserved. Email remains the identity lookup key.
+`database/add-user-options.ts` validates flag-only provisioning arguments before
+`database/add-user.ts` loads configuration or creates a connection. The admin-users
+dialog edits display name and role through optional update fields, while activation
+remains separate. See [User administration](./user-administration.md).
 
 The managed manual transaction form is isolated in
 `src/components/manual-transaction-form.tsx` and is the only form migrated for
@@ -190,8 +233,10 @@ match, Undo and unmatch actions retain their behavior.
 BILL-T77's `domain/invoice-types.ts` and `invoice-parser.ts` own normalized text and
 supplier-specific financial facts. `documents/invoice-extraction.ts` owns bounded
 local worker extraction; `DocumentService.readInvoicePdf` owns actor, pinned-object
-metadata, checksum and lifecycle checks. `server/invoice-operations.ts` returns
-suggestions and advisory duplicate counts only. `domain/pdf-invoice-fields.ts` and
+metadata, checksum and lifecycle checks. `documents/invoice-field-reader.ts` shares
+verified reads, bounded extraction, parsing and advisory duplicate counts between
+the web operation and MCP. Neither adapter returns original bytes or automatically
+applies facts. `domain/pdf-invoice-fields.ts` and
 `components/invoice-suggestion-review.tsx` own explicit reviewed application to five
 document fields. Route upload orchestration confirms and reuses evidence without
 automatic approval or transaction saves; Stripe suggestions remain review-only.
@@ -204,8 +249,17 @@ production does not render or bundle the Devtools UI.
 expansion, and one-time credential secret generation. `src/database/proposal-repository.ts`
 owns credential persistence and revision-checked MCP transaction changes;
 `src/mcp/tools.ts` exposes only the tools allowed by each credential.
+File metadata editing requires both `artifacts:read` and `artifacts:edit`;
+checksum-pinned PDF extraction requires `artifacts:read` and `artifacts:extract`.
+Migration 0022 permits these scopes without modifying issued credentials.
 `src/server/mcp-credential-operations.ts` authorizes administrator credential
-management, while `src/routes/admin.tokens.tsx` presents list/create/revoke UI.
+management, while `src/routes/admin.tokens.tsx` presents list/create/edit-scopes/revoke
+UI. Scope edits compare the expected scope set under a credential-row lock and
+return metadata only. Draft editing is independent of submission ownership while
+retaining the manual-draft, revision, owner, evidence and audit checks.
+Existing-match submissions can reference manual drafts as well as recorded
+transactions; draft targets require draft authority and an exact revision.
+Suggestion actions follow transaction status so the same draft opens inline.
 `src/domain/reports.ts` owns structured transaction warnings and category totals;
 `src/routes/reports.tsx` renders warning links and the preparation breakdown.
 `src/domain/tax-source-review.ts` fingerprints the FY cash ledger and imported
@@ -277,10 +331,9 @@ grant policy. The runner verifies its role, schema USAGE/CREATE and object owner
 applying SQL. Existing ownership transfers require explicit administrator execution.
 
 Documents upload directly from the browser after the
-server issues a narrowly scoped presigned request. Local Compose uses a fixed
-synthetic-password login that creates ordinary server sessions; Google client
-credentials remain process-environment inputs for production and do not enter
-browser bundles.
+server issues a narrowly scoped presigned request. Authentication follows the
+configured local-password or Google mode; both create ordinary server sessions.
+Google client credentials remain server inputs and do not enter browser bundles.
 
 The validated process-start settings `FOLIO_DATABASE_SCHEMA` and
 `FOLIO_S3_KEY_PREFIX` isolate deployments and test runs. They are infrastructure
@@ -295,3 +348,25 @@ links. Provider SDKs and persistence remain behind the local `database` and
 
 Secrets, local credential files, live databases, S3 objects, and cloud resources are
 outside repository implementation and verification unless separately authorised.
+
+## Contextual pane boundary
+
+`src/components/context-pane.tsx` owns validated pane targets, root search state,
+navigation/dismissal guards and the reusable `SidePane`. The authenticated root
+wraps the workspace with its provider. `context-pane-host.tsx` loads existing
+file/transaction content with stale-response and render-error isolation; explicit
+refresh updates read-only details without resetting editable forms. Existing
+canonical detail/create/edit routes remain standalone adapters.
+
+Suggested-draft save continuation uses client-only form metadata. The transaction
+workflow returns the saved ID and refresh outcome synchronously to reconciliation;
+the reconciliation controller owns candidate checks, settlement acknowledgement,
+match-only recovery and queue advancement. It reuses the existing save/match APIs.
+
+File metadata and recurring-bill editors use local nested panes. Form consumers
+report dirty and actual pending state; known successful mutations clear guards
+before pane navigation. Drafts and files remain in component state, not URLs.
+File-library loader dependencies explicitly exclude inherited pane state to keep
+the source list mounted. Shared pane presentation lives in `context-pane.css`.
+The pane API can replace its active entry while retaining lower panes and source
+search state; replacement uses the same navigation guards as other pane changes.

@@ -16,6 +16,21 @@ not perform accounting, payments, BAS submission, or ATO lodgement.
 Folio is the product and application name. “Supplier-expense register” remains the
 domain description; the name does not imply a general ledger or accounting system.
 
+Product direction updated on 13 October 2026: financial records, evidence,
+reconciliation and preparation reporting for individuals and small SaaS businesses.
+The existing one-business boundary is retained. Personal-row exports, exclusion of
+personal amounts from business and GST/BAS totals, and individual attribution are
+proposed semantics. Standalone personal-mode behavior and individual privacy rules
+remain design decisions.
+
+Bank/card attribution, selectable tax-preparation years, individual/business views,
+income/expense comparisons, account balances, Stripe reconciliation, accountant
+exports and GST/BAS preparation are proposed in BILL-M8–M11. These are planned
+capabilities, not current implementation claims. Retain current foreign-document
+and AUD-settlement scope; payroll, inventory, customer invoicing, foreign-balance
+accounting and direct lodgement remain deferred. See [the roadmap](./roadmap.md),
+[account attribution](./account-attribution-plan.md) and [the domain glossary](../GLOSSARY.md).
+
 ## Error and operational logging contract
 
 BILL-T94 separates browser-safe failures from private server diagnostics. Public
@@ -26,15 +41,24 @@ response. Authentication does not reveal whether a particular account exists.
 Server JSON events use `folio.operation`, version 1, with timestamp, operation,
 phase and, for failures, correlation ID, severity, internal/public codes and
 retryability. Optional fields include a fixed stage, validated UUID resource/actor
-IDs, bounded ID lists, numeric counts and allowlisted provider codes. Request
-logging omits query strings, dynamic identifiers, bodies and credentials. Emails,
-names, document contents, SQL parameters and raw source errors are excluded.
+IDs, bounded ID lists, numeric counts and allowlisted provider codes. Failure
+events retain redacted source messages and a structured `error` tree with exception
+type/code, stack frames, causes and aggregate children. Traversal and text are
+bounded, cycle-safe, and marked when truncated. Schema validation retains codes,
+constraints and schema-owned paths; submitted record keys, values and arbitrary
+custom messages are excluded. Known configuration refinement reasons are
+allowlisted. Runtime schema failures use `CONFIG_INVALID` with server severity.
+Request logging omits query strings and bodies. Diagnostic redaction covers
+credential assignments, URLs, bearer tokens, AWS access-key identifiers, JWTs,
+email addresses and home-directory owners; it is not a universal detector for
+arbitrary personal data or unlabeled secrets in third-party messages. Arbitrary
+provider objects are never serialized. See [the implementation](../src/server/error-handling.ts).
 
 Successful mutations and sign-ins log by default; successful reads and health
 checks remain quiet. Expected rejections use info/warn; unexpected faults use
 error. Operation and transport adapters reuse one failure reference rather than
 logging the same failure repeatedly. Cleanup faults retain the primary failure
-and add linked sanitized diagnostics. A mutation with an uncertain database
+and add linked diagnostics with the cleanup error's message and causes. A mutation with an uncertain database
 outcome requires checking the existing result before another attempt; Folio
 does not automatically retry it. Logs are operational diagnostics, not an
 immutable financial audit trail.
@@ -65,8 +89,12 @@ immutable financial audit trail.
   history remains deferred to BILL-T09B.
 - One coarse global role applies per user. Ownership indicates responsibility rather
   than restricting access to a transaction or document.
-- Local Compose stores original documents in a versioned MinIO bucket; production
-  requires a private, encrypted, versioned S3 bucket.
+- Artifact storage uses create-only writes to immutable UUID keys in a private,
+  unversioned S3 bucket with checksum verification. Production requires encryption
+  and independent backups. The direct cutover approved on 7 October 2026 uses
+  disposable old data and an empty schema. Deployment and provider acceptance
+  remain separate.
+  See [storage cutover](./unversioned-storage.md).
 - The Docker deployment uses existing Traefik and Tailscale Serve at
   `http://folio.lamarr.axatol.xyz`, with no application host-published port.
   Development credentials must not be used for public exposure.
@@ -76,22 +104,30 @@ immutable financial audit trail.
 - PDF upload, manual entry, and Stripe itemised Balance-report CSV import are the M1
   ingestion paths. The supported Stripe export is Reporting > Balance Summary
   Reports > Balance change from activity > Itemised, not Transactions > All
-  activity. Stripe and CommBank CSV interfaces accept multiple files, require
-  explicit per-file admission or rejection, and review combined counts before
-  one batch confirmation. Each accepted CSV imports atomically and reports its
-  own result. Invoice/evidence PDF upload accepts multiple files without a CSV
-  batch decision. Evidence
+  activity. The unified file workspace accepts one invoice PDF, Stripe CSV or
+  CommBank CSV at a time, with profile, chosen filename and optional metadata.
+  CSV source rows are previewed before explicit import confirmation. Evidence
   PDF uploads create reusable artifacts, not transactions. A fixed-profile
   CommBank CSV bank-activity import and explicit
   reconciliation workflow are implemented under BILL-T28; supported text-based
   CommBank PDF statements follow under BILL-T30. Email, webhooks, OCR, FOCUS projection, and
   direct tax lodgement are deferred.
-- The dedicated Sources workspace has Stripe CSV, CommBank CSV, PDF evidence,
-  and File library tabs. Unlinked artifacts remain visible in the library and
+- Reconciliation proposes recorded manual transactions using settled AUD amounts
+  or unsettled invoice totals. Foreign document totals use unverified exact
+  currency/amount hints from the bank source. Confirmed invoice matches record
+  bank posted-date/AUD settlement and link the existing transaction atomically;
+  listing candidates does not write financial facts. Date windows and one-to-one
+  matching remain explicit. Resetting a link preserves recorded settlement.
+- The Files workspace has Upload file and File library tabs. File details provide
+  embedded PDF review, invoice-to-transaction handoff and CSV proposals.
+  Bank reconciliation also embeds invoice upload, review and approval beside its
+  transaction form, retaining PDF extraction, filename inference and coverage
+  dates. Bank settlement remains protected. Upload approval and transaction
+  save/match remain separate explicit actions; cancellation preserves the PDF.
+  Unlinked artifacts remain visible in the library and
   may be permanently deleted after confirmation; linked artifacts are protected.
-  New uploads
-  retain an original filename for downloads; legacy records fall back to the
-  stored display filename.
+  Chosen filenames control inline and download Content-Disposition; original
+  uploaded filenames remain provenance. Coverage dates never filter CSV rows.
 - Manual entry keeps common invoice fields visible and places payment, tax, and
   advanced fields behind progressive disclosure. PDF filenames matching
   `supplier-YYYY-MM-DD[-reference].pdf` suggest supplier and invoice date, plus
@@ -219,10 +255,13 @@ MCP credentials have concrete, administrator-selected scopes. Credential creatio
 expands `*` or a known-resource wildcard such as `transactions:*` into the scopes
 known at creation time; future scopes are not granted automatically.
 Administrators can list credential metadata,
-create a token with a one-time plaintext reveal, and revoke it from Administration
+create a token with a one-time plaintext reveal, edit an active token's scopes,
+and revoke it from Administration
 → Access tokens. The token hash is never returned to the browser. MCP transaction
-search includes all statuses. An MCP credential can edit all fields of its own
-still-draft transactions with an exact updated-at token, and a separate scope
+search includes all statuses. With transactions:draft, an MCP credential can edit
+any manual draft with an exact updated-at token, preserving owner and evidence
+links. Scope edits retain the token secret and identity, reject stale scope sets,
+and apply to subsequent requests. A separate scope
 permits category-only edits to any transaction. Neither action approves evidence,
 records a draft, or matches a bank row.
 
@@ -296,7 +335,7 @@ of tax-preparation classification. The chart is not a running bank or Stripe bal
 | Packaging                | One application container                                             |
 | Local/private deployment | Docker Compose                                                        |
 | Structured persistence   | PostgreSQL with migrations                                            |
-| Document persistence     | Versioned MinIO bucket locally; private S3 bucket for production      |
+| Document persistence     | Private unversioned S3-compatible bucket with create-only writes      |
 | Validation               | Zod                                                                   |
 | Database access          | Drizzle                                                               |
 | Authentication           | Local password or Google OIDC, server sessions, and named permissions |
@@ -322,8 +361,10 @@ inside Lambda.
 - Server operations emit one structured completion record (`success` or `failure`)
   with a correlation ID, duration, stable safe error code, retryability, and
   allow-listed provider/status metadata. Browser errors expose the matching
-  reference and fixed guidance. Logs exclude raw errors, presigned URLs, actor
-  details, credentials, object identifiers, SQL, document content, and stack traces.
+  reference and fixed guidance. Internal logs retain bounded redacted exception
+  trees and stack frames, plus allowlisted UUID identifiers. Request bodies, query
+  strings and arbitrary provider objects are excluded. See the logging contract
+  above for validation handling and redaction limits.
 - Protected server operations derive the actor from the session cookie, resolve an
   active user, enforce named permissions, and pass the trusted user ID to persistence
   and document operations. Email remains display-only and for identity matching; it
@@ -338,14 +379,15 @@ inside Lambda.
 ## Operational baseline
 
 Database and S3 recovery must be documented and tested before the register is relied
-upon as the only working record. S3 versioning does not replace a deliberate backup
-and restore procedure. Retention and tax classifications require accountant review.
+upon as the only working record. Unversioned object deletion requires independent
+backups for recovery. Retention and tax classifications require accountant review.
 
 M1 includes explicit migration, user-provisioning, stale-upload abandonment,
 confirmation-gated upload recovery, database backup, and confirmation-gated restore
-commands. Upload recovery is bounded to exact database-known keys. S3-only orphan
-discovery, deletion, and lifecycle policy remain external operator controls because
-the runtime role intentionally has no list or delete permission.
+commands. Upload recovery and application deletion are bounded to exact
+database-known keys. The runtime requires object GET/PUT/DELETE permissions;
+bucket listing and administration are not required by that lifecycle. S3-only
+orphan discovery and bucket lifecycle policy remain external operator controls.
 
 ## Uncertainties
 
