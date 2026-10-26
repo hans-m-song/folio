@@ -703,12 +703,29 @@ export class FolioRepository implements ArtifactRepository {
   async updateUser(
     actorId: string,
     id: string,
-    input: { role: User["role"]; active: boolean },
+    input: Partial<Pick<User, "displayName" | "role" | "active">>,
   ): Promise<void> {
+    const assignments: string[] = [];
+    const values: (string | boolean | null)[] = [id];
+    if (input.displayName !== undefined) {
+      values.push(input.displayName);
+      assignments.push(`display_name = $${values.length}`);
+    }
+    if (input.role !== undefined) {
+      values.push(input.role);
+      assignments.push(`role = $${values.length}`);
+    }
+    if (input.active !== undefined) {
+      values.push(input.active);
+      assignments.push(`active = $${values.length}`);
+    }
+    if (assignments.length === 0)
+      throw new Error("At least one user field must be updated");
+
     await this.actorById(this.pool, actorId);
     const result = await this.pool.query(
-      `UPDATE ${this.usersTable} SET role = $2, active = $3 WHERE id = $1`,
-      [id, input.role, input.active],
+      `UPDATE ${this.usersTable} SET ${assignments.join(", ")} WHERE id = $1`,
+      values,
     );
     if (result.rowCount !== 1) throw new Error("User not found");
   }

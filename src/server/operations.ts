@@ -660,10 +660,24 @@ export const updateUser = createServerFn({ method: "POST" })
       z
         .object({
           id: z.string().uuid(),
-          role: userRoleSchema,
-          active: z.boolean(),
+          displayName: z
+            .string()
+            .trim()
+            .max(200)
+            .transform((value) => value || null)
+            .nullable()
+            .optional(),
+          role: userRoleSchema.optional(),
+          active: z.boolean().optional(),
         })
-        .strict(),
+        .strict()
+        .refine(
+          ({ displayName, role, active }) =>
+            displayName !== undefined ||
+            role !== undefined ||
+            active !== undefined,
+          "At least one user field must be updated",
+        ),
     ),
   )
   .handler(async ({ data }) =>
@@ -673,7 +687,8 @@ export const updateUser = createServerFn({ method: "POST" })
         const { actor, current } = await authorize(
           operationPermissions.updateUser,
         );
-        return current.repository.updateUser(actor.id, data.id, data);
+        const { id, ...changes } = data;
+        return current.repository.updateUser(actor.id, id, changes);
       },
       {},
       { mutation: true },

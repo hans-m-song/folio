@@ -44,6 +44,55 @@ describe("tax partner options", () => {
   });
 });
 
+describe("user updates", () => {
+  it("updates only the supplied profile fields with parameterized SQL", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "admin", active: true }] })
+      .mockResolvedValueOnce({ rowCount: 1 });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await expect(
+      repository.updateUser("admin", "target", {
+        displayName: null,
+        role: "administrator",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(query).toHaveBeenNthCalledWith(
+      2,
+      'UPDATE "folio"."users" SET display_name = $2, role = $3 WHERE id = $1',
+      ["target", null, "administrator"],
+    );
+  });
+
+  it("updates activation without overwriting profile fields", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ id: "admin", active: true }] })
+      .mockResolvedValueOnce({ rowCount: 1 });
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await repository.updateUser("admin", "target", { active: false });
+
+    expect(query).toHaveBeenNthCalledWith(
+      2,
+      'UPDATE "folio"."users" SET active = $2 WHERE id = $1',
+      ["target", false],
+    );
+  });
+
+  it("rejects empty updates before querying the database", async () => {
+    const query = vi.fn();
+    const repository = new FolioRepository({ query } as never, "folio", false);
+
+    await expect(repository.updateUser("admin", "target", {})).rejects.toThrow(
+      "At least one user field must be updated",
+    );
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
 describe("invoice duplicate review hints", () => {
   it("returns advisory counts without changing evidence or imposing uniqueness", async () => {
     const query = vi

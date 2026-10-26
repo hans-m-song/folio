@@ -1,6 +1,13 @@
 import { AutocompleteSelect } from "../components/autocomplete";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FormEvent,
+  type SyntheticEvent,
+} from "react";
 
 import { getCurrentSession } from "../auth/session-server";
 import { ConfirmationDialog } from "../components/confirmation-dialog";
@@ -22,11 +29,140 @@ export const Route = createFileRoute("/admin/users")({
   component: UsersPage,
 });
 
+const EditUserDialog = ({
+  user,
+  pending,
+  error,
+  onCancel,
+  onSave,
+}: {
+  user: User;
+  pending: boolean;
+  error: string;
+  onCancel: () => void;
+  onSave: (changes: { displayName: string | null; role: User["role"] }) => void;
+}) => {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+  const errorId = useId();
+  const [displayName, setDisplayName] = useState(user.displayName ?? "");
+  const [role, setRole] = useState<User["role"]>(user.role);
+  const [validationError, setValidationError] = useState("");
+  const errorMessage = validationError || error;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    if (!dialog.open) dialog.showModal();
+    cancelButtonRef.current?.focus();
+
+    return () => {
+      if (dialog.open) dialog.close();
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, []);
+
+  const handleCancel = (event: SyntheticEvent<HTMLDialogElement>) => {
+    event.preventDefault();
+    if (!pending) onCancel();
+  };
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalizedName = displayName.trim();
+    if (normalizedName.length > 200) {
+      setValidationError("Display name must be 200 characters or fewer.");
+      return;
+    }
+
+    setValidationError("");
+    onSave({ displayName: normalizedName || null, role });
+  };
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="confirmation-dialog admin-edit-user-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      aria-describedby={
+        errorMessage ? `${descriptionId} ${errorId}` : descriptionId
+      }
+      aria-busy={pending}
+      onCancel={handleCancel}
+    >
+      <h2 id={titleId}>Edit user</h2>
+      <p id={descriptionId}>Update the user's display name and role.</p>
+      <form className="admin-edit-user-form" onSubmit={handleSubmit}>
+        <label>
+          Display name
+          <input
+            name="displayName"
+            value={displayName}
+            maxLength={200}
+            disabled={pending}
+            aria-invalid={Boolean(validationError)}
+            aria-describedby={validationError ? errorId : undefined}
+            onChange={(event) => {
+              setDisplayName(event.target.value);
+              setValidationError("");
+            }}
+          />
+        </label>
+        <label>
+          Role
+          <select
+            name="role"
+            value={role}
+            disabled={pending}
+            onChange={(event) => setRole(event.target.value as User["role"])}
+          >
+            {user.role === "viewer" ? (
+              <option value="viewer">Viewer (legacy)</option>
+            ) : null}
+            <option value="member">Member</option>
+            <option value="administrator">Administrator</option>
+          </select>
+        </label>
+        {errorMessage ? (
+          <p id={errorId} className="confirmation-dialog__error" role="alert">
+            {errorMessage}
+          </p>
+        ) : null}
+        <div className="confirmation-dialog__actions">
+          <button
+            ref={cancelButtonRef}
+            type="button"
+            disabled={pending}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button type="submit" disabled={pending}>
+            {pending ? "Saving…" : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+};
+
 export function UsersPage() {
   const { allowed, users } = Route.useLoaderData();
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editPending, setEditPending] = useState(false);
+  const [editError, setEditError] = useState("");
   const [deactivatingUser, setDeactivatingUser] = useState<User | null>(null);
   const [deactivationPending, setDeactivationPending] = useState(false);
   const [deactivationError, setDeactivationError] = useState("");
@@ -74,7 +210,7 @@ export function UsersPage() {
     }
     try {
       await updateUser({
-        data: { id: user.id, role: user.role, active },
+        data: { id: user.id, active },
       });
       await router.invalidate();
       setMessage(active ? "User activated." : "User deactivated.");
@@ -87,6 +223,50 @@ export function UsersPage() {
       setBusy(false);
       if (!active) setDeactivationPending(false);
     }
+  };
+
+  const edit = async (changes: {
+    displayName: string | null;
+    role: User["role"];
+  }) => {
+    if (!editingUser) return;
+
+    setBusy(true);
+    setEditPending(true);
+    setEditError("");
+    setMessage("");
+    try {
+      await updateUser({
+        data: { id: editingUser.id, ...changes },
+      });
+      setEditingUser(null);
+      setMessage("User saved. Refreshing the user list…");
+      try {
+        await router.invalidate({ sync: true });
+        setMessage("User updated.");
+      } catch {
+        setMessage(
+          "User changes were saved, but the list could not be refreshed. Reload to see the saved values.",
+        );
+      }
+    } catch {
+      setEditError("Could not save user changes. Check the fields and retry.");
+    } finally {
+      setBusy(false);
+      setEditPending(false);
+    }
+  };
+
+  const openEdit = (user: User) => {
+    setMessage("");
+    setEditError("");
+    setEditingUser(user);
+  };
+
+  const cancelEdit = () => {
+    if (editPending) return;
+    setEditError("");
+    setEditingUser(null);
   };
 
   const toggle = (user: User) => {
@@ -175,6 +355,13 @@ export function UsersPage() {
                     <td>
                       <button
                         type="button"
+                        disabled={busy}
+                        onClick={() => openEdit(user)}
+                      >
+                        Edit
+                      </button>{" "}
+                      <button
+                        type="button"
                         onClick={() => void copyUserId(user.id)}
                         aria-label={`Copy user ID for ${user.displayName?.trim() || user.email}`}
                       >
@@ -195,6 +382,15 @@ export function UsersPage() {
           </div>
         )}
       </section>
+      {editingUser ? (
+        <EditUserDialog
+          user={editingUser}
+          pending={editPending}
+          error={editError}
+          onCancel={cancelEdit}
+          onSave={(changes) => void edit(changes)}
+        />
+      ) : null}
       {deactivatingUser ? (
         <ConfirmationDialog
           title="Deactivate user?"

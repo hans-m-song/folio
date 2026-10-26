@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { createElement } from "react";
 
@@ -156,7 +157,7 @@ describe("user activation controls", () => {
       screen.getByRole("button", { name: "Working…" }).hasAttribute("disabled"),
     ).toBe(true);
     expect(operations.updateUser).toHaveBeenCalledWith({
-      data: { id: "user-1", role: "member", active: false },
+      data: { id: "user-1", active: false },
     });
 
     resolveUpdate?.();
@@ -172,10 +173,170 @@ describe("user activation controls", () => {
 
     await waitFor(() =>
       expect(operations.updateUser).toHaveBeenCalledWith({
-        data: { id: "user-1", role: "member", active: true },
+        data: { id: "user-1", active: true },
       }),
     );
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("prefills and saves display name and role without updating activation", async () => {
+    render(createElement(UsersPage));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Edit user" });
+    const form = within(dialog);
+    expect(
+      (form.getByLabelText("Display name") as HTMLInputElement).value,
+    ).toBe("Workspace member");
+    expect((form.getByLabelText("Role") as HTMLSelectElement).value).toBe(
+      "member",
+    );
+
+    fireEvent.change(form.getByLabelText("Display name"), {
+      target: { value: "Updated profile" },
+    });
+    fireEvent.change(form.getByLabelText("Role"), {
+      target: { value: "administrator" },
+    });
+    fireEvent.click(form.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() =>
+      expect(operations.updateUser).toHaveBeenCalledWith({
+        data: {
+          id: "user-1",
+          displayName: "Updated profile",
+          role: "administrator",
+        },
+      }),
+    );
+    expect(mocks.router.invalidate).toHaveBeenCalledWith({ sync: true });
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe("User updated."),
+    );
+    expect(screen.queryByRole("dialog", { name: "Edit user" })).toBeNull();
+  });
+
+  it("clears a blank display name", async () => {
+    render(createElement(UsersPage));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit user" });
+
+    fireEvent.change(within(dialog).getByLabelText("Display name"), {
+      target: { value: "   " },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save changes" }),
+    );
+
+    await waitFor(() =>
+      expect(operations.updateUser).toHaveBeenCalledWith({
+        data: { id: "user-1", displayName: null, role: "member" },
+      }),
+    );
+  });
+
+  it("does not write when an edit is cancelled", () => {
+    render(createElement(UsersPage));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit user" });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(operations.updateUser).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Edit user" })).toBeNull();
+  });
+
+  it("disables edit fields and actions while saving", async () => {
+    let resolveUpdate: (() => void) | undefined;
+    operations.updateUser.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUpdate = resolve;
+        }),
+    );
+    render(createElement(UsersPage));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit user" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save changes" }),
+    );
+
+    expect(
+      within(dialog).getByLabelText("Display name").hasAttribute("disabled"),
+    ).toBe(true);
+    expect(within(dialog).getByLabelText("Role").hasAttribute("disabled")).toBe(
+      true,
+    );
+    expect(
+      within(dialog)
+        .getByRole("button", { name: "Cancel" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+    expect(
+      within(dialog)
+        .getByRole("button", { name: "Saving…" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+
+    resolveUpdate?.();
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Edit user" })).toBeNull(),
+    );
+  });
+
+  it("shows a validation error for a display name longer than 200 characters", () => {
+    render(createElement(UsersPage));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit user" });
+
+    fireEvent.change(within(dialog).getByLabelText("Display name"), {
+      target: { value: "x".repeat(201) },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save changes" }),
+    );
+
+    expect(screen.getByRole("alert").textContent).toBe(
+      "Display name must be 200 characters or fewer.",
+    );
+    expect(operations.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("keeps the edit dialog open and reports a save failure", async () => {
+    operations.updateUser.mockRejectedValueOnce(new Error("Request failed"));
+    render(createElement(UsersPage));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit user" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save changes" }),
+    );
+
+    const error = await screen.findByRole("alert");
+    expect(error.textContent).toBe(
+      "Could not save user changes. Check the fields and retry.",
+    );
+    expect(screen.getByRole("dialog", { name: "Edit user" })).toBeTruthy();
+    expect(mocks.router.invalidate).not.toHaveBeenCalled();
+  });
+
+  it("reports when saved changes could not be refreshed", async () => {
+    mocks.router.invalidate.mockRejectedValueOnce(
+      new Error("refresh unavailable"),
+    );
+    render(createElement(UsersPage));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit user" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save changes" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe(
+        "User changes were saved, but the list could not be refreshed. Reload to see the saved values.",
+      ),
+    );
+    expect(mocks.router.invalidate).toHaveBeenCalledWith({ sync: true });
+    expect(screen.queryByRole("dialog", { name: "Edit user" })).toBeNull();
   });
 
   it("keeps a deactivation error in the dialog", async () => {

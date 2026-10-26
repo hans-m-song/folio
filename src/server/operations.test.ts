@@ -122,6 +122,7 @@ import {
   saveManualTransaction,
   startArtifactUpload,
   updateArtifactMetadata,
+  updateUser,
 } from "./operations";
 
 const member = {
@@ -1227,6 +1228,70 @@ describe("server operation authorization", () => {
       administrator.id,
       input,
     );
+  });
+
+  it("denies member user updates at the operation boundary", async () => {
+    await expect(
+      updateUser({
+        data: {
+          id: "11111111-1111-4111-8111-111111111111",
+          role: "administrator",
+        },
+      }),
+    ).rejects.toThrow("Code PERMISSION_DENIED");
+    expect(current.repository.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("normalizes display names and forwards only the supplied fields", async () => {
+    current.auth.session.mockResolvedValue(administrator);
+    const id = "11111111-1111-4111-8111-111111111111";
+
+    await updateUser({
+      data: { id, displayName: "  Updated profile  ", role: "administrator" },
+    });
+
+    expect(current.repository.updateUser).toHaveBeenCalledWith(
+      administrator.id,
+      id,
+      { displayName: "Updated profile", role: "administrator" },
+    );
+  });
+
+  it("clears blank names, accepts activation-only updates, and rejects empty patches", async () => {
+    current.auth.session.mockResolvedValue(administrator);
+    const id = "11111111-1111-4111-8111-111111111111";
+
+    await updateUser({ data: { id, displayName: "   " } });
+    await updateUser({ data: { id, active: false } });
+
+    expect(current.repository.updateUser).toHaveBeenNthCalledWith(
+      1,
+      administrator.id,
+      id,
+      { displayName: null },
+    );
+    expect(current.repository.updateUser).toHaveBeenNthCalledWith(
+      2,
+      administrator.id,
+      id,
+      { active: false },
+    );
+    expect(() => updateUser({ data: { id } })).toThrow(
+      "At least one user field must be updated",
+    );
+    expect(current.repository.updateUser).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects display names over 200 characters", () => {
+    expect(() =>
+      updateUser({
+        data: {
+          id: "11111111-1111-4111-8111-111111111111",
+          displayName: "x".repeat(201),
+        },
+      }),
+    ).toThrow();
+    expect(current.repository.updateUser).not.toHaveBeenCalled();
   });
 
   it("uses the trusted actor for reject and confirmed permanent deletion", async () => {
