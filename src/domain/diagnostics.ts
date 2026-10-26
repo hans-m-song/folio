@@ -118,8 +118,9 @@ export class FolioDiagnosticError extends Error {
   constructor(
     readonly diagnostic: FolioDiagnosticFailure,
     message = diagnostic.code,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.code = diagnostic.code;
     this.name = "FolioDiagnosticError";
   }
