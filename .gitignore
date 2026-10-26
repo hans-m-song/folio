@@ -8,3 +8,5 @@ node_modules
 docs/samples/
 pnpm-debug.log*
 .env*
+.codex/
+.codex-log*/
