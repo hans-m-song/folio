@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { BankRepository } from "./bank-repository";
 import { transactionInputSchema } from "../domain/types";
+import { OperationCleanupError } from "../domain/errors";
 
 describe("bank repository queries", () => {
   it("returns only financial-year bank review states for source completeness", async () => {
@@ -380,6 +381,10 @@ describe("bank repository queries", () => {
             counterparty: "Legacy Vendor",
             reference: null,
             description: null,
+            document_currency: "AUD",
+            document_amount: "35.0000",
+            match_basis: "settlement_aud",
+            candidate_date: "2026-09-24",
             amount_aud: "-35.0000",
           },
           {
@@ -389,6 +394,10 @@ describe("bank repository queries", () => {
             counterparty: "ACME Systems",
             reference: null,
             description: null,
+            document_currency: "AUD",
+            document_amount: "35.0000",
+            match_basis: "settlement_aud",
+            candidate_date: "2026-09-24",
             amount_aud: "-35.0000",
           },
         ],
@@ -416,12 +425,196 @@ describe("bank repository queries", () => {
       "2026-09-24",
       14,
       bankTransactionId,
+      "2026-09-23",
+      null,
+      null,
     ]);
     expect(query.mock.calls[2]?.[0]).toContain("owner_loan_repayment");
     expect(query.mock.calls[2]?.[0]).toContain(
-      "ELSE -candidate.settlement_amount END=$1::numeric",
+      "candidate.settlement_amount IS NOT NULL",
     );
+    expect(detail?.candidates[0]).toMatchObject({
+      matchBasis: "settlement_aud",
+      candidateDate: "2026-09-24",
+      settledAt: "2026-09-24T00:00:00.000Z",
+      documentCurrency: "AUD",
+      documentAmount: "35.0000",
+      amountAud: "-35.0000",
+    });
   });
+
+  it("returns exact AUD invoices and explicitly unverified foreign hints with their candidate dates", async () => {
+    const bankTransactionId = "11111111-1111-4111-8111-111111111111";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: bankTransactionId,
+            posted_date: "2026-09-23",
+            posted_date_text: "2026-09-23",
+            amount_aud: "-35.0000",
+            description: "PAYMENT TO ACME USD 22.50",
+            metadata: {
+              valueDate: "2026-09-24",
+              foreignCurrency: "USD",
+              foreignAmount: "22.50",
+            },
+            matched_transaction_id: null,
+            classification: null,
+            revision: "1",
+            artifact_id: "33333333-3333-4333-8333-333333333333",
+            artifact_ids: ["33333333-3333-4333-8333-333333333333"],
+            source_artifact_ids: ["33333333-3333-4333-8333-333333333333"],
+            artifact_profile: "commbank_transaction_history_csv_v1",
+            filename: "synthetic.csv",
+            source_row: "17",
+            earliest_date: "2026-09-23",
+            latest_date: "2026-09-23",
+            created_at: new Date("2026-09-23T00:00:00Z"),
+            updated_at: new Date("2026-09-23T00:00:00Z"),
+            updated_by_id: "22222222-2222-4222-8222-222222222222",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "44444444-4444-4444-8444-444444444444",
+            settled_at: null,
+            kind: "supplier_expense",
+            counterparty: "ACME AUD",
+            reference: null,
+            description: null,
+            document_currency: "AUD",
+            document_amount: "35.0000",
+            match_basis: "invoice_aud",
+            candidate_date: "2026-09-20",
+            amount_aud: "-35.0000",
+          },
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            settled_at: null,
+            kind: "supplier_expense",
+            counterparty: "ACME USD",
+            reference: null,
+            description: null,
+            document_currency: "USD",
+            document_amount: "22.5000",
+            match_basis: "invoice_foreign_hint",
+            candidate_date: "2026-09-21",
+            amount_aud: null,
+          },
+        ],
+      });
+
+    const detail = await new BankRepository(
+      { query } as never,
+      "folio",
+    ).reconciliationDetail(
+      "22222222-2222-4222-8222-222222222222",
+      bankTransactionId,
+      14,
+    );
+
+    expect(detail?.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "44444444-4444-4444-8444-444444444444",
+          settledAt: null,
+          amountAud: "-35.0000",
+          matchBasis: "invoice_aud",
+          candidateDate: "2026-09-20",
+          documentCurrency: "AUD",
+          documentAmount: "35.0000",
+        }),
+        expect.objectContaining({
+          id: "55555555-5555-4555-8555-555555555555",
+          settledAt: null,
+          amountAud: null,
+          matchBasis: "invoice_foreign_hint",
+          candidateDate: "2026-09-21",
+          documentCurrency: "USD",
+          documentAmount: "22.5000",
+        }),
+      ]),
+    );
+    expect(query.mock.calls[2]?.[1]).toEqual([
+      "-35.0000",
+      "2026-09-24",
+      14,
+      bankTransactionId,
+      "2026-09-23",
+      "USD",
+      "22.5000",
+    ]);
+    expect(query.mock.calls[2]?.[0]).toContain("candidate.document_amount > 0");
+    expect(query.mock.calls[2]?.[0]).toContain(
+      "candidate.document_amount=$7::numeric",
+    );
+    expect(query.mock.calls[2]?.[0]).toContain("NOT EXISTS");
+  });
+
+  it.each([31, null] as const)(
+    "passes the %s-day or all-dates candidate window to the exact-date query",
+    async (windowDays) => {
+      const bankId = "11111111-1111-4111-8111-111111111111";
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({ rowCount: 1 })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: bankId,
+              posted_date: "2026-09-23",
+              posted_date_text: "2026-09-23",
+              amount_aud: "-35.0000",
+              description: "Synthetic movement",
+              metadata: {},
+              matched_transaction_id: null,
+              classification: null,
+              revision: "1",
+              artifact_id: "33333333-3333-4333-8333-333333333333",
+              artifact_ids: ["33333333-3333-4333-8333-333333333333"],
+              source_artifact_ids: ["33333333-3333-4333-8333-333333333333"],
+              artifact_profile: "commbank_transaction_history_csv_v1",
+              filename: "synthetic.csv",
+              source_row: "17",
+              earliest_date: "2026-09-23",
+              latest_date: "2026-09-23",
+              created_at: new Date("2026-09-23T00:00:00Z"),
+              updated_at: new Date("2026-09-23T00:00:00Z"),
+              updated_by_id: "22222222-2222-4222-8222-222222222222",
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [] });
+
+      await new BankRepository(
+        { query } as never,
+        "folio",
+      ).reconciliationDetail(
+        "22222222-2222-4222-8222-222222222222",
+        bankId,
+        windowDays,
+      );
+
+      expect(query.mock.calls[2]?.[1]).toEqual([
+        "-35.0000",
+        "2026-09-23",
+        windowDays,
+        bankId,
+        "2026-09-23",
+        null,
+        null,
+      ]);
+      expect(query.mock.calls[2]?.[0]).toContain(
+        "abs(match.candidate_date - $2::date) <= $3",
+      );
+      expect(query.mock.calls[2]?.[0]).toContain("$3::integer IS NULL");
+    },
+  );
 
   it("returns one activity row with every deterministic source attribution", async () => {
     const query = vi.fn().mockResolvedValue({
@@ -691,6 +884,8 @@ describe("bank repository queries", () => {
           {
             id: "11111111-1111-4111-8111-111111111111",
             amount_aud: "10.0000",
+            posted_date: "2026-09-23",
+            metadata: {},
             revision: "4",
             matched_transaction_id: null,
             classification: null,
@@ -730,6 +925,427 @@ describe("bank repository queries", () => {
     expect(query.mock.calls[2]?.[0]).toMatch(/bank_transactions.*FOR UPDATE/s);
     expect(query.mock.calls[3]?.[0]).toMatch(/transactions.*FOR UPDATE/s);
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("uses the exact posted-date text while confirming and filling settlement fields", async () => {
+    const bankId = "11111111-1111-4111-8111-111111111111";
+    const transactionId = "22222222-2222-4222-8222-222222222222";
+    const actorId = "33333333-3333-4333-8333-333333333333";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: bankId,
+            posted_date: new Date("2026-09-22T14:00:00.000Z"),
+            posted_date_text: "2026-09-23",
+            amount_aud: "-35.0000",
+            metadata: {},
+            revision: "4",
+            matched_transaction_id: null,
+            classification: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: transactionId,
+            source_system: "manual",
+            status: "recorded",
+            kind: "supplier_expense",
+            settled_at: new Date("2026-09-23T00:00:00.000Z"),
+            settlement_currency: null,
+            settlement_amount: null,
+            document_currency: "AUD",
+            document_amount: "35.0000",
+            invoice_date: "2026-09-20",
+            occurred_at: "2026-09-20T00:00:00.000Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: transactionId }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ revision: "5" }], rowCount: 1 })
+      .mockResolvedValueOnce({});
+
+    const result = await new BankRepository(
+      {
+        connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+      } as never,
+      "folio",
+    ).reconcile({
+      actorId,
+      bankTransactionId: bankId,
+      expectedRevision: "4",
+      command: {
+        type: "match",
+        transactionId,
+        confirmSettlement: true,
+      },
+    });
+
+    expect(result).toEqual({ status: "applied", revision: "5" });
+    expect(query.mock.calls[2]?.[0]).toMatch(/bank_transactions.*FOR UPDATE/s);
+    expect(query.mock.calls[2]?.[0]).toContain(
+      "posted_date::text AS posted_date_text",
+    );
+    expect(query.mock.calls[3]?.[0]).toMatch(/transactions.*FOR UPDATE/s);
+    expect(query.mock.calls[4]?.[0]).toMatch(
+      /SET settled_at=COALESCE\(settled_at.*settlement_currency=COALESCE\(settlement_currency, 'AUD'\).*settlement_amount=COALESCE\(settlement_amount, abs\(\$3::numeric\)\).*updated_by_id=\$4/s,
+    );
+    expect(query.mock.calls[4]?.[1]).toEqual([
+      transactionId,
+      "2026-09-23",
+      "-35.0000",
+      actorId,
+    ]);
+    expect(query.mock.calls[4]?.[0]).toContain(
+      "settled_at AT TIME ZONE 'UTC')::date=$2::date",
+    );
+    expect(query.mock.calls[5]?.[0]).toMatch(
+      /UPDATE .*bank_transactions.*matched_transaction_id/s,
+    );
+    expect(query.mock.calls[6]?.[0]).toBe("COMMIT");
+  });
+
+  it("rejects an unconfirmed invoice match without changing either row", async () => {
+    const transactionId = "22222222-2222-4222-8222-222222222222";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            posted_date: "2026-09-23",
+            amount_aud: "-35.0000",
+            metadata: {},
+            revision: "4",
+            matched_transaction_id: null,
+            classification: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: transactionId,
+            source_system: "manual",
+            status: "recorded",
+            kind: "supplier_expense",
+            settled_at: null,
+            settlement_currency: null,
+            settlement_amount: null,
+            document_currency: "AUD",
+            document_amount: "35.0000",
+            invoice_date: "2026-09-20",
+            occurred_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+    const repository = new BankRepository(
+      {
+        connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+      } as never,
+      "folio",
+    );
+
+    await expect(
+      repository.reconcile({
+        actorId: "33333333-3333-4333-8333-333333333333",
+        bankTransactionId: "11111111-1111-4111-8111-111111111111",
+        expectedRevision: "4",
+        command: { type: "match", transactionId },
+      }),
+    ).rejects.toThrow("Confirm that this bank movement settles the invoice");
+
+    expect(query.mock.calls[4]?.[0]).toBe("ROLLBACK");
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).startsWith('UPDATE "folio"."transactions"'),
+      ),
+    ).toBe(false);
+    expect(
+      query.mock.calls.some(([statement]) =>
+        String(statement).startsWith('UPDATE "folio"."bank_transactions"'),
+      ),
+    ).toBe(false);
+  });
+
+  it("confirms a foreign invoice hint while preserving document currency and amount", async () => {
+    const bankId = "11111111-1111-4111-8111-111111111111";
+    const transactionId = "22222222-2222-4222-8222-222222222222";
+    const actorId = "33333333-3333-4333-8333-333333333333";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: bankId,
+            posted_date: "2026-09-23",
+            amount_aud: "-35.0000",
+            metadata: { foreignCurrency: "USD", foreignAmount: "22.50" },
+            revision: "4",
+            matched_transaction_id: null,
+            classification: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: transactionId,
+            source_system: "manual",
+            status: "recorded",
+            kind: "supplier_expense",
+            settled_at: null,
+            settlement_currency: null,
+            settlement_amount: null,
+            document_currency: "USD",
+            document_amount: "22.5000",
+            invoice_date: "2026-09-20",
+            occurred_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: transactionId }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ revision: "5" }], rowCount: 1 })
+      .mockResolvedValueOnce({});
+
+    await expect(
+      new BankRepository(
+        {
+          connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+        } as never,
+        "folio",
+      ).reconcile({
+        actorId,
+        bankTransactionId: bankId,
+        expectedRevision: "4",
+        command: {
+          type: "match",
+          transactionId,
+          confirmSettlement: true,
+        },
+      }),
+    ).resolves.toEqual({ status: "applied", revision: "5" });
+
+    const settlementSql = String(query.mock.calls[4]?.[0]);
+    expect(settlementSql).toContain("settlement_currency=COALESCE");
+    expect(settlementSql).toContain("settlement_amount=COALESCE");
+    expect(settlementSql).not.toContain("document_currency=");
+    expect(settlementSql).not.toContain("document_amount=");
+    expect(query.mock.calls[4]?.[1]).toEqual([
+      transactionId,
+      "2026-09-23",
+      "-35.0000",
+      actorId,
+    ]);
+    expect(query.mock.calls[5]?.[0]).toMatch(/matched_transaction_id/s);
+    expect(query.mock.calls[6]?.[0]).toBe("COMMIT");
+  });
+
+  it("rolls back invoice settlement fields when a concurrent bank match wins the unique guard", async () => {
+    const transactionId = "22222222-2222-4222-8222-222222222222";
+    const uniqueError = Object.assign(new Error("unique match race"), {
+      code: "23505",
+    });
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            posted_date: "2026-09-23",
+            amount_aud: "-35.0000",
+            metadata: {},
+            revision: "4",
+            matched_transaction_id: null,
+            classification: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: transactionId,
+            source_system: "manual",
+            status: "recorded",
+            kind: "supplier_expense",
+            settled_at: null,
+            settlement_currency: null,
+            settlement_amount: null,
+            document_currency: "AUD",
+            document_amount: "35.0000",
+            invoice_date: "2026-09-20",
+            occurred_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: transactionId }], rowCount: 1 })
+      .mockRejectedValueOnce(uniqueError)
+      .mockResolvedValueOnce({});
+
+    let failure: unknown;
+    try {
+      await new BankRepository(
+        {
+          connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+        } as never,
+        "folio",
+      ).reconcile({
+        actorId: "33333333-3333-4333-8333-333333333333",
+        bankTransactionId: "11111111-1111-4111-8111-111111111111",
+        expectedRevision: "4",
+        command: {
+          type: "match",
+          transactionId,
+          confirmSettlement: true,
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      diagnostic: { code: "BANK_MATCH_CONFLICT" },
+      cause: uniqueError,
+    });
+
+    expect(query.mock.calls[4]?.[0]).toContain("settlement_amount=COALESCE");
+    expect(query.mock.calls[5]?.[0]).toContain("matched_transaction_id");
+    expect(query.mock.calls[6]?.[0]).toBe("ROLLBACK");
+    expect(query.mock.calls.some(([statement]) => statement === "COMMIT")).toBe(
+      false,
+    );
+  });
+
+  it("rejects an invoice candidate when populated settlement facts conflict", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            posted_date: "2026-09-23",
+            amount_aud: "-35.0000",
+            metadata: {},
+            revision: "4",
+            matched_transaction_id: null,
+            classification: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "22222222-2222-4222-8222-222222222222",
+            source_system: "manual",
+            status: "recorded",
+            kind: "supplier_expense",
+            settled_at: null,
+            settlement_currency: "AUD",
+            settlement_amount: "34.0000",
+            document_currency: "AUD",
+            document_amount: "35.0000",
+            invoice_date: "2026-09-20",
+            occurred_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+    const repository = new BankRepository(
+      {
+        connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+      } as never,
+      "folio",
+    );
+
+    await expect(
+      repository.reconcile({
+        actorId: "33333333-3333-4333-8333-333333333333",
+        bankTransactionId: "11111111-1111-4111-8111-111111111111",
+        expectedRevision: "4",
+        command: {
+          type: "match",
+          transactionId: "22222222-2222-4222-8222-222222222222",
+          confirmSettlement: true,
+        },
+      }),
+    ).rejects.toThrow("Existing settlement details conflict");
+
+    expect(query.mock.calls[4]?.[0]).toBe("ROLLBACK");
+  });
+
+  it("verifies the exact settlement before treating a matched request as already applied", async () => {
+    const bankId = "11111111-1111-4111-8111-111111111111";
+    const transactionId = "22222222-2222-4222-8222-222222222222";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: bankId,
+            posted_date: "2026-09-23",
+            amount_aud: "-35.0000",
+            metadata: {},
+            revision: "5",
+            matched_transaction_id: transactionId,
+            classification: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: transactionId,
+            source_system: "manual",
+            status: "recorded",
+            kind: "supplier_expense",
+            settled_at: new Date("2026-09-23T00:00:00Z"),
+            settlement_currency: "AUD",
+            settlement_amount: "35.0000",
+            document_currency: "AUD",
+            document_amount: "35.0000",
+            invoice_date: "2026-09-20",
+            occurred_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+
+    await expect(
+      new BankRepository(
+        {
+          connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+        } as never,
+        "folio",
+      ).reconcile({
+        actorId: "33333333-3333-4333-8333-333333333333",
+        bankTransactionId: bankId,
+        expectedRevision: "1",
+        command: {
+          type: "match",
+          transactionId,
+          confirmSettlement: true,
+        },
+      }),
+    ).resolves.toEqual({ status: "already_applied", revision: "5" });
+    expect(query.mock.calls[2]?.[0]).toMatch(/bank_transactions.*FOR UPDATE/s);
+    expect(query.mock.calls[3]?.[0]).toMatch(/transactions.*FOR UPDATE/s);
+    expect(query.mock.calls[4]?.[0]).toBe("COMMIT");
   });
 
   it("treats a stale replay of the same classification as already applied", async () => {
@@ -1023,5 +1639,49 @@ describe("bank repository queries", () => {
         false,
       ),
     ).resolves.toEqual(expected);
+  });
+});
+
+describe("BankRepository transaction cleanup", () => {
+  it("retains operation, rollback, and release errors", async () => {
+    const operationError = new Error("synthetic bank query failure");
+    const rollbackError = new Error("synthetic bank rollback failure");
+    const releaseError = new Error("synthetic bank release failure");
+    const query = vi.fn(async (statement: string) => {
+      if (statement === "BEGIN") return {};
+      if (statement === "ROLLBACK") throw rollbackError;
+      throw operationError;
+    });
+    const release = vi.fn(() => {
+      throw releaseError;
+    });
+    const repository = new BankRepository(
+      { connect: vi.fn().mockResolvedValue({ query, release }) } as never,
+      "folio",
+    );
+
+    let failure: unknown;
+    try {
+      await repository.reconcile({
+        actorId: "actor",
+        bankTransactionId: "bank-row",
+        expectedRevision: "1",
+        command: { type: "reset" },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(OperationCleanupError);
+    const releaseFailure = failure as OperationCleanupError;
+    expect(releaseFailure.stage).toBe("client_release");
+    expect(releaseFailure.cleanupError).toBe(releaseError);
+    expect(releaseFailure.primaryError).toBeInstanceOf(OperationCleanupError);
+    const rollbackFailure =
+      releaseFailure.primaryError as OperationCleanupError;
+    expect(rollbackFailure.stage).toBe("transaction_rollback");
+    expect(rollbackFailure.primaryError).toBe(operationError);
+    expect(rollbackFailure.cleanupError).toBe(rollbackError);
+    expect(release).toHaveBeenCalledOnce();
   });
 });

@@ -123,7 +123,7 @@ describe("bank activity query controls", () => {
       name: "Review bank row posted 2026-09-24",
     });
     expect(reviewLink.getAttribute("href")).toBe(
-      "/banking/reconcile?bank=bank-row-1&window=14",
+      "/banking/reconcile?bank=bank-row-1",
     );
     expect(reviewLink.querySelector("svg")?.getAttribute("aria-hidden")).toBe(
       "true",

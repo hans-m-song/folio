@@ -1,10 +1,12 @@
 import { validateInput } from "./input-validation";
+import { rememberValidationSchema } from "../domain/validation-diagnostics";
 import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
 
 import { parseCommBankTransactionHistoryCsv } from "../domain/bank-profiles/commbank-transaction-history-v1";
 import { bankReconciliationCommandSchema } from "../domain/bank-transactions";
+import type { BankCsvIssue } from "../domain/bank-transactions";
 import {
   commBankDuplicateIdentities,
   stripeDuplicateIdentities,
@@ -28,6 +30,15 @@ import { runtime } from "./runtime";
 
 const commbankProfile = "commbank_transaction_history_csv_v1" as const;
 const stripeProfile = "stripe_balance_itemised_csv_v1" as const;
+
+const csvValidationErrorFor = (issues: readonly BankCsvIssue[]) =>
+  new AggregateError(
+    issues.map(
+      (issue) =>
+        new Error(`${issue.code}: row ${issue.row}, field ${issue.field}`),
+    ),
+    "Bank CSV validation failed.",
+  );
 
 const authorize = async (required: readonly Permission[]) => {
   const current = runtime();
@@ -59,7 +70,11 @@ export const previewBankCsv = createServerFn({ method: "POST" })
       const preview = parseCommBankTransactionHistoryCsv(object.text);
       if (preview.errors.length)
         reportServerFailure(
-          new AppError({ code: "INPUT_INVALID", stage: "csv_validation" }),
+          new AppError({
+            code: "INPUT_INVALID",
+            stage: "csv_validation",
+            cause: csvValidationErrorFor(preview.errors),
+          }),
           {
             operation: "preview_commbank_csv",
             metadata: { issueCount: preview.errors.length },
@@ -162,7 +177,11 @@ export const confirmBankImport = createServerFn({ method: "POST" })
           !preview.latestDate
         ) {
           reportServerFailure(
-            new AppError({ code: "INPUT_INVALID", stage: "csv_validation" }),
+            new AppError({
+              code: "INPUT_INVALID",
+              stage: "csv_validation",
+              cause: csvValidationErrorFor(preview.errors),
+            }),
             {
               operation: "confirm_commbank_import",
               metadata: { issueCount: preview.errors.length },
@@ -477,7 +496,7 @@ const reconciliationQuerySchema = z
     bankTransactionId: z.string().uuid().optional(),
     artifactId: z.string().uuid().optional(),
     unresolvedOnly: z.boolean().default(false),
-    windowDays: z.union([z.literal(14), z.literal(31), z.null()]).default(14),
+    windowDays: z.union([z.literal(14), z.literal(31), z.null()]).default(31),
     offset: z.number().int().min(0).max(10_000).default(0),
   })
   .strict();
@@ -580,6 +599,8 @@ export const reconcileBankTransaction = createServerFn({ method: "POST" })
         const { actor, current } = await authorize(
           operationPermissions.reconcileBankTransaction,
         );
+        if (data.command.type === "match" && data.command.confirmSettlement)
+          requirePermission(actor, permissions.transactionWrite);
         return current.bankRepository.reconcile({ actorId: actor.id, ...data });
       },
       {},
@@ -616,8 +637,13 @@ export const createAndMatchBankTransaction = createServerFn({ method: "POST" })
         );
         const parsed = createAndMatchSchema.safeParse(data);
         if (!parsed.success) {
+          rememberValidationSchema(parsed.error, createAndMatchSchema);
           reportServerFailure(
-            new AppError({ code: "INPUT_INVALID", stage: "input_validation" }),
+            new AppError({
+              code: "INPUT_INVALID",
+              stage: "input_validation",
+              cause: parsed.error,
+            }),
             {
               operation: "create_and_match_bank_transaction",
               metadata: { issueCount: parsed.error.issues.length },

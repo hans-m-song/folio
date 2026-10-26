@@ -993,7 +993,7 @@ function BankActivityPage() {
                           accessibleLabel={`Review bank row posted ${row.postedDate}`}
                           tooltip="Review row"
                           className="banking-table-action"
-                          href={`/banking/reconcile?bank=${encodeURIComponent(row.id)}&window=14`}
+                          href={`/banking/reconcile?bank=${encodeURIComponent(row.id)}`}
                         />
                       </td>
                     </tr>

@@ -1,0 +1,281 @@
+.bank-invoice-evidence {
+  display: grid;
+  align-content: start;
+  gap: 0.9rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+.bank-invoice-evidence__header {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.bank-invoice-evidence__header h3,
+.bank-invoice-evidence__header p,
+.bank-invoice-evidence__review > p,
+.bank-invoice-evidence__empty,
+.bank-invoice-evidence__metadata-empty,
+.bank-invoice-evidence__selected-summary {
+  margin: 0;
+}
+
+.bank-invoice-evidence__header p,
+.bank-invoice-evidence__status,
+.bank-invoice-evidence__empty,
+.bank-invoice-evidence__metadata-empty,
+.bank-invoice-evidence__selected-summary {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.bank-invoice-evidence__open-upload {
+  width: 100%;
+}
+
+.bank-invoice-evidence__upload {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.bank-invoice-evidence .file-upload-page,
+.bank-invoice-upload-drawer .file-upload-page {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bank-invoice-evidence .file-upload-panel,
+.bank-invoice-upload-drawer .file-upload-panel {
+  gap: 0.85rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.bank-invoice-evidence .file-upload-panel__heading h2,
+.bank-invoice-evidence .file-upload-panel__heading > p:last-child,
+.bank-invoice-upload-drawer .file-upload-panel__heading h2,
+.bank-invoice-upload-drawer .file-upload-panel__heading > p:last-child {
+  margin: 0;
+}
+
+.bank-invoice-evidence .file-upload-form,
+.bank-invoice-upload-drawer .file-upload-form {
+  gap: 0.75rem;
+}
+
+.bank-invoice-evidence__review {
+  display: grid;
+  min-width: 0;
+  gap: 0.75rem;
+}
+
+.bank-invoice-evidence__selected-preview {
+  display: grid;
+  min-width: 0;
+  gap: 0.75rem;
+}
+
+.bank-invoice-evidence__metadata {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.bank-invoice-evidence__metadata > div {
+  min-width: 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface-muted);
+}
+
+.bank-invoice-evidence__metadata dt {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.bank-invoice-evidence__metadata dd {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.bank-invoice-evidence__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.bank-invoice-evidence__error {
+  margin: 0;
+  padding: 0.7rem 0.8rem;
+  border-left: 3px solid var(--danger);
+  border-radius: 0.3rem;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.bank-invoice-evidence .transaction-pdf-preview {
+  container-type: inline-size;
+  position: static;
+  top: auto;
+  order: 0;
+}
+
+.bank-invoice-evidence .transaction-pdf-preview__frame,
+.bank-invoice-upload-drawer .transaction-pdf-preview__frame {
+  height: calc(100cqw * 297 / 420 + 4rem);
+  max-height: min(45dvh, 35rem);
+  min-height: 0;
+}
+
+.bank-invoice-upload-drawer .transaction-pdf-preview {
+  container-type: inline-size;
+  position: static;
+  top: auto;
+  order: 0;
+}
+
+.bank-invoice-upload-overlay {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  background: rgb(17 29 49 / 20%);
+}
+
+.bank-invoice-upload-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: none;
+}
+
+.bank-invoice-upload-drawer {
+  display: flex;
+  flex: 0 1 78vw;
+  flex-direction: column;
+  width: min(78vw, 76rem);
+  max-width: calc(100vw - 3rem);
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-left: 1px solid var(--border);
+  outline: none;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: -1rem 0 2.5rem rgb(9 20 39 / 18%);
+  pointer-events: auto;
+}
+
+.bank-invoice-upload-drawer__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem 1.4rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.bank-invoice-upload-drawer__header > div {
+  min-width: 0;
+}
+
+.bank-invoice-upload-drawer__header h2,
+.bank-invoice-upload-drawer__header p {
+  margin: 0;
+}
+
+.bank-invoice-upload-drawer__header h2 {
+  font-size: 1.2rem;
+}
+
+.bank-invoice-upload-drawer__header p:last-child {
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.bank-invoice-upload-drawer__kicker {
+  margin-bottom: 0.3rem !important;
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.bank-invoice-upload-drawer__header > button {
+  flex: 0 0 auto;
+  min-height: 2.35rem;
+}
+
+.bank-invoice-upload-drawer__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1rem 1.4rem 1.4rem;
+}
+
+.bank-invoice-upload-drawer__body > * + * {
+  margin-top: 1rem;
+}
+
+@media (max-width: 760px) {
+  .bank-invoice-evidence {
+    padding: 0.8rem;
+  }
+
+  .bank-invoice-evidence__actions {
+    display: grid;
+  }
+
+  .bank-invoice-upload-drawer {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
+    height: 100dvh;
+    border-left: 0;
+    box-shadow: none;
+  }
+
+  .bank-invoice-upload-drawer__header {
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.8rem 1rem;
+  }
+
+  .bank-invoice-upload-drawer__header > button {
+    padding: 0.4rem 0.65rem;
+  }
+
+  .bank-invoice-upload-drawer__body {
+    padding: 0.85rem 1rem 1rem;
+  }
+}

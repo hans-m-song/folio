@@ -645,6 +645,90 @@
   align-items: center;
 }
 
+.banking-selected-review-groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 0;
+  margin-bottom: 1rem;
+}
+
+.banking-create-summary-section,
+.banking-selected-transaction,
+.banking-selected-source,
+.banking-selected-folio-metadata {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.banking-selected-review-groups > section,
+.banking-create-drawer-summary > section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 0.45rem 0.85rem;
+  padding: 0.55rem 0;
+}
+
+.banking-selected-review-groups > section + section,
+.banking-create-drawer-summary > section + section {
+  border-top: 1px solid var(--banking-line);
+}
+
+.banking-selected-review-groups h3,
+.banking-create-summary-section h3 {
+  margin: 0.15rem 0 0;
+  font-size: 0.95rem;
+  letter-spacing: 0;
+}
+
+.banking-selected-review-groups .banking-detail-grid,
+.banking-create-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: 0.25rem 0.65rem;
+  margin: 0;
+}
+
+.banking-selected-review-groups .banking-detail-grid > div,
+.banking-create-drawer-summary .banking-create-summary-grid > div {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 0.1rem;
+}
+
+.banking-selected-review-groups .banking-detail-grid > .banking-detail-wide,
+.banking-create-drawer-summary
+  .banking-create-summary-grid
+  > .banking-create-summary-wide {
+  grid-column: auto;
+}
+
+.banking-selected-transaction .banking-detail-grid,
+.banking-create-summary-section.banking-transaction-summary
+  .banking-create-summary-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.banking-selected-transaction .banking-detail-grid > .banking-summary-hints,
+.banking-create-summary-section
+  .banking-create-summary-grid
+  > .banking-summary-hints {
+  grid-column: 1 / -1;
+}
+
+.banking-selected-panel > .banking-create-panel {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--banking-line);
+  border-radius: 0.7rem;
+  background: #fbfcfe;
+}
+
 .banking-detail-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -653,11 +737,16 @@
 }
 
 .banking-detail-grid > div {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  align-items: baseline;
+  gap: 0.3rem 0.45rem;
   min-width: 0;
-  padding: 0.75rem;
-  border: 1px solid #e6ebf3;
-  border-radius: 0.55rem;
-  background: #fbfcfe;
+  padding: 0.25rem 0;
+  border: 0;
+  border-bottom: 1px solid #e6ebf3;
+  border-radius: 0;
+  background: transparent;
 }
 
 .banking-detail-grid > .banking-detail-wide {
@@ -665,25 +754,35 @@
 }
 
 .banking-detail-grid dt {
+  min-width: 0;
   color: var(--banking-muted);
-  font-size: 0.69rem;
+  font-size: 0.66rem;
   font-weight: 700;
-  letter-spacing: 0.045em;
+  letter-spacing: 0.035em;
   text-transform: uppercase;
 }
 
 .banking-detail-grid dd {
-  margin: 0.35rem 0 0;
+  min-width: 0;
+  margin: 0;
   color: var(--banking-ink);
-  font-size: 0.87rem;
-  line-height: 1.4;
+  font-size: 0.82rem;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
 .banking-detail-grid .amount-negative,
 .banking-detail-grid .amount-positive {
-  font-size: 1.05rem;
+  font-size: 0.92rem;
   font-weight: 700;
+}
+
+.banking-identifier {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8em;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .banking-candidate-fieldset {
@@ -772,6 +871,52 @@
   font-size: 0.74rem;
 }
 
+.banking-candidate-unverified {
+  color: #8a3b24;
+  font-weight: 700;
+}
+
+.banking-candidate-confirmation {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.85rem;
+  border: 1px solid #d8e1ef;
+  border-radius: 0.6rem;
+  background: #f5f8fd;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.banking-candidate-confirmation p {
+  margin: 0;
+}
+
+.banking-candidate-confirmation > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  color: var(--banking-ink);
+  font-weight: 600;
+}
+
+.banking-candidate-confirmation input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 1rem;
+  min-height: auto;
+  height: 1rem;
+  margin: 0.1rem 0 0;
+  padding: 0;
+  accent-color: var(--banking-accent);
+}
+
+.banking-candidate-warning {
+  padding: 0.7rem;
+  border-left: 3px solid #bc8240;
+  background: #fff8ef;
+  color: #704819;
+  font-weight: 700;
+}
+
 .banking-proposal-suggestions {
   display: grid;
   gap: 0.75rem;
@@ -828,6 +973,21 @@
   margin-top: 1rem;
 }
 
+.banking-action-rows {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.banking-action-rows .banking-action-row {
+  margin-top: 0;
+}
+
+.banking-candidate-match-actions > * {
+  width: auto;
+  flex: 0 1 auto;
+}
+
 .banking-action-status {
   min-height: 1.3rem;
   margin: 0.75rem 0 0;
@@ -840,7 +1000,8 @@
 .banking-kind-choice {
   display: grid;
   gap: 0.55rem;
-  max-width: 30rem;
+  width: 100%;
+  max-width: none;
 }
 
 .banking-kind-choice > label {
@@ -960,20 +1121,208 @@
   margin-top: 0.3rem;
 }
 
-.banking-create-panel {
-  margin-top: 1rem;
-  padding: 1rem;
-  border: 1px solid var(--banking-line);
-  border-radius: 0.7rem;
-  background: #fbfcfe;
+.banking-create-overlay {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  background: rgb(17 29 49 / 46%);
 }
 
-.banking-create-panel h3 {
-  margin-bottom: 0.5rem;
+.banking-create-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: none;
 }
 
-.banking-create-panel > .banking-muted {
-  margin: 0 0 1rem;
+.banking-create-drawer {
+  display: flex;
+  flex: 0 1 89vw;
+  flex-direction: column;
+  width: 89vw;
+  max-width: 89vw;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-left: 1px solid var(--banking-line);
+  outline: none;
+  background: var(--surface);
+  color: var(--banking-ink);
+  box-shadow: -1rem 0 2.5rem rgb(9 20 39 / 18%);
+  pointer-events: auto;
+}
+
+.banking-create-drawer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem 0.9rem;
+  border-bottom: 1px solid var(--banking-line);
+}
+
+.banking-create-drawer-header > div {
+  min-width: 0;
+}
+
+.banking-create-drawer-header .banking-kicker {
+  margin: 0 0 0.35rem;
+}
+
+.banking-create-drawer-header h2 {
+  margin: 0;
+}
+
+.banking-create-drawer-header p:last-child {
+  margin: 0.4rem 0 0;
+  color: var(--banking-muted);
+  font-size: 0.88rem;
+}
+
+.banking-create-drawer-header > button {
+  flex: 0 0 auto;
+  min-height: 2.4rem;
+}
+
+.banking-create-close-icon {
+  display: none;
+}
+
+.banking-create-drawer-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 0;
+  padding: 0 0 1rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--banking-line);
+}
+
+.banking-create-summary-section {
+  min-width: 0;
+}
+
+.banking-create-summary-section h3 {
+  margin: 0.15rem 0 0;
+  font-size: 0.82rem;
+  letter-spacing: 0;
+}
+
+.banking-create-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: 0.25rem 0.65rem;
+  margin: 0;
+}
+
+.banking-create-summary-grid > div {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  align-items: baseline;
+  gap: 0.3rem 0.45rem;
+  min-width: 0;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid #e6ebf3;
+}
+
+.banking-create-summary-grid > .banking-create-summary-wide {
+  grid-column: 1 / -1;
+}
+
+.banking-create-summary-grid dt {
+  min-width: 0;
+  color: var(--banking-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.banking-create-summary-grid dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.banking-create-summary-grid .amount-negative,
+.banking-create-summary-grid .amount-positive {
+  font-size: 0.9rem;
+}
+
+.banking-payment-hints {
+  display: grid;
+  gap: 0.1rem;
+  margin: 0;
+  padding-left: 1rem;
+  list-style: disc;
+}
+
+.banking-payment-hints > li {
+  display: list-item;
+  padding: 0;
+  border: 0;
+}
+
+.banking-create-drawer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1rem 1.5rem 1.5rem;
+}
+
+.banking-create-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 44fr) minmax(0, 56fr);
+  align-items: start;
+  gap: 1rem;
+  animation: banking-create-form-enter 150ms ease-out both;
+}
+
+.banking-create-form-column {
+  min-width: 0;
+}
+
+.banking-create-evidence-column {
+  min-width: 0;
+}
+
+.banking-create-evidence-column > * {
+  max-width: 100%;
+}
+
+body:has(.banking-create-overlay) .autocomplete-popover {
+  z-index: 1101;
+}
+
+@media (max-width: 760px) {
+  .banking-selected-transaction .banking-detail-grid,
+  .banking-create-summary-section.banking-transaction-summary
+    .banking-create-summary-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .banking-create-workspace {
+    animation: none;
+  }
+}
+
+@media (min-width: 1021px) {
+  .banking-kind-choice .banking-action-row {
+    flex-wrap: nowrap;
+  }
 }
 
 .banking-import-panel > .banking-panel-heading {
@@ -1403,6 +1752,64 @@
     flex-direction: column;
   }
 
+  .banking-create-drawer {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
+    height: 100dvh;
+    border-left: 0;
+    box-shadow: none;
+  }
+
+  .banking-create-drawer-header {
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.8rem 1rem;
+  }
+
+  .banking-create-drawer-header > button {
+    display: grid;
+    flex: 0 0 2.5rem;
+    place-items: center;
+    width: 2.5rem;
+    min-height: 2.5rem;
+    padding: 0;
+  }
+
+  .banking-create-return-label {
+    display: none;
+  }
+
+  .banking-create-close-icon {
+    font-size: 1.5rem;
+    line-height: 1;
+  }
+
+  .banking-create-drawer-summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    padding-bottom: 0.85rem;
+  }
+
+  .banking-selected-review-groups > section + section,
+  .banking-create-drawer-summary > section + section {
+    padding-top: 0.65rem;
+    padding-left: 0;
+    border-top: 1px solid var(--banking-line);
+  }
+
+  .banking-create-drawer-body {
+    padding: 0.85rem 1rem 1rem;
+  }
+
+  .banking-create-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .banking-create-form-column {
+    max-width: none;
+  }
+
   .banking-panel-heading > .banking-button-link {
     align-self: flex-start;
   }
@@ -1567,6 +1974,10 @@
 
   .banking-action-row > * {
     width: 100%;
+  }
+
+  .banking-candidate-match-actions > * {
+    width: auto;
   }
 
   .banking-confirm-actions > * {

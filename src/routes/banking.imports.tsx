@@ -968,7 +968,7 @@ function BankImportsPage() {
                       {item.rowCount > 0 ? (
                         <a
                           className="banking-table-action"
-                          href={`/banking/reconcile?artifact=${encodeURIComponent(item.artifactId)}&window=14`}
+                          href={`/banking/reconcile?artifact=${encodeURIComponent(item.artifactId)}`}
                           aria-label={`${item.unresolvedCount > 0 ? "Review unresolved rows in" : "View rows in"} ${item.filename}`}
                         >
                           {item.unresolvedCount > 0

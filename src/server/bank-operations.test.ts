@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const current = vi.hoisted(() => ({
   authConfig: { sessionCookieName: "folio_session" },
@@ -13,7 +13,10 @@ const current = vi.hoisted(() => ({
   bankRepository: {
     listImports: vi.fn(),
     listTransactions: vi.fn(),
+    confirmImport: vi.fn(),
+    reconcile: vi.fn(),
     reconciliationCounts: vi.fn(),
+    reconciliationDetail: vi.fn(),
     nextReconciliationTarget: vi.fn(),
   },
   proposalRepository: { listSuggestionsForBankRow: vi.fn() },
@@ -23,6 +26,7 @@ const current = vi.hoisted(() => ({
 
 vi.mock("@tanstack/react-start/server", () => ({
   getCookie: vi.fn().mockReturnValue("opaque-session"),
+  setResponseStatus: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-start", () => ({
@@ -48,9 +52,13 @@ import {
   getCsvDuplicateWarnings,
   getBankReconciliation,
   getNextBankReconciliation,
+  confirmBankImport,
   listBankImports,
   listBankTransactions,
+  reconcileBankTransaction,
 } from "./bank-operations";
+import * as authorization from "./authorization";
+import { FolioDiagnosticError } from "../domain/diagnostics";
 
 const actor = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -63,6 +71,8 @@ const artifactId = "22222222-2222-4222-8222-222222222222";
 describe("CSV duplicate warning operation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
     current.auth.session.mockResolvedValue(actor);
     current.repository.findCsvDuplicateWarnings.mockResolvedValue({
       artifactId,
@@ -70,6 +80,9 @@ describe("CSV duplicate warning operation", () => {
     });
     current.bankRepository.listImports.mockResolvedValue([]);
     current.bankRepository.listTransactions.mockResolvedValue([]);
+    current.bankRepository.confirmImport.mockResolvedValue({
+      status: "imported",
+    });
     current.bankRepository.reconciliationCounts.mockResolvedValue({
       total: 0,
       unresolved: 0,
@@ -80,6 +93,70 @@ describe("CSV duplicate warning operation", () => {
     current.repository.listUsers.mockResolvedValue([]);
     current.repository.listEntrySuggestions.mockResolvedValue({});
     current.repository.listAvailableInvoiceArtifacts.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("requires transaction-write permission only for a confirmed invoice settlement", async () => {
+    const bankTransactionId = "33333333-3333-4333-8333-333333333333";
+    const transactionId = "44444444-4444-4444-8444-444444444444";
+    const requirePermission = authorization.requirePermission;
+    const permissionCheck = vi
+      .spyOn(authorization, "requirePermission")
+      .mockImplementation((authenticatedActor, permission) => {
+        if (permission === authorization.permissions.transactionWrite)
+          throw new FolioDiagnosticError({
+            category: "actor",
+            code: "PERMISSION_DENIED",
+            retryable: false,
+          });
+        requirePermission(authenticatedActor, permission);
+      });
+
+    await expect(
+      reconcileBankTransaction({
+        data: {
+          bankTransactionId,
+          expectedRevision: "1",
+          command: {
+            type: "match",
+            transactionId,
+            confirmSettlement: true,
+          },
+        },
+      }),
+    ).rejects.toThrow("Code PERMISSION_DENIED");
+    expect(permissionCheck).toHaveBeenCalledWith(
+      actor,
+      authorization.permissions.transactionWrite,
+    );
+    expect(current.bankRepository.reconcile).not.toHaveBeenCalled();
+
+    permissionCheck.mockClear();
+    current.bankRepository.reconcile.mockResolvedValue({
+      status: "applied",
+      revision: "2",
+    });
+    await reconcileBankTransaction({
+      data: {
+        bankTransactionId,
+        expectedRevision: "1",
+        command: { type: "match", transactionId },
+      },
+    });
+
+    expect(current.bankRepository.reconcile).toHaveBeenCalledWith({
+      actorId: actor.id,
+      bankTransactionId,
+      expectedRevision: "1",
+      command: { type: "match", transactionId },
+    });
+    expect(permissionCheck).not.toHaveBeenCalledWith(
+      actor,
+      authorization.permissions.transactionWrite,
+    );
   });
 
   it("loads unresolved reconciliation rows with server-side filtering", async () => {
@@ -97,6 +174,40 @@ describe("CSV duplicate warning operation", () => {
       },
     );
   });
+
+  it.each([
+    { description: "omitted window", query: {}, expectedWindowDays: 31 },
+    {
+      description: "explicit ±14 day window",
+      query: { windowDays: 14 },
+      expectedWindowDays: 14,
+    },
+    {
+      description: "all dates",
+      query: { windowDays: null },
+      expectedWindowDays: null,
+    },
+  ] as const)(
+    "passes the $description to reconciliation detail lookup",
+    async ({ query, expectedWindowDays }) => {
+      const bankTransactionId = "33333333-3333-4333-8333-333333333333";
+      current.bankRepository.listTransactions.mockResolvedValue([
+        { id: bankTransactionId, reviewState: "unresolved" },
+      ]);
+      current.bankRepository.reconciliationDetail.mockResolvedValue(null);
+
+      await getBankReconciliation({
+        data: { ...query, bankTransactionId },
+      });
+
+      expect(current.bankRepository.reconciliationDetail).toHaveBeenCalledWith(
+        actor.id,
+        bankTransactionId,
+        expectedWindowDays,
+        undefined,
+      );
+    },
+  );
 
   it("selects the next row through the authorized read-only queue operation", async () => {
     current.bankRepository.nextReconciliationTarget.mockResolvedValue({
@@ -336,6 +447,38 @@ describe("CSV duplicate warning operation", () => {
           },
         ],
       },
+    );
+  });
+
+  it("pins confirmed imports to the stored checksum", async () => {
+    const checksumSha256 = `${"A".repeat(43)}=`;
+    current.repository.getArtifact.mockResolvedValue({
+      id: artifactId,
+      artifactProfile: "commbank_transaction_history_csv_v1",
+      state: "available",
+      checksumSha256,
+    });
+
+    await confirmBankImport({ data: { artifactId } });
+
+    expect(current.bankRepository.confirmImport).toHaveBeenCalledWith(
+      expect.objectContaining({ artifactId, checksumSha256 }),
+    );
+    expect(current.documents.readReviewText).not.toHaveBeenCalled();
+  });
+
+  it("pins newly reviewed imports to the object artifact checksum", async () => {
+    const checksumSha256 = `${"B".repeat(43)}=`;
+    current.repository.getArtifact.mockResolvedValue(null);
+    current.documents.readReviewText.mockResolvedValue({
+      artifact: { id: artifactId, checksumSha256 },
+      text: "01/09/2026,-10.00,Synthetic movement,90.00",
+    });
+
+    await confirmBankImport({ data: { artifactId } });
+
+    expect(current.bankRepository.confirmImport).toHaveBeenCalledWith(
+      expect.objectContaining({ artifactId, checksumSha256 }),
     );
   });
 });

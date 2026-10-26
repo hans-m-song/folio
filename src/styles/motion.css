@@ -74,11 +74,24 @@
   }
 }
 
+@keyframes banking-create-form-enter {
+  from {
+    opacity: 0.92;
+    transform: translateY(1rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .banking-create-overlay[data-entering],
   .banking-create-overlay[data-exiting],
   .banking-create-modal[data-entering],
   .banking-create-modal[data-exiting],
+  .banking-create-workspace,
   .bank-invoice-upload-overlay[data-entering],
   .bank-invoice-upload-overlay[data-exiting],
   .bank-invoice-upload-modal[data-entering],

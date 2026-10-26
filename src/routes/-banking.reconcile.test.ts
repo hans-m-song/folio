@@ -2,12 +2,41 @@ import { describe, expect, it } from "vitest";
 import { defaultParseSearch } from "@tanstack/react-router";
 
 import {
+  bankReconciliationDateDisplay,
+  bankReconciliationDateIso,
+  bankReconciliationTimestampDisplay,
+  bankCandidateReview,
   bankMatchTransactionKinds,
   bankSourceReview,
   canAdvanceBankReconciliationPage,
   createBankTransactionPrefill,
   parseReconcileSearch,
 } from "./banking.reconcile";
+
+describe("bank reconciliation date display", () => {
+  it("formats supported date-only values without changing their calendar date", () => {
+    expect(bankReconciliationDateDisplay("2026-08-27")).toBe("27 Aug 2026");
+    expect(bankReconciliationDateDisplay("27/08/2026")).toBe("27 Aug 2026");
+    expect(bankReconciliationDateIso("27/08/2026")).toBe("2026-08-27");
+  });
+
+  it("preserves invalid or unrecognised date text", () => {
+    expect(bankReconciliationDateDisplay("31/02/2026")).toBe("31/02/2026");
+    expect(bankReconciliationDateDisplay("payment 27/08/2026")).toBe(
+      "payment 27/08/2026",
+    );
+    expect(bankReconciliationDateIso("31/02/2026")).toBeNull();
+  });
+
+  it("formats review timestamps in Brisbane with an explicit AEST zone", () => {
+    expect(
+      bankReconciliationTimestampDisplay("2026-08-26T14:30:00.000Z"),
+    ).toMatch(/27 Aug 2026.*00:30.*AEST/);
+    expect(bankReconciliationTimestampDisplay("invalid timestamp")).toBe(
+      "invalid timestamp",
+    );
+  });
+});
 
 describe("bank reconciliation URL state", () => {
   it("retains valid row, source, window, and bounded page state", () => {
@@ -28,7 +57,7 @@ describe("bank reconciliation URL state", () => {
     });
   });
 
-  it("drops malformed identifiers and restores conservative defaults", () => {
+  it("drops malformed identifiers and uses the default date window", () => {
     expect(
       parseReconcileSearch({
         bank: "not-an-id",
@@ -41,9 +70,14 @@ describe("bank reconciliation URL state", () => {
       bank: undefined,
       artifact: undefined,
       unresolved: undefined,
-      window: "14",
+      window: "31",
       page: 1,
     });
+  });
+
+  it("defaults an omitted date window to ±31 days and retains explicit ±14 days", () => {
+    expect(parseReconcileSearch({}).window).toBe("31");
+    expect(parseReconcileSearch({ window: "14" }).window).toBe("14");
   });
 
   it("accepts router-serialized unresolved toggle values", () => {
@@ -222,6 +256,62 @@ describe("bank row source review", () => {
         { label: "Parsed foreign-currency suggestion", value: "USD" },
         { label: "Parsed foreign-amount suggestion", value: "22.50" },
       ],
+    });
+  });
+});
+
+describe("bank match candidate review", () => {
+  it("shows invoice amount and invoice/activity date against the bank value date", () => {
+    expect(
+      bankCandidateReview(
+        {
+          amountAud: "-35.1200",
+          candidateDate: "2026-09-22",
+          dateDistanceDays: 2,
+          documentAmount: "35.1200",
+          documentCurrency: "AUD",
+          matchBasis: "invoice_aud",
+          settledAt: null,
+        },
+        {
+          postedDate: "2026-09-24",
+          metadata: { valueDate: "2026-09-24" },
+        },
+      ),
+    ).toMatchObject({
+      isInvoiceMatch: true,
+      isUnverifiedForeignHint: false,
+      basisLabel: "Invoice total (AUD)",
+      amountLabel: "AUD 35.1200",
+      candidateDateSourceLabel: "Invoice/activity date",
+      candidateDate: "2026-09-22",
+      comparisonDateSource: "bank value date",
+      dateDifferenceLabel: "2 days from bank value date",
+    });
+  });
+
+  it("marks foreign invoice data as an unverified hint and falls back to bank posted date", () => {
+    expect(
+      bankCandidateReview(
+        {
+          amountAud: null,
+          candidateDate: "2026-09-24",
+          dateDistanceDays: 0,
+          documentAmount: "37.08",
+          documentCurrency: "USD",
+          matchBasis: "invoice_foreign_hint",
+          settledAt: null,
+        },
+        { postedDate: "2026-09-24", metadata: { valueDate: null } },
+      ),
+    ).toMatchObject({
+      isInvoiceMatch: true,
+      isUnverifiedForeignHint: true,
+      basisLabel: "Unverified foreign invoice hint",
+      amountLabel: "USD 37.08",
+      candidateDateSourceLabel: "Invoice/activity date",
+      comparisonDateSource: "bank posted date",
+      dateDifferenceLabel: "same date as bank posted date",
     });
   });
 });

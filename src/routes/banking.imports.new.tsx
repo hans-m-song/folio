@@ -1288,7 +1288,7 @@ export function NewBankImportPage({
                     className="banking-button-link"
                     href={
                       activeItem.completedArtifactId
-                        ? `/banking/reconcile?artifact=${encodeURIComponent(activeItem.completedArtifactId)}&window=14`
+                        ? `/banking/reconcile?artifact=${encodeURIComponent(activeItem.completedArtifactId)}`
                         : "/banking/reconcile"
                     }
                   >

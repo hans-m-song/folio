@@ -3,28 +3,49 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import type {
   BankClassification,
+  BankMatchBasis,
   BankReconciliationCommand,
   BankReviewState,
   ParsedBankTransaction,
 } from "../domain/bank-transactions";
-import { rankBankMatchCandidate } from "../domain/bank-transactions";
+import {
+  assessBankMatchCandidate,
+  parseBankForeignAmountHint,
+  rankBankMatchCandidate,
+} from "../domain/bank-transactions";
 import { manualCashEffectAudMinor } from "../domain/cash-effect";
 import { parseDecimal } from "../domain/money";
 import type { TransactionInput } from "../domain/types";
 import { assertTransactionRules } from "../domain/workflow";
 import { revisionConflictError } from "../domain/revisions";
-import { withDatabaseTransactionClient } from "./transaction-cleanup";
 import { FolioDiagnosticError } from "../domain/diagnostics";
+import { withDatabaseTransactionClient } from "./transaction-cleanup";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
 
 const profile = "commbank_transaction_history_csv_v1" as const;
 
-const bankConflict = (code: string, message: string) =>
+const bankConflict = (code: string, message: string, cause?: unknown) =>
   new FolioDiagnosticError(
     { category: "validation", code, retryable: false },
     message,
+    cause === undefined ? undefined : { cause },
   );
+
+const postgresErrorCode = (error: unknown): string | null => {
+  if (!error || typeof error !== "object") return null;
+  try {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" ? code : null;
+  } catch {
+    return null;
+  }
+};
+
+const uniqueBankMatchConflict = (message: string) => (error: unknown) =>
+  postgresErrorCode(error) === "23505"
+    ? bankConflict("BANK_MATCH_CONFLICT", message, error)
+    : error;
 
 export interface BankOverlap {
   artifactId: string;
@@ -183,14 +204,18 @@ export interface BankImportSortClause {
 
 export interface BankMatchCandidate {
   id: string;
-  settledAt: string;
+  settledAt: string | null;
   kind: string;
   counterparty: string | null;
   reference: string | null;
   description: string | null;
-  amountAud: string;
+  amountAud: string | null;
   dateDistanceDays: number;
   textScore: number;
+  matchBasis?: BankMatchBasis;
+  candidateDate?: string;
+  documentCurrency?: string | null;
+  documentAmount?: string | null;
 }
 
 export interface BankReconciliationDetail {
@@ -266,6 +291,52 @@ const reviewState = (row: QueryResultRow): BankReviewState =>
   row.matched_transaction_id
     ? "matched"
     : ((row.classification as BankClassification | null) ?? "unresolved");
+
+const bankPostedDate = (row: QueryResultRow): string =>
+  date(row.posted_date_text ?? row.posted_date)!;
+
+const assessRowsBankMatch = (
+  bank: QueryResultRow,
+  transaction: QueryResultRow,
+) =>
+  assessBankMatchCandidate({
+    bank: {
+      amountAud: String(bank.amount_aud),
+      postedDate: bankPostedDate(bank),
+      metadata:
+        bank.metadata && typeof bank.metadata === "object"
+          ? (bank.metadata as Record<string, unknown>)
+          : {},
+    },
+    transaction: {
+      sourceSystem: String(transaction.source_system),
+      status: String(transaction.status),
+      kind: String(transaction.kind),
+      settledAt: transaction.settled_at ? iso(transaction.settled_at) : null,
+      settlementCurrency:
+        transaction.settlement_currency === null ||
+        transaction.settlement_currency === undefined
+          ? null
+          : String(transaction.settlement_currency),
+      settlementAmount:
+        transaction.settlement_amount === null ||
+        transaction.settlement_amount === undefined
+          ? null
+          : String(transaction.settlement_amount),
+      documentCurrency:
+        transaction.document_currency === null ||
+        transaction.document_currency === undefined
+          ? null
+          : String(transaction.document_currency),
+      documentAmount:
+        transaction.document_amount === null ||
+        transaction.document_amount === undefined
+          ? null
+          : String(transaction.document_amount),
+      invoiceDate: date(transaction.invoice_date),
+      occurredAt: transaction.occurred_at ? iso(transaction.occurred_at) : null,
+    },
+  });
 
 const bankComparisonSql: Record<BankQueryComparisonOperator, string> = {
   equals: "=",
@@ -942,45 +1013,117 @@ export class BankRepository {
       typeof valueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(valueDate)
         ? valueDate
         : bankTransaction.postedDate;
+    const foreignHint = parseBankForeignAmountHint(bankTransaction.metadata);
     const candidateResult = await this.pool.query(
-      `SELECT candidate.id, candidate.settled_at, candidate.kind, candidate.counterparty, candidate.reference, candidate.description, candidate.settlement_amount,
-        CASE WHEN candidate.kind IN ('sale','supplier_credit','owner_contribution','owner_loan') THEN candidate.settlement_amount ELSE -candidate.settlement_amount END AS amount_aud
+      `SELECT candidate.id, candidate.settled_at, candidate.kind, candidate.counterparty, candidate.reference, candidate.description,
+        candidate.document_currency, candidate.document_amount, match.match_basis, match.candidate_date::text AS candidate_date, match.amount_aud
        FROM ${this.transactionsTable} candidate
+       CROSS JOIN LATERAL (
+         SELECT
+           CASE
+             WHEN candidate.settled_at IS NOT NULL AND candidate.settlement_currency='AUD' AND candidate.settlement_amount IS NOT NULL THEN 'settlement_aud'
+             WHEN candidate.document_currency='AUD' THEN 'invoice_aud'
+             ELSE 'invoice_foreign_hint'
+           END AS match_basis,
+           CASE
+             WHEN candidate.settled_at IS NOT NULL AND candidate.settlement_currency='AUD' AND candidate.settlement_amount IS NOT NULL THEN (candidate.settled_at AT TIME ZONE 'UTC')::date
+             ELSE COALESCE(candidate.invoice_date, (candidate.occurred_at AT TIME ZONE 'UTC')::date)
+           END AS candidate_date,
+           CASE
+             WHEN candidate.settled_at IS NOT NULL AND candidate.settlement_currency='AUD' AND candidate.settlement_amount IS NOT NULL THEN
+               CASE WHEN candidate.kind IN ('sale','supplier_credit','owner_contribution','owner_loan') THEN candidate.settlement_amount ELSE -candidate.settlement_amount END
+             WHEN candidate.document_currency='AUD' THEN
+               CASE WHEN candidate.kind IN ('sale','supplier_credit','owner_contribution','owner_loan') THEN candidate.document_amount ELSE -candidate.document_amount END
+             ELSE NULL
+           END AS amount_aud
+       ) match
        WHERE candidate.source_system='manual' AND candidate.status='recorded'
-       AND candidate.settled_at IS NOT NULL AND candidate.settlement_currency='AUD' AND candidate.settlement_amount IS NOT NULL
        AND candidate.kind IN ('sale','supplier_expense','processing_fee','sale_refund','supplier_credit','owner_contribution','owner_loan','owner_loan_repayment')
-       AND CASE WHEN candidate.kind IN ('sale','supplier_credit','owner_contribution','owner_loan') THEN candidate.settlement_amount ELSE -candidate.settlement_amount END=$1::numeric
-       AND ($3::integer IS NULL OR abs(candidate.settled_at::date - $2::date) <= $3)
+       AND match.candidate_date IS NOT NULL
+       AND ($3::integer IS NULL OR abs(match.candidate_date - $2::date) <= $3)
+       AND (
+         (match.match_basis='settlement_aud' AND match.amount_aud=$1::numeric)
+         OR (
+           match.match_basis<>'settlement_aud'
+           AND candidate.document_amount > 0
+           AND (candidate.settled_at IS NULL OR (candidate.settled_at AT TIME ZONE 'UTC')::date=$5::date)
+           AND (candidate.settlement_currency IS NULL OR candidate.settlement_currency='AUD')
+           AND (candidate.settlement_amount IS NULL OR candidate.settlement_amount=abs($1::numeric))
+           AND (
+             (match.match_basis='invoice_aud' AND match.amount_aud=$1::numeric)
+             OR (
+               match.match_basis='invoice_foreign_hint'
+               AND $6::text IS NOT NULL
+               AND $7::numeric IS NOT NULL
+               AND candidate.document_currency=$6
+               AND candidate.document_amount=$7::numeric
+               AND ((candidate.kind IN ('sale','supplier_credit','owner_contribution','owner_loan') AND $1::numeric > 0)
+                 OR (candidate.kind IN ('supplier_expense','processing_fee','sale_refund','owner_loan_repayment') AND $1::numeric < 0))
+             )
+           )
+         )
+       )
        AND NOT EXISTS (SELECT 1 FROM ${this.bankTransactionsTable} matched WHERE matched.matched_transaction_id=candidate.id AND matched.id<>$4)`,
-      [row.amount_aud, bankMatchDate, windowDays, bankTransactionId],
+      [
+        row.amount_aud,
+        bankMatchDate,
+        windowDays,
+        bankTransactionId,
+        bankTransaction.postedDate,
+        foreignHint?.currency ?? null,
+        foreignHint?.amount ?? null,
+      ],
     );
     const candidates = candidateResult.rows
       .map((candidate): BankMatchCandidate => {
+        const settledAt = candidate.settled_at
+          ? iso(candidate.settled_at)
+          : null;
+        const candidateDate =
+          date(candidate.candidate_date) ??
+          (settledAt ? settledAt.slice(0, 10) : "");
         const rank = rankBankMatchCandidate({
           bankPostedDate: bankMatchDate,
+          candidateDate,
           bankDescription: bankTransaction.description,
           bankCounterparty: null,
-          settledAt: iso(candidate.settled_at),
           counterparty: candidate.counterparty,
           reference: candidate.reference,
           description: candidate.description,
         });
         return {
           id: String(candidate.id),
-          settledAt: iso(candidate.settled_at),
+          settledAt,
           kind: String(candidate.kind),
           counterparty: candidate.counterparty,
           reference: candidate.reference,
           description: candidate.description,
-          amountAud: String(candidate.amount_aud),
+          amountAud:
+            candidate.amount_aud === null || candidate.amount_aud === undefined
+              ? null
+              : String(candidate.amount_aud),
           ...rank,
+          matchBasis: candidate.match_basis as BankMatchBasis,
+          candidateDate,
+          documentCurrency:
+            candidate.document_currency === null ||
+            candidate.document_currency === undefined
+              ? null
+              : String(candidate.document_currency),
+          documentAmount:
+            candidate.document_amount === null ||
+            candidate.document_amount === undefined
+              ? null
+              : String(candidate.document_amount),
         };
       })
       .sort(
         (left, right) =>
           left.dateDistanceDays - right.dateDistanceDays ||
           right.textScore - left.textScore ||
-          left.settledAt.localeCompare(right.settledAt) ||
+          (left.candidateDate ?? left.settledAt ?? "").localeCompare(
+            right.candidateDate ?? right.settledAt ?? "",
+          ) ||
           left.id.localeCompare(right.id),
       );
     return {
@@ -1030,94 +1173,139 @@ export class BankRepository {
     expectedRevision: string;
     command: BankReconciliationCommand;
   }): Promise<ReconcileResult> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.requireActor(client, input.actorId);
-      const selected = await client.query(
-        `SELECT * FROM ${this.bankTransactionsTable} WHERE id=$1 FOR UPDATE`,
-        [input.bankTransactionId],
-      );
-      const bank = selected.rows[0];
-      if (!bank) throw new Error("Bank transaction not found");
-      const alreadyApplied =
-        input.command.type === "match"
-          ? String(bank.matched_transaction_id ?? "") ===
-              input.command.transactionId && bank.classification === null
-          : input.command.type === "classify"
-            ? bank.matched_transaction_id === null &&
-              bank.classification === input.command.classification
-            : bank.matched_transaction_id === null &&
-              bank.classification === null;
-      if (alreadyApplied) {
-        await client.query("COMMIT");
-        return { status: "already_applied", revision: String(bank.revision) };
-      }
-      if (String(bank.revision) !== input.expectedRevision)
-        throw revisionConflictError();
-      if (
-        (bank.matched_transaction_id !== null ||
-          bank.classification !== null) &&
-        input.command.type !== "reset"
-      )
-        throw bankConflict(
-          "BANK_STATE_CONFLICT",
-          "Reset this bank transaction before applying a different resolution",
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        await this.requireActor(client, input.actorId);
+        const selected = await client.query(
+          `SELECT *, posted_date::text AS posted_date_text FROM ${this.bankTransactionsTable} WHERE id=$1 FOR UPDATE`,
+          [input.bankTransactionId],
         );
-
-      if (input.command.type === "reset" && bank.matched_transaction_id)
-        await client.query(
-          `SELECT id FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
-          [bank.matched_transaction_id],
-        );
-
-      if (input.command.type === "match") {
-        const target = await client.query(
-          `SELECT * FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
-          [input.command.transactionId],
-        );
-        const transaction = target.rows[0];
-        if (!transaction) throw new Error("Transaction not found");
-        const effect = manualCashEffectAudMinor({
-          sourceSystem: transaction.source_system,
-          status: transaction.status,
-          kind: transaction.kind,
-          settledAt: transaction.settled_at
-            ? iso(transaction.settled_at)
-            : null,
-          settlementCurrency: transaction.settlement_currency,
-          settlementAmount: transaction.settlement_amount,
-        });
-        if (effect === null || effect !== parseDecimal(String(bank.amount_aud)))
+        const bank = selected.rows[0];
+        if (!bank) throw new Error("Bank transaction not found");
+        const alreadyApplied =
+          input.command.type === "match"
+            ? String(bank.matched_transaction_id ?? "") ===
+                input.command.transactionId && bank.classification === null
+            : input.command.type === "classify"
+              ? bank.matched_transaction_id === null &&
+                bank.classification === input.command.classification
+              : bank.matched_transaction_id === null &&
+                bank.classification === null;
+        if (alreadyApplied) {
+          if (input.command.type === "match") {
+            const target = await client.query(
+              `SELECT * FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
+              [input.command.transactionId],
+            );
+            const transaction = target.rows[0];
+            const assessment = transaction
+              ? assessRowsBankMatch(bank, transaction)
+              : null;
+            if (
+              !assessment ||
+              "reason" in assessment ||
+              assessment.basis !== "settlement_aud"
+            )
+              throw bankConflict(
+                "BANK_MATCH_INVALID",
+                "Existing match is not an exact eligible AUD settlement",
+              );
+          }
+          await client.query("COMMIT");
+          return { status: "already_applied", revision: String(bank.revision) };
+        }
+        if (String(bank.revision) !== input.expectedRevision)
+          throw revisionConflictError();
+        if (
+          (bank.matched_transaction_id !== null ||
+            bank.classification !== null) &&
+          input.command.type !== "reset"
+        )
           throw bankConflict(
-            "BANK_MATCH_INVALID",
-            "Transaction is not an exact eligible AUD match",
+            "BANK_STATE_CONFLICT",
+            "Reset this bank transaction before applying a different resolution",
           );
-      }
 
-      const values =
-        input.command.type === "match"
-          ? [input.command.transactionId, null]
-          : input.command.type === "classify"
-            ? [null, input.command.classification]
-            : [null, null];
-      const updated = await client.query(
-        `UPDATE ${this.bankTransactionsTable} SET matched_transaction_id=$2, classification=$3, revision=revision+1, updated_by_id=$4, updated_at=now() WHERE id=$1 RETURNING revision`,
-        [input.bankTransactionId, ...values, input.actorId],
-      );
-      await client.query("COMMIT");
-      return { status: "applied", revision: String(updated.rows[0]!.revision) };
-    } catch (error) {
-      await client.query("ROLLBACK");
-      if ((error as { code?: unknown })?.code === "23505")
-        throw bankConflict(
-          "BANK_MATCH_CONFLICT",
-          "Transaction is already matched to another bank row",
+        if (input.command.type === "reset" && bank.matched_transaction_id)
+          await client.query(
+            `SELECT id FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
+            [bank.matched_transaction_id],
+          );
+
+        if (input.command.type === "match") {
+          const target = await client.query(
+            `SELECT * FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
+            [input.command.transactionId],
+          );
+          const transaction = target.rows[0];
+          if (!transaction) throw new Error("Transaction not found");
+          const assessment = assessRowsBankMatch(bank, transaction);
+          if (assessment && "reason" in assessment)
+            throw bankConflict(
+              "BANK_SETTLEMENT_CONFLICT",
+              "Existing settlement details conflict with the bank movement",
+            );
+          if (!assessment)
+            throw bankConflict(
+              "BANK_MATCH_INVALID",
+              "Transaction is not an exact eligible bank match",
+            );
+          if (assessment.basis !== "settlement_aud") {
+            if (input.command.confirmSettlement !== true)
+              throw bankConflict(
+                "BANK_SETTLEMENT_CONFIRMATION_REQUIRED",
+                "Confirm that this bank movement settles the invoice before matching",
+              );
+            const settlement = await client.query(
+              `UPDATE ${this.transactionsTable}
+             SET settled_at=COALESCE(settled_at, ($2::date::timestamp AT TIME ZONE 'UTC')),
+               settlement_currency=COALESCE(settlement_currency, 'AUD'),
+               settlement_amount=COALESCE(settlement_amount, abs($3::numeric)),
+               updated_by_id=$4,
+               updated_at=GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
+             WHERE id=$1
+               AND (settled_at IS NULL OR (settled_at AT TIME ZONE 'UTC')::date=$2::date)
+               AND (settlement_currency IS NULL OR settlement_currency='AUD')
+               AND (settlement_amount IS NULL OR settlement_amount=abs($3::numeric))
+             RETURNING id`,
+              [
+                input.command.transactionId,
+                bankPostedDate(bank),
+                bank.amount_aud,
+                input.actorId,
+              ],
+            );
+            if (!settlement.rows[0])
+              throw bankConflict(
+                "BANK_SETTLEMENT_CONFLICT",
+                "Existing settlement details conflict with the bank movement",
+              );
+          }
+        }
+
+        const values =
+          input.command.type === "match"
+            ? [input.command.transactionId, null]
+            : input.command.type === "classify"
+              ? [null, input.command.classification]
+              : [null, null];
+        const updated = await client.query(
+          `UPDATE ${this.bankTransactionsTable} SET matched_transaction_id=$2, classification=$3, revision=revision+1, updated_by_id=$4, updated_at=now() WHERE id=$1 RETURNING revision`,
+          [input.bankTransactionId, ...values, input.actorId],
         );
-      throw error;
-    } finally {
-      client.release();
-    }
+        await client.query("COMMIT");
+        return {
+          status: "applied",
+          revision: String(updated.rows[0]!.revision),
+        };
+      },
+      uniqueBankMatchConflict(
+        "Transaction is already matched to another bank row",
+      ),
+    );
   }
 
   async createAndMatch(input: {
@@ -1128,118 +1316,112 @@ export class BankRepository {
     transaction: TransactionInput;
     artifactIds: readonly string[];
   }): Promise<ReconcileResult & { transactionId: string }> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.requireActor(client, input.actorId);
-      const selected = await client.query(
-        `SELECT * FROM ${this.bankTransactionsTable} WHERE id=$1 FOR UPDATE`,
-        [input.bankTransactionId],
-      );
-      const bank = selected.rows[0];
-      if (!bank) throw new Error("Bank transaction not found");
-      if (String(bank.matched_transaction_id ?? "") === input.transactionId) {
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        await this.requireActor(client, input.actorId);
+        const selected = await client.query(
+          `SELECT * FROM ${this.bankTransactionsTable} WHERE id=$1 FOR UPDATE`,
+          [input.bankTransactionId],
+        );
+        const bank = selected.rows[0];
+        if (!bank) throw new Error("Bank transaction not found");
+        if (String(bank.matched_transaction_id ?? "") === input.transactionId) {
+          await client.query("COMMIT");
+          return {
+            status: "already_applied",
+            revision: String(bank.revision),
+            transactionId: input.transactionId,
+          };
+        }
+        if (String(bank.revision) !== input.expectedRevision)
+          throw revisionConflictError();
+        if (bank.matched_transaction_id || bank.classification)
+          throw bankConflict(
+            "BANK_STATE_CONFLICT",
+            "Reset this bank transaction before creating a match",
+          );
+
+        const artifactIds = [...new Set(input.artifactIds)].sort();
+        const evidence = artifactIds.length
+          ? await client.query(
+              `SELECT id, artifact_profile, state FROM ${this.artifactsTable} WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
+              [artifactIds],
+            )
+          : { rows: [] };
+        if (
+          evidence.rows.length !== artifactIds.length ||
+          evidence.rows.some(
+            (artifact) =>
+              artifact.artifact_profile !== "manual_invoice_pdf_v1" ||
+              artifact.state !== "available",
+          )
+        )
+          throw new Error("Manual transactions require available invoice PDFs");
+        const primaryArtifactId = artifactIds[0] ?? null;
+        assertTransactionRules(
+          { ...input.transaction, sourceArtifactId: primaryArtifactId },
+          this.gstRegistered,
+          primaryArtifactId
+            ? { artifactProfile: "manual_invoice_pdf_v1", state: "available" }
+            : null,
+        );
+        const effect = manualCashEffectAudMinor({
+          ...input.transaction,
+          sourceSystem: "manual",
+        });
+        if (effect === null || effect !== parseDecimal(String(bank.amount_aud)))
+          throw bankConflict(
+            "BANK_MATCH_INVALID",
+            "Created transaction must exactly match the bank movement",
+          );
+
+        await client.query(
+          `INSERT INTO ${this.transactionsTable} (id, owner_id, created_by_id, updated_by_id, source_system, kind, reference, counterparty, description, status, category, notes, occurred_at, available_at, invoice_date, settled_at, document_currency, document_amount, document_tax_amount, tax_treatment, settlement_currency, settlement_amount, gst_credit_status, claimable_gst_aud) VALUES ($1,$2,$3,$3,'manual',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+          [
+            input.transactionId,
+            input.transaction.ownerId,
+            input.actorId,
+            input.transaction.kind,
+            input.transaction.reference,
+            input.transaction.counterparty,
+            input.transaction.description,
+            input.transaction.status,
+            input.transaction.category,
+            input.transaction.notes,
+            input.transaction.occurredAt,
+            input.transaction.availableAt,
+            input.transaction.invoiceDate,
+            input.transaction.settledAt,
+            input.transaction.documentCurrency,
+            input.transaction.documentAmount,
+            input.transaction.documentTaxAmount,
+            input.transaction.taxTreatment,
+            input.transaction.settlementCurrency,
+            input.transaction.settlementAmount,
+            input.transaction.gstCreditStatus,
+            input.transaction.claimableGstAud,
+          ],
+        );
+        for (const artifactId of artifactIds)
+          await client.query(
+            `INSERT INTO ${this.transactionArtifactsTable} (transaction_id, source_artifact_id) VALUES ($1,$2)`,
+            [input.transactionId, artifactId],
+          );
+        const updated = await client.query(
+          `UPDATE ${this.bankTransactionsTable} SET matched_transaction_id=$2, revision=revision+1, updated_by_id=$3, updated_at=now() WHERE id=$1 RETURNING revision`,
+          [input.bankTransactionId, input.transactionId, input.actorId],
+        );
         await client.query("COMMIT");
         return {
-          status: "already_applied",
-          revision: String(bank.revision),
+          status: "applied",
+          revision: String(updated.rows[0]!.revision),
           transactionId: input.transactionId,
         };
-      }
-      if (String(bank.revision) !== input.expectedRevision)
-        throw revisionConflictError();
-      if (bank.matched_transaction_id || bank.classification)
-        throw bankConflict(
-          "BANK_STATE_CONFLICT",
-          "Reset this bank transaction before creating a match",
-        );
-
-      const artifactIds = [...new Set(input.artifactIds)].sort();
-      const evidence = artifactIds.length
-        ? await client.query(
-            `SELECT id, artifact_profile, state FROM ${this.artifactsTable} WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
-            [artifactIds],
-          )
-        : { rows: [] };
-      if (
-        evidence.rows.length !== artifactIds.length ||
-        evidence.rows.some(
-          (artifact) =>
-            artifact.artifact_profile !== "manual_invoice_pdf_v1" ||
-            artifact.state !== "available",
-        )
-      )
-        throw new Error("Manual transactions require available invoice PDFs");
-      const primaryArtifactId = artifactIds[0] ?? null;
-      assertTransactionRules(
-        { ...input.transaction, sourceArtifactId: primaryArtifactId },
-        this.gstRegistered,
-        primaryArtifactId
-          ? { artifactProfile: "manual_invoice_pdf_v1", state: "available" }
-          : null,
-      );
-      const effect = manualCashEffectAudMinor({
-        ...input.transaction,
-        sourceSystem: "manual",
-      });
-      if (effect === null || effect !== parseDecimal(String(bank.amount_aud)))
-        throw bankConflict(
-          "BANK_MATCH_INVALID",
-          "Created transaction must exactly match the bank movement",
-        );
-
-      await client.query(
-        `INSERT INTO ${this.transactionsTable} (id, owner_id, created_by_id, updated_by_id, source_system, kind, reference, counterparty, description, status, category, notes, occurred_at, available_at, invoice_date, settled_at, document_currency, document_amount, document_tax_amount, tax_treatment, settlement_currency, settlement_amount, gst_credit_status, claimable_gst_aud) VALUES ($1,$2,$3,$3,'manual',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
-        [
-          input.transactionId,
-          input.transaction.ownerId,
-          input.actorId,
-          input.transaction.kind,
-          input.transaction.reference,
-          input.transaction.counterparty,
-          input.transaction.description,
-          input.transaction.status,
-          input.transaction.category,
-          input.transaction.notes,
-          input.transaction.occurredAt,
-          input.transaction.availableAt,
-          input.transaction.invoiceDate,
-          input.transaction.settledAt,
-          input.transaction.documentCurrency,
-          input.transaction.documentAmount,
-          input.transaction.documentTaxAmount,
-          input.transaction.taxTreatment,
-          input.transaction.settlementCurrency,
-          input.transaction.settlementAmount,
-          input.transaction.gstCreditStatus,
-          input.transaction.claimableGstAud,
-        ],
-      );
-      for (const artifactId of artifactIds)
-        await client.query(
-          `INSERT INTO ${this.transactionArtifactsTable} (transaction_id, source_artifact_id) VALUES ($1,$2)`,
-          [input.transactionId, artifactId],
-        );
-      const updated = await client.query(
-        `UPDATE ${this.bankTransactionsTable} SET matched_transaction_id=$2, revision=revision+1, updated_by_id=$3, updated_at=now() WHERE id=$1 RETURNING revision`,
-        [input.bankTransactionId, input.transactionId, input.actorId],
-      );
-      await client.query("COMMIT");
-      return {
-        status: "applied",
-        revision: String(updated.rows[0]!.revision),
-        transactionId: input.transactionId,
-      };
-    } catch (error) {
-      await client.query("ROLLBACK");
-      if ((error as { code?: unknown })?.code === "23505")
-        throw bankConflict(
-          "BANK_MATCH_CONFLICT",
-          "Transaction or bank match already exists",
-        );
-      throw error;
-    } finally {
-      client.release();
-    }
+      },
+      uniqueBankMatchConflict("Transaction or bank match already exists"),
+    );
   }
 }
