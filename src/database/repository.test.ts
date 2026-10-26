@@ -6,6 +6,7 @@ import { ArtifactUploadIdempotencyConflictError } from "../documents/service";
 import type { StripeImportRow } from "../domain/stripe-csv";
 import { transactionInputSchema } from "../domain/types";
 import { FolioRepository } from "./repository";
+import { withDatabaseTransactionClient } from "./transaction-cleanup";
 
 describe("tax partner options", () => {
   it("returns active user IDs and unambiguous labels without private profile fields", async () => {
@@ -2241,5 +2242,41 @@ describe("Folio artifact lifecycle", () => {
     ).resolves.toBeUndefined();
     expect(query.mock.calls[3]?.[0]).toContain("SET state='superseded'");
     expect(query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+});
+
+describe("database transaction cleanup error mapping", () => {
+  it("preserves the operation when error normalization also fails", async () => {
+    const operationError = new Error("synthetic commit failure");
+    const normalizationError = new Error("synthetic error mapper failure");
+    const query = vi.fn().mockResolvedValue({});
+    const release = vi.fn();
+    const pool = {
+      connect: vi.fn().mockResolvedValue({ query, release }),
+    };
+
+    await expect(
+      withDatabaseTransactionClient(
+        pool as never,
+        async (client, markTransactionStarted) => {
+          await client.query("BEGIN");
+          markTransactionStarted();
+          throw operationError;
+        },
+        () => {
+          throw normalizationError;
+        },
+      ),
+    ).rejects.toMatchObject({
+      stage: "error_normalization",
+      primaryError: operationError,
+      cleanupError: normalizationError,
+    });
+
+    expect(query.mock.calls.map(([statement]) => statement)).toEqual([
+      "BEGIN",
+      "ROLLBACK",
+    ]);
+    expect(release).toHaveBeenCalledOnce();
   });
 });
