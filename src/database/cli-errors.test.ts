@@ -10,6 +10,7 @@ import {
   MigrationPreconditionError,
   writeDatabaseCliFailure,
 } from "./cli-errors";
+import { loadMigrationConfig } from "./migration-config";
 
 describe("database CLI errors", () => {
   it("identifies missing MCP migrations without exposing database details", () => {
@@ -88,17 +89,102 @@ describe("database CLI errors", () => {
     expect(`${roleFailure}\n${schemaFailure}`).not.toContain("private");
   });
 
-  it("keeps unknown error messages out of output", () => {
-    const formatted = formatDatabaseCliFailure(
-      "migrate",
-      "migration:0011_folio_mcp_proposals",
-      new Error("postgres://secret@private.example/database"),
+  it("reports the original migration configuration error", () => {
+    let error: unknown;
+    try {
+      loadMigrationConfig({
+        FOLIO_DATABASE_ADMIN_URL: "",
+        FOLIO_DATABASE_SCHEMA: "folio",
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error).toHaveProperty("message", "Invalid URL");
+    expect(formatDatabaseCliFailure("migrate", "configuration", error)).toBe(
+      'operation=migrate stage=configuration code=UNEXPECTED_ERROR message="Invalid URL"',
     );
-    expect(formatted).toContain("code=UNEXPECTED_ERROR");
-    expect(formatted).not.toContain("secret");
   });
 
-  it("does not print unrecognized database error codes", () => {
+  it("includes unknown error messages from errors, objects, and thrown strings", () => {
+    const objectError = {
+      message: "Provider request failed",
+      detail: "ignored provider detail",
+      stack: "ignored stack",
+    };
+    const formattedObject = formatDatabaseCliFailure(
+      "migrate",
+      "configuration",
+      objectError,
+    );
+
+    expect(
+      formatDatabaseCliFailure(
+        "migrate",
+        "configuration",
+        new Error("Invalid URL"),
+      ),
+    ).toContain('message="Invalid URL"');
+    expect(formattedObject).toContain('message="Provider request failed"');
+    expect(formattedObject).not.toContain("ignored provider detail");
+    expect(formattedObject).not.toContain("ignored stack");
+    expect(
+      formatDatabaseCliFailure("migrate", "configuration", "Invalid URL"),
+    ).toContain('message="Invalid URL"');
+  });
+
+  it("redacts credential and data URL secrets in unknown diagnostic messages", () => {
+    const propertyMessage = formatDatabaseCliFailure(
+      "migrate",
+      "configuration",
+      {
+        message:
+          "Migration rejected FOLIO_DATABASE_PASSWORD=synthetic-password while parsing data:text/plain,synthetic-inline",
+      },
+    );
+    const thrownString = formatDatabaseCliFailure(
+      "migrate",
+      "configuration",
+      "Database rejected password=synthetic-token while parsing data:text/plain,synthetic-inline",
+    );
+
+    for (const formatted of [propertyMessage, thrownString]) {
+      expect(formatted).toContain("rejected");
+      expect(formatted).toContain("[REDACTED_CREDENTIAL]");
+      expect(formatted).toContain("[REDACTED_DATA_URL]");
+      expect(formatted).not.toContain("synthetic-password");
+      expect(formatted).not.toContain("synthetic-token");
+      expect(formatted).not.toContain("synthetic-inline");
+    }
+  });
+
+  it("quotes unknown messages to keep each failure on one line", () => {
+    const formatted = formatDatabaseCliFailure(
+      "migrate",
+      "configuration",
+      new Error('Unexpected "quote"\nsecond line'),
+    );
+
+    expect(formatted).toBe(
+      'operation=migrate stage=configuration code=UNEXPECTED_ERROR message="Unexpected \\"quote\\"\\nsecond line"',
+    );
+    expect(formatted.split("\n")).toHaveLength(1);
+  });
+
+  it("uses a fallback when an unknown error has no message", () => {
+    expect(
+      formatDatabaseCliFailure("migrate", "configuration", new Error()),
+    ).toContain('message="Unknown error"');
+    expect(
+      formatDatabaseCliFailure("migrate", "configuration", { message: "" }),
+    ).toContain('message="Unknown error"');
+    expect(
+      formatDatabaseCliFailure("migrate", "configuration", undefined),
+    ).toContain('message="Unknown error"');
+  });
+
+  it("does not print unrecognized database error codes but reports their message", () => {
     const formatted = formatDatabaseCliFailure("mcp_credential", "create", {
       code: "PRIVATE_PROVIDER_CODE",
       message: "private provider detail",
@@ -106,7 +192,7 @@ describe("database CLI errors", () => {
 
     expect(formatted).toContain("code=UNEXPECTED_ERROR");
     expect(formatted).not.toContain("PRIVATE_PROVIDER_CODE");
-    expect(formatted).not.toContain("private provider detail");
+    expect(formatted).toContain('message="private provider detail"');
   });
 
   it("writes a structured CLI failure with validated context only", () => {
@@ -138,6 +224,19 @@ describe("database CLI errors", () => {
     });
     expect(event).not.toHaveProperty("credentialId");
     expect(JSON.stringify(event)).not.toContain("private connection detail");
+  });
+
+  it("keeps the captured diagnostic message instead of the public message", () => {
+    const writer = vi.fn();
+    const reported = writeDatabaseCliFailure(
+      new Error("synthetic configuration parser cause"),
+      { operation: "add_user", stage: "configuration", mutation: true },
+      writer,
+    );
+    const event = JSON.parse(writer.mock.calls[0]?.[0] as string);
+
+    expect(event.message).toBe("synthetic configuration parser cause");
+    expect(event.message).not.toBe(reported.publicFailure.message);
   });
 
   it("reports invalid credential arguments without echoing input", () => {

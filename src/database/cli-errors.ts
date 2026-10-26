@@ -5,6 +5,7 @@ import {
   type DiagnosticContext,
   type LogWriter,
 } from "../server/error-handling";
+import { redactDiagnosticText } from "../server/error-details";
 
 const databaseMessages: Record<string, string> = {
   "28P01": "Database authentication failed.",
@@ -28,6 +29,25 @@ const safeErrorCode = (error: unknown) => {
     : undefined;
 };
 
+const unknownErrorMessage = (error: unknown) => {
+  if (typeof error === "string")
+    return error.length > 0 ? redactDiagnosticText(error) : "Unknown error";
+  if (
+    (typeof error !== "object" || error === null) &&
+    typeof error !== "function"
+  )
+    return "Unknown error";
+
+  try {
+    const message = "message" in error ? error.message : undefined;
+    return typeof message === "string" && message.length > 0
+      ? redactDiagnosticText(message)
+      : "Unknown error";
+  } catch {
+    return "Unknown error";
+  }
+};
+
 export const writeDatabaseCliFailure = (
   error: unknown,
   context: DiagnosticContext,
@@ -43,11 +63,8 @@ export const writeDatabaseCliFailure = (
     error: capture,
   });
   if (eventLine) {
-    const event = JSON.parse(eventLine) as Record<string, unknown>;
     try {
-      writer(
-        JSON.stringify({ ...event, message: reported.publicFailure.message }),
-      );
+      writer(eventLine);
     } catch {
       return reported;
     }
@@ -149,5 +166,5 @@ export const formatDatabaseCliFailure = (
   if (code)
     return `operation=${operation} stage=${stage} code=${code} message="${databaseMessages[code] ?? "Database operation failed; inspect the code and stage."}"`;
 
-  return `operation=${operation} stage=${stage} code=UNEXPECTED_ERROR message="Operation failed; no sensitive error details were printed."`;
+  return `operation=${operation} stage=${stage} code=UNEXPECTED_ERROR message=${JSON.stringify(unknownErrorMessage(error))}`;
 };

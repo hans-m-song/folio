@@ -321,7 +321,7 @@ describe("authentication HTTP routes", () => {
     expect(response.headers.get("set-cookie")).toBeNull();
     const errorLog = String(vi.mocked(console.error).mock.calls[0]?.[0]);
     expect(errorLog).toContain('"stage":"code_exchange"');
-    expect(errorLog).not.toContain(privateValue);
+    expect(errorLog).toContain(privateValue);
   });
 
   it("keeps expected callback rejection at 401 with a generic reference", async () => {
@@ -446,9 +446,13 @@ describe("authentication HTTP routes", () => {
     );
 
     const response = await loginPost({ request });
+    const body = await response.text();
     expect(response.status).toBe(400);
+    expect(body).toContain("Reference ");
+    expect(body).not.toContain("private-body-value");
     const warningLog = String(vi.mocked(console.warn).mock.calls[0]?.[0]);
     expect(warningLog).toContain('"stage":"form_parse"');
+    expect(warningLog).toContain("Input parsing failed.");
     expect(warningLog).not.toContain("private-body-value");
   });
 
@@ -483,8 +487,11 @@ describe("authentication HTTP routes", () => {
         throw new Error(privateValue);
       });
       const response = await routeCase.handler({ request: routeCase.request });
+      const body = await response.text();
       expect(response.status).toBe(500);
       expect(response.headers.get("x-folio-error-reference")).toBeTruthy();
+      expect(body).toContain("Reference ");
+      expect(body).not.toContain(privateValue);
     }
 
     const failureLogs = vi
@@ -494,7 +501,7 @@ describe("authentication HTTP routes", () => {
     for (const [index, line] of failureLogs.entries()) {
       expect(line).toContain(`"operation":"${routeCases[index]?.operation}"`);
       expect(line).toContain('"stage":"runtime_init"');
-      expect(line).not.toContain(privateValue);
+      expect(line).toContain(privateValue);
     }
   });
 
@@ -511,10 +518,11 @@ describe("authentication HTTP routes", () => {
       request: new Request("https://folio.buildsight.com.au/auth/login"),
     });
     expect(startResponse.status).toBe(503);
+    expect(await startResponse.text()).not.toContain(privateValue);
     expect(startResponse.headers.get("x-folio-error-reference")).toBeTruthy();
-    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
-      '"stage":"authorization_url"',
-    );
+    const startFailure = String(vi.mocked(console.error).mock.calls[0]?.[0]);
+    expect(startFailure).toContain('"stage":"authorization_url"');
+    expect(startFailure).toContain(privateValue);
 
     current.auth.logout.mockRejectedValueOnce(
       new AppError({
@@ -530,10 +538,11 @@ describe("authentication HTTP routes", () => {
       }),
     });
     expect(logoutResponse.status).toBe(500);
+    expect(await logoutResponse.text()).not.toContain(privateValue);
     expect(logoutResponse.headers.get("x-folio-error-reference")).toBeTruthy();
     const logoutFailure = String(vi.mocked(console.error).mock.calls[1]?.[0]);
     expect(logoutFailure).toContain('"stage":"logout_revocation"');
-    expect(logoutFailure).not.toContain(privateValue);
+    expect(logoutFailure).toContain(privateValue);
     expect(logoutFailure).not.toContain("private-session-value");
   });
 });

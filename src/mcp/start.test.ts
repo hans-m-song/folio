@@ -36,12 +36,17 @@ describe("MCP server startup cleanup", () => {
         stage: "listen",
         phase: "failure",
         code: "UNEXPECTED_ERROR",
+        message: "private startup detail",
         cleanupFailures: [
-          { stage: "startup_cleanup", code: "UNEXPECTED_ERROR" },
+          {
+            stage: "startup_cleanup",
+            code: "UNEXPECTED_ERROR",
+            message: "private cleanup detail",
+          },
         ],
       });
-      expect(JSON.stringify(event)).not.toContain("private startup detail");
-      expect(JSON.stringify(event)).not.toContain("private cleanup detail");
+      expect(event).not.toHaveProperty("stack");
+      expect(event.cleanupFailures[0]).not.toHaveProperty("stack");
     } finally {
       log.mockRestore();
     }
@@ -63,13 +68,15 @@ describe("MCP server startup cleanup", () => {
       });
       await expect(server.close()).rejects.toBe(closeError);
       expect(log).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(log.mock.calls[0][0] as string)).toMatchObject({
+      const event = JSON.parse(log.mock.calls[0][0] as string);
+      expect(event).toMatchObject({
         operation: "mcp_transport",
         stage: "close",
         phase: "failure",
         code: "UNEXPECTED_ERROR",
+        message: "private shutdown detail",
       });
-      expect(log.mock.calls[0][0]).not.toContain("private shutdown detail");
+      expect(event).not.toHaveProperty("stack");
     } finally {
       log.mockRestore();
     }

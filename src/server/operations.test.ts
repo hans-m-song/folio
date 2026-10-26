@@ -1041,6 +1041,7 @@ describe("server operation authorization", () => {
   });
 
   it("returns one safe form issue for an authenticated malformed envelope", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const result = await saveManualTransaction({
       data: {
         id: "malformed-secret-id",
@@ -1056,6 +1057,17 @@ describe("server operation authorization", () => {
       issues: [{ field: "form", message: "Transaction request is invalid." }],
     });
     expect(JSON.stringify(result)).not.toContain("malformed-secret");
+    const event = JSON.parse(log.mock.calls[0]![0]);
+    expect(event.error.cause.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: ["transaction"],
+          code: "invalid_type",
+        }),
+      ]),
+    );
+    expect(JSON.stringify(event)).not.toContain("malformed-secret");
+    log.mockRestore();
     expect(current.repository.createManual).not.toHaveBeenCalled();
   });
 
@@ -1157,11 +1169,17 @@ describe("server operation authorization", () => {
     expect((clientFailure as Error).message).not.toContain(artifactId);
     expect((clientFailure as Error).message).not.toContain(primary.message);
     const record = JSON.parse(loggedLine);
-    expect(record.cleanupFailure).toEqual({
+    expect(record.cleanupFailure).toMatchObject({
+      error: {
+        name: "CleanupError",
+        code: "08006",
+        message: "cleanup unavailable",
+      },
       artifactId,
       code: "DATABASE_UNAVAILABLE",
       category: "database",
       retryable: true,
+      message: "cleanup unavailable",
       provider: "postgres",
       sqlstate: "08006",
     });

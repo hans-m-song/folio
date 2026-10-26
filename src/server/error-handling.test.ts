@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { ArtifactPresignRecoveryError } from "../documents/service";
 import { AppError, OperationCleanupError } from "../domain/errors";
 import { FolioDiagnosticError } from "../domain/diagnostics";
 import {
@@ -28,6 +29,58 @@ describe("safe error handling seam", () => {
     expect(record(writer)).toMatchObject({ userId: actorId });
     expect(JSON.stringify(failure.publicFailure)).not.toContain(actorId);
   });
+
+  it("redacts merged context values from failure trees and never logs the values", () => {
+    const writer = vi.fn();
+    const sessionCookie = "known.session+cookie(value)";
+    const additionalValue = "additional-context-value";
+    const source = new OperationCleanupError(
+      new Error(`top ${sessionCookie}`, {
+        cause: new Error(`cause ${additionalValue}`),
+      }),
+      new Error(`cleanup ${sessionCookie} ${additionalValue}`, {
+        cause: new Error(`cleanup cause ${sessionCookie}`),
+      }),
+      "transaction_rollback",
+    );
+
+    runWithDiagnosticContext(
+      { operation: "session_failure", redactValues: [sessionCookie] },
+      () => {
+        setDiagnosticContext({ redactValues: [additionalValue] });
+        reportServerFailure(
+          source,
+          { operation: "session_failure" },
+          { error: writer },
+        );
+        writeServerSuccess({ operation: "session_success" }, { info: writer });
+      },
+    );
+
+    const failure = record(writer);
+    expect(failure).toMatchObject({
+      message: "top [REDACTED_VALUE]",
+      causes: ["cause [REDACTED_VALUE]"],
+      error: {
+        message: "top [REDACTED_VALUE]",
+        cause: { message: "cause [REDACTED_VALUE]" },
+      },
+      cleanupFailures: [
+        {
+          message: "cleanup [REDACTED_VALUE] [REDACTED_VALUE]",
+          causes: ["cleanup cause [REDACTED_VALUE]"],
+          error: {
+            message: "cleanup [REDACTED_VALUE] [REDACTED_VALUE]",
+            cause: { message: "cleanup cause [REDACTED_VALUE]" },
+          },
+        },
+      ],
+    });
+    expect(JSON.stringify(writer.mock.calls)).not.toContain(sessionCookie);
+    expect(JSON.stringify(writer.mock.calls)).not.toContain(additionalValue);
+    expect(record(writer, 1)).not.toHaveProperty("redactValues");
+  });
+
   it("keeps fixed MCP method/tool identities but rejects arbitrary names", () => {
     const writer = vi.fn();
     writeServerSuccess(
@@ -54,16 +107,18 @@ describe("safe error handling seam", () => {
     expect(record(writer, 1)).not.toHaveProperty("mcpMethod");
     expect(record(writer, 1)).not.toHaveProperty("mcpTool");
   });
-  it("preserves the original rejection and links nested cleanup diagnostics without raw causes", () => {
+  it("preserves the original rejection and logs nested cleanup messages", () => {
     const writer = vi.fn();
     const original = new AppError({
       code: "AUTH_USER_NOT_ELIGIBLE",
       stage: "identity_user_lookup",
     });
-    const rollback = Object.assign(new Error("synthetic-rollback-secret"), {
-      code: "08006",
-    });
-    const release = new Error("synthetic-release-secret");
+    const rollbackCause = new Error("synthetic-rollback-cause");
+    const rollback = Object.assign(
+      new Error("synthetic-rollback-message", { cause: rollbackCause }),
+      { code: "08006" },
+    );
+    const release = new Error("synthetic-release-message");
     const combined = new OperationCleanupError(
       new OperationCleanupError(original, rollback, "transaction_rollback"),
       release,
@@ -82,45 +137,245 @@ describe("safe error handling seam", () => {
       code: "AUTH_USER_NOT_ELIGIBLE",
       stage: "identity_user_lookup",
       cleanupFailures: [
-        { code: "UNEXPECTED_ERROR", stage: "client_release" },
+        {
+          code: "UNEXPECTED_ERROR",
+          stage: "client_release",
+          message: "synthetic-release-message",
+        },
         {
           code: "DATABASE_UNAVAILABLE",
           stage: "transaction_rollback",
           sqlstate: "08006",
+          message: "synthetic-rollback-message",
+          causes: ["synthetic-rollback-cause"],
         },
       ],
     });
-    expect(JSON.stringify(writer.mock.calls)).not.toContain("synthetic-");
+    expect(record(writer).cleanupFailures[1]).not.toHaveProperty("stack");
+    expect(record(writer).cleanupFailures[1]).not.toHaveProperty("name");
   });
+
+  it("unwraps handled failures and their causes inside cleanup wrappers", () => {
+    const handledFailureFor = (source: unknown, operation: string) => {
+      const writer = vi.fn();
+      const reported = reportServerFailure(
+        source,
+        { operation },
+        { info: writer, warn: writer, error: writer },
+      );
+      return new HandledOperationError(reported, source);
+    };
+    const sourceCause = handledFailureFor(
+      new Error("synthetic-actual-root", {
+        cause: new Error("synthetic-nested-actual-root"),
+      }),
+      "cause_operation",
+    );
+    const source = new AppError({
+      code: "AUTH_USER_NOT_ELIGIBLE",
+      cause: sourceCause,
+    });
+    const operationCleanup = new OperationCleanupError(
+      handledFailureFor(source, "inner_operation"),
+      handledFailureFor(
+        new Error("synthetic-operation-cleanup", {
+          cause: new Error("synthetic-operation-cleanup-cause"),
+        }),
+        "cleanup_operation",
+      ),
+      "transaction_rollback",
+    );
+    const operationWriter = vi.fn();
+    const operationFailure = reportServerFailure(
+      operationCleanup,
+      { operation: "outer_operation" },
+      { error: operationWriter },
+    );
+
+    expect(operationFailure).toMatchObject({
+      status: 401,
+      internalCode: "AUTH_USER_NOT_ELIGIBLE",
+    });
+    expect(record(operationWriter)).toMatchObject({
+      code: "AUTH_USER_NOT_ELIGIBLE",
+      message: source.message,
+      causes: ["synthetic-actual-root", "synthetic-nested-actual-root"],
+      cleanupFailures: [
+        {
+          stage: "transaction_rollback",
+          message: "synthetic-operation-cleanup",
+          causes: ["synthetic-operation-cleanup-cause"],
+        },
+      ],
+    });
+    expect(JSON.stringify(operationFailure.publicFailure)).not.toContain(
+      "synthetic-actual-root",
+    );
+    expect(JSON.stringify(operationFailure.publicFailure)).not.toContain(
+      "synthetic-operation-cleanup",
+    );
+
+    const artifactSource = new AppError({
+      code: "AUTH_USER_NOT_ELIGIBLE",
+      cause: new Error("synthetic-artifact-root"),
+    });
+    const artifactError = new ArtifactPresignRecoveryError(
+      handledFailureFor(artifactSource, "artifact_operation"),
+      actorId,
+      handledFailureFor(
+        new Error("synthetic-artifact-cleanup", {
+          cause: new Error("synthetic-artifact-cleanup-cause"),
+        }),
+        "artifact_cleanup_operation",
+      ),
+    );
+    const artifactWriter = vi.fn();
+    const artifactFailure = reportServerFailure(
+      artifactError,
+      { operation: "artifact_outer_operation" },
+      { error: artifactWriter },
+    );
+
+    expect(artifactFailure).toMatchObject({
+      status: 401,
+      internalCode: "AUTH_USER_NOT_ELIGIBLE",
+    });
+    expect(record(artifactWriter)).toMatchObject({
+      code: "AUTH_USER_NOT_ELIGIBLE",
+      message: artifactSource.message,
+      causes: ["synthetic-artifact-root"],
+      cleanupFailure: {
+        artifactId: actorId,
+        message: "synthetic-artifact-cleanup",
+        causes: ["synthetic-artifact-cleanup-cause"],
+      },
+    });
+    expect(JSON.stringify(artifactFailure.publicFailure)).not.toContain(
+      "synthetic-artifact-root",
+    );
+    expect(JSON.stringify(artifactFailure.publicFailure)).not.toContain(
+      "synthetic-artifact-cleanup",
+    );
+  });
+
   it.each([
-    new Error("private-message https://private-host/signed-file"),
-    "private-string",
     {
-      code: "private-code",
-      name: "private-name",
-      detail: "private-detail",
-      stack: "private-stack",
+      error: new Error("synthetic-error-message"),
+      message: "synthetic-error-message",
     },
-    new FolioDiagnosticError({
-      category: "actor",
-      code: "private-code",
-      retryable: true,
-      detail: "private-detail",
-    }),
-  ])("never serializes arbitrary source fields", (error) => {
+    { error: "synthetic-thrown-string", message: "synthetic-thrown-string" },
+    {
+      error: {
+        code: "synthetic-source-code",
+        name: "synthetic-source-name",
+        message: "synthetic-object-message",
+        detail: "synthetic-source-detail",
+        stack: "synthetic-source-stack",
+      },
+      message: "synthetic-object-message",
+    },
+    {
+      error: new FolioDiagnosticError(
+        {
+          category: "actor",
+          code: "UNEXPECTED_ERROR",
+          retryable: false,
+          detail: "synthetic-source-detail",
+        },
+        "synthetic-diagnostic-message",
+      ),
+      message: "synthetic-diagnostic-message",
+    },
+  ])(
+    "logs the source message without serializing arbitrary fields",
+    ({ error, message }) => {
+      const writer = vi.fn();
+      const result = reportServerFailure(
+        error,
+        { operation: "safe_operation" },
+        { error: writer },
+      );
+      expect(result).toMatchObject({
+        internalCode: "UNEXPECTED_ERROR",
+        publicFailure: {
+          code: "UNEXPECTED_ERROR",
+          recovery: "contact_support",
+        },
+      });
+      expect(result.publicFailure.reference).toMatch(/^[0-9a-f-]{36}$/);
+      expect(record(writer)).toMatchObject({ message });
+      expect(JSON.stringify(result.publicFailure)).not.toContain(message);
+      expect(writer.mock.calls[0][0]).not.toMatch(
+        /synthetic-source-detail|synthetic-source-stack|"detail"/,
+      );
+    },
+  );
+
+  it("uses a diagnostic fallback when a source has no message", () => {
     const writer = vi.fn();
-    const result = reportServerFailure(
-      error,
+    reportServerFailure(
+      {
+        code: "synthetic-source-code",
+        name: "synthetic-source-name",
+        detail: "synthetic-source-detail",
+        stack: "synthetic-source-stack",
+      },
       { operation: "safe_operation" },
       { error: writer },
     );
-    expect(result).toMatchObject({
-      internalCode: "UNEXPECTED_ERROR",
-      publicFailure: { code: "UNEXPECTED_ERROR", recovery: "contact_support" },
-    });
-    expect(result.publicFailure.reference).toMatch(/^[0-9a-f-]{36}$/);
+    expect(record(writer).message).toBe(
+      "No error message was available (UNEXPECTED_ERROR).",
+    );
     expect(writer.mock.calls[0][0]).not.toMatch(
-      /private|sourceError|stack|message|detail/,
+      /synthetic-source-detail|synthetic-source-stack/,
+    );
+  });
+
+  it("retains the root message and bounded, cycle-safe cause messages", () => {
+    const writer = vi.fn();
+    const second = Object.assign(new Error("synthetic-cause-second"), {
+      cause: undefined as unknown,
+    });
+    const first = Object.assign(new Error("synthetic-cause-first"), {
+      cause: second,
+    });
+    const root = Object.assign(new Error("synthetic-root-message"), {
+      cause: first,
+    });
+    second.cause = first;
+
+    reportServerFailure(
+      root,
+      { operation: "safe_operation" },
+      { error: writer },
+    );
+
+    expect(record(writer)).toMatchObject({
+      message: "synthetic-root-message",
+      causes: ["synthetic-cause-first", "synthetic-cause-second"],
+    });
+  });
+
+  it("limits cause depth while keeping full source messages", () => {
+    const writer = vi.fn();
+    const nested = Array.from(
+      { length: 10 },
+      (_, index) => new Error(`synthetic-deep-cause-${index + 1}`),
+    );
+    for (let index = 0; index < nested.length - 1; index++)
+      nested[index].cause = nested[index + 1];
+    const rootMessage = `synthetic-root-${"long-message-".repeat(40)}`;
+    const root = Object.assign(new Error(rootMessage), { cause: nested[0] });
+
+    reportServerFailure(
+      root,
+      { operation: "safe_operation" },
+      { error: writer },
+    );
+
+    expect(record(writer).message).toBe(rootMessage);
+    expect(record(writer).causes).toEqual(
+      nested.slice(0, 8).map(({ message }) => message),
     );
   });
 
@@ -145,6 +400,9 @@ describe("safe error handling seam", () => {
       ),
     ).not.toThrow();
     expect(writer).toHaveBeenCalledTimes(1);
+    expect(record(writer).message).toBe(
+      "No error message was available (UNEXPECTED_ERROR).",
+    );
     expect(writer.mock.calls[0][0]).not.toContain("private");
   });
 
@@ -234,7 +492,7 @@ describe("safe error handling seam", () => {
     expect(writer.mock.calls[0][0]).not.toContain("private");
   });
 
-  it("does not serialize Zod custom messages, paths, or issue values", () => {
+  it("uses a fixed validation description without serializing Zod issue data", () => {
     const writer = vi.fn();
     const result = z
       .object({
@@ -252,7 +510,13 @@ describe("safe error handling seam", () => {
       publicFailure: { code: "INPUT_INVALID", recovery: "fix_input" },
     });
     expect(reported.publicFailure).not.toHaveProperty("issues");
-    expect(writer.mock.calls[0][0]).not.toMatch(/private|issues|message/);
+    expect(record(writer).message).toBe("Request validation failed.");
+    expect(record(writer).error.issues).toEqual([
+      { code: "custom", path: ["[REDACTED_KEY]"] },
+    ]);
+    expect(writer.mock.calls[0][0]).not.toMatch(
+      /private-message|private-input/,
+    );
   });
 
   it("uses internal auth reason and severity only in the server event", () => {
@@ -275,6 +539,7 @@ describe("safe error handling seam", () => {
       code: "AUTH_USER_NOT_ELIGIBLE",
       stage: "authorization",
       severity: "warn",
+      causes: ["private-user"],
     });
     expect(JSON.stringify(result.publicFailure)).not.toMatch(
       /AUTH_USER|private/,
@@ -283,7 +548,7 @@ describe("safe error handling seam", () => {
 
   it("retains one reference and event through handled errors and outer reporting", () => {
     const writer = vi.fn();
-    const source = new Error("private-cause");
+    const source = new Error("synthetic-handled-source-message");
     const first = reportServerFailure(
       source,
       { operation: "inner" },
@@ -304,6 +569,9 @@ describe("safe error handling seam", () => {
       ),
     ).toBe(first.publicFailure);
     expect(writer).toHaveBeenCalledTimes(1);
+    expect(record(writer)).toMatchObject({
+      message: "synthetic-handled-source-message",
+    });
     expect(publicError.cause).toBeUndefined();
     expect(publicError.stack).toBeUndefined();
     expect(JSON.stringify(publicError)).not.toContain("private");

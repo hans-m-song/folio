@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { ZodError } from "zod";
+import { redactDiagnosticText, serverErrorDetails } from "./error-details";
 
 import {
   FolioDiagnosticError,
@@ -45,6 +46,7 @@ export type DiagnosticContext = {
   metadata?: Record<string, unknown>;
   request?: Pick<Request, "method" | "url">;
   durationMs?: number;
+  redactValues?: readonly string[];
 };
 
 export type LogWriter = (line: string) => void;
@@ -62,6 +64,9 @@ export type ReportedFailure = {
 const contexts = new AsyncLocalStorage<DiagnosticContext>();
 const handled = new WeakMap<object, ReportedFailure>();
 const originalCauses = new WeakMap<HandledOperationError, unknown>();
+const maximumFailureDepth = 8;
+const maximumRedactValues = 50;
+const maximumRedactValueLength = 8_192;
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const identifierPattern = /^[a-z][a-z0-9_]{0,79}$/;
@@ -159,27 +164,35 @@ const awsNames = new Set([
 
 const primaryErrorFor = (error: unknown): unknown => {
   let current = error;
-  for (let depth = 0; depth < 8; depth++) {
+  const seen = new Set<object>();
+  for (let depth = 0; depth < maximumFailureDepth; depth++) {
+    if (current && typeof current === "object") {
+      if (seen.has(current)) return undefined;
+      seen.add(current);
+    }
     if (
-      !instanceOf(current, OperationCleanupError) &&
-      !instanceOf(current, ArtifactPresignRecoveryError)
-    )
-      return current;
-    current = property(current, "primaryError");
+      instanceOf(current, OperationCleanupError) ||
+      instanceOf(current, ArtifactPresignRecoveryError)
+    ) {
+      current = property(current, "primaryError");
+      continue;
+    }
+    if (current && typeof current === "object" && originalCauses.has(current)) {
+      current = originalCauses.get(current);
+      continue;
+    }
+    return current;
   }
   return undefined;
 };
 
 export const classifyError = (value: unknown): FolioDiagnosticFailure => {
-  if (instanceOf(value, OperationCleanupError))
-    return classifyError(primaryErrorFor(value));
   if (
-    instanceOf<ArtifactPresignRecoveryError>(
-      value,
-      ArtifactPresignRecoveryError,
-    )
+    instanceOf(value, OperationCleanupError) ||
+    instanceOf(value, ArtifactPresignRecoveryError) ||
+    (value && typeof value === "object" && originalCauses.has(value))
   )
-    return classifyError(property(value, "primaryError"));
+    return classifyError(primaryErrorFor(value));
   if (instanceOf<AppError>(value, AppError))
     return diagnosticFor(property(value, "code"));
   if (instanceOf<ZodError>(value, ZodError))
@@ -257,18 +270,47 @@ export const classifyError = (value: unknown): FolioDiagnosticFailure => {
 const mergeContext = (
   base: DiagnosticContext | undefined,
   context: Partial<DiagnosticContext>,
-): DiagnosticContext => ({
-  ...base,
-  ...context,
-  operation: context.operation ?? base?.operation ?? "unknown_operation",
-  request: context.request ?? base?.request,
-  mutation: context.mutation ?? base?.mutation,
-  ids: { ...safeIds(base?.ids), ...safeIds(context.ids) } as DiagnosticIds,
-  metadata: {
-    ...safeMetadata(base?.metadata),
-    ...safeMetadata(context.metadata),
-  },
-});
+): DiagnosticContext => {
+  const redactValues = [
+    ...new Set([
+      ...safeRedactValues(context.redactValues),
+      ...safeRedactValues(base?.redactValues),
+    ]),
+  ].slice(0, maximumRedactValues);
+  return {
+    ...base,
+    ...context,
+    operation: context.operation ?? base?.operation ?? "unknown_operation",
+    request: context.request ?? base?.request,
+    mutation: context.mutation ?? base?.mutation,
+    ids: { ...safeIds(base?.ids), ...safeIds(context.ids) } as DiagnosticIds,
+    metadata: {
+      ...safeMetadata(base?.metadata),
+      ...safeMetadata(context.metadata),
+    },
+    redactValues,
+  };
+};
+
+const safeRedactValues = (value: unknown): string[] => {
+  try {
+    if (!Array.isArray(value)) return [];
+    return [
+      ...new Set(
+        value
+          .slice(0, maximumRedactValues)
+          .filter(
+            (entry): entry is string =>
+              typeof entry === "string" &&
+              entry.length > 0 &&
+              entry.length <= maximumRedactValueLength,
+          ),
+      ),
+    ];
+  } catch {
+    return [];
+  }
+};
 
 export const runWithDiagnosticContext = <T>(
   context: DiagnosticContext,
@@ -527,6 +569,58 @@ const safeProviderSummary = (error: unknown): Record<string, string> => {
   return {};
 };
 
+const unavailableCauseMessage = "Cause message was unavailable.";
+
+const errorMessageFor = (
+  error: unknown,
+  fallback: string,
+  sensitiveValues: readonly string[] = [],
+): string => {
+  if (instanceOf<ZodError>(error, ZodError))
+    return "Request validation failed.";
+  if (typeof error === "string" && error.length > 0)
+    return redactDiagnosticText(error, sensitiveValues);
+  const message = property(error, "message");
+  return typeof message === "string" && message.length > 0
+    ? redactDiagnosticText(message, sensitiveValues)
+    : fallback;
+};
+
+const errorMessages = (
+  error: unknown,
+  fallbackCode: string,
+  sensitiveValues: readonly string[] = [],
+): { message: string; causes?: string[] } => {
+  const resolvedError = primaryErrorFor(error);
+  const source = resolvedError === undefined ? error : resolvedError;
+  const message = errorMessageFor(
+    source,
+    `No error message was available (${fallbackCode}).`,
+    sensitiveValues,
+  );
+  const causes: string[] = [];
+  const seen = new Set<object>();
+  if (source && typeof source === "object") seen.add(source);
+
+  let current = source;
+  for (let depth = 0; depth < maximumFailureDepth; depth++) {
+    const cause = property(current, "cause");
+    if (cause === undefined) break;
+    const resolvedCause = primaryErrorFor(cause);
+    const causeSource = resolvedCause === undefined ? cause : resolvedCause;
+    if (causeSource && typeof causeSource === "object") {
+      if (seen.has(causeSource)) break;
+      seen.add(causeSource);
+    }
+    causes.push(
+      errorMessageFor(causeSource, unavailableCauseMessage, sensitiveValues),
+    );
+    current = causeSource;
+  }
+
+  return { message, ...(causes.length ? { causes } : {}) };
+};
+
 export class HandledOperationError extends Error {
   readonly publicFailure: PublicFailure;
 
@@ -615,6 +709,7 @@ export const reportServerFailure = (
   )
     ? classifyError(property(error, "cleanupError"))
     : undefined;
+  const cleanupError = cleanup ? property(error, "cleanupError") : undefined;
   const cleanupFailures: Record<string, unknown>[] = [];
   let current = error;
   for (
@@ -629,6 +724,11 @@ export const reportServerFailure = (
       code: failure.code,
       category: failure.category,
       retryable: failure.retryable,
+      ...errorMessages(secondary, failure.code, effective.redactValues),
+      error: serverErrorDetails(
+        primaryErrorFor(secondary),
+        effective.redactValues,
+      ),
       ...(typeof stage === "string" && identifierPattern.test(stage)
         ? { stage }
         : {}),
@@ -655,6 +755,8 @@ export const reportServerFailure = (
     code: selected.code,
     publicCode: publicFailure.code,
     retryable: diagnostic.retryable,
+    ...errorMessages(primary, selected.code, effective.redactValues),
+    error: serverErrorDetails(primary, effective.redactValues),
     ...(diagnostic.provider ? { provider: diagnostic.provider } : {}),
     ...(diagnostic.httpStatus ? { httpStatus: diagnostic.httpStatus } : {}),
     ...safeProviderSummary(primary),
@@ -670,7 +772,16 @@ export const reportServerFailure = (
             code: cleanup.code,
             category: cleanup.category,
             retryable: cleanup.retryable,
-            ...safeProviderSummary(property(error, "cleanupError")),
+            ...errorMessages(
+              cleanupError,
+              cleanup.code,
+              effective.redactValues,
+            ),
+            error: serverErrorDetails(
+              primaryErrorFor(cleanupError),
+              effective.redactValues,
+            ),
+            ...safeProviderSummary(cleanupError),
             ...(cleanup.provider ? { provider: cleanup.provider } : {}),
           },
         }

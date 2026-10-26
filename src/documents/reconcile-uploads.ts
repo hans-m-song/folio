@@ -21,6 +21,7 @@ import {
   writeServerSuccess,
   type DiagnosticWriters,
 } from "../server/error-handling";
+import { summarizeInputException } from "../server/error-details";
 
 type ReconciliationOptions = Readonly<{
   arguments_?: string[];
@@ -138,7 +139,10 @@ export const runReconcileUploads = async ({
       "S3-only orphan discovery and object deletion/lifecycle remain external operator gates requiring separate IAM.\n",
     );
   } catch (error) {
-    failure = { error, stage };
+    failure = {
+      error: stage === "arguments" ? summarizeInputException(error) : error,
+      stage,
+    };
   } finally {
     const cleanupErrors: Array<{ error: unknown; stage: string }> = [];
     if (pool) {

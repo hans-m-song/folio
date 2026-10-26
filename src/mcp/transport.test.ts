@@ -185,10 +185,9 @@ describe("local MCP Streamable HTTP transport", () => {
           stage: "credential_verification",
           phase: "failure",
           code: "UNEXPECTED_ERROR",
+          message: "synthetic verifier detail",
         });
-        expect(JSON.stringify(event)).not.toContain(
-          "synthetic verifier detail",
-        );
+        expect(event).not.toHaveProperty("stack");
       });
     } finally {
       log.mockRestore();
@@ -285,9 +284,12 @@ describe("local MCP Streamable HTTP transport", () => {
 
   it("reports handler failures with a reference and without raw details", async () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handlerError = Object.assign(new Error("synthetic handler detail"), {
+      privatePayload: "synthetic arbitrary payload",
+    });
     const handler = {
       fetch: vi.fn(async () => {
-        throw new Error("synthetic handler detail");
+        throw handlerError;
       }),
       close: vi.fn(async () => undefined),
     } as unknown as McpHttpHandler;
@@ -313,8 +315,12 @@ describe("local MCP Streamable HTTP transport", () => {
         stage: "handler",
         phase: "failure",
         code: "UNEXPECTED_ERROR",
+        message: "synthetic handler detail",
       });
-      expect(JSON.stringify(event)).not.toContain("synthetic handler detail");
+      expect(event).not.toHaveProperty("stack");
+      expect(JSON.stringify(event)).not.toContain(
+        "synthetic arbitrary payload",
+      );
     } finally {
       await transport.close();
       log.mockRestore();
@@ -341,15 +347,15 @@ describe("local MCP Streamable HTTP transport", () => {
       await expect(transport.close()).rejects.toBe(closeError);
       expect(handler.close).toHaveBeenCalledTimes(1);
       expect(log).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(log.mock.calls[0][0] as string)).toMatchObject({
+      const event = JSON.parse(log.mock.calls[0][0] as string);
+      expect(event).toMatchObject({
         operation: "mcp_transport",
         stage: "close",
         phase: "failure",
         code: "UNEXPECTED_ERROR",
+        message: "synthetic handler close detail",
       });
-      expect(log.mock.calls[0][0]).not.toContain(
-        "synthetic handler close detail",
-      );
+      expect(event).not.toHaveProperty("stack");
     } finally {
       log.mockRestore();
     }

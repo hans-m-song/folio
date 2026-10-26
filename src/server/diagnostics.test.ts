@@ -161,19 +161,27 @@ describe("server diagnostics adapter", () => {
         { info, error },
         { log },
       );
-      await expect(
-        runOperation(
-          "Folio health check",
-          async () => {
-            throw new Error("private");
-          },
-          { info, error },
-          { log },
-        ),
-      ).rejects.toThrow(/Reference [0-9a-f-]{36}/);
+      const failure = await runOperation(
+        "Folio health check",
+        async () => {
+          throw new Error("synthetic-operation-failure");
+        },
+        { info, error },
+        { log },
+      ).then(
+        () => undefined,
+        (rejection) => rejection,
+      );
       expect(info).not.toHaveBeenCalled();
       expect(error).toHaveBeenCalledTimes(1);
-      expect(error.mock.calls[0][0]).not.toContain("private");
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toMatch(/Reference [0-9a-f-]{36}/);
+      expect((failure as Error).message).not.toContain(
+        "synthetic-operation-failure",
+      );
+      expect(JSON.parse(error.mock.calls[0][0])).toMatchObject({
+        message: "synthetic-operation-failure",
+      });
     },
   );
 
@@ -233,14 +241,14 @@ describe("server diagnostics adapter", () => {
     });
   });
 
-  it("logs linked primary and cleanup classifications without source serialization", async () => {
+  it("logs primary and cleanup messages without source fields", async () => {
     const writer = vi.fn();
     const artifactId = "0f935296-35b3-43bd-bc3d-0caa0b0a2510";
-    const primary = Object.assign(new Error("private-presign"), {
+    const primary = Object.assign(new Error("synthetic-presign-message"), {
       name: "ServiceUnavailable",
       $metadata: { httpStatusCode: 503 },
     });
-    const cleanup = Object.assign(new Error("private-cleanup"), {
+    const cleanup = Object.assign(new Error("synthetic-cleanup-message"), {
       code: "08006",
     });
     await expect(
@@ -256,15 +264,21 @@ describe("server diagnostics adapter", () => {
     expect(JSON.parse(writer.mock.calls[0][0])).toMatchObject({
       code: "S3_UNAVAILABLE",
       providerCode: "ServiceUnavailable",
+      message: "synthetic-presign-message",
       cleanupFailure: {
         artifactId,
         code: "DATABASE_UNAVAILABLE",
         sqlstate: "08006",
+        message: "synthetic-cleanup-message",
       },
     });
-    expect(writer.mock.calls[0][0]).not.toMatch(
-      /private|sourceError|stack|message/,
+    expect(JSON.parse(writer.mock.calls[0][0])).not.toHaveProperty("stack");
+    expect(JSON.parse(writer.mock.calls[0][0])).not.toHaveProperty(
+      "sourceError",
     );
+    expect(
+      JSON.parse(writer.mock.calls[0][0]).cleanupFailure,
+    ).not.toHaveProperty("name");
   });
 
   it.each([
@@ -306,9 +320,11 @@ describe("server diagnostics adapter", () => {
         { error },
       ),
     ).rejects.toThrow("INPUT_INVALID");
-    expect(error.mock.calls[0][0]).not.toMatch(
-      /privateField|private-value|issues|stack|message/,
-    );
+    expect(JSON.parse(error.mock.calls[0][0])).toMatchObject({
+      code: "INPUT_INVALID",
+      message: "Request validation failed.",
+    });
+    expect(error.mock.calls[0][0]).not.toMatch(/private-value/);
   });
 
   it("retains authorized context added inside the operation", async () => {

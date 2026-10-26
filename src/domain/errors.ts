@@ -69,6 +69,11 @@ const auth = {
 };
 
 export const errorPolicyCatalog = {
+  CONFIG_INVALID: {
+    ...unknown,
+    category: "configuration",
+    publicCode: "REQUEST_FAILED",
+  },
   UNEXPECTED_ERROR: unknown,
   REQUEST_FAILED: unknown,
   INVALID_ARGUMENTS: {

@@ -195,7 +195,7 @@ describe("MCP credential administration", () => {
     expect(JSON.stringify(event)).not.toContain("Synthetic intake");
   });
 
-  it("links database and close failures into one sanitized event", async () => {
+  it("retains the close message without logging credential secrets", async () => {
     const error = vi.fn();
     const pool = {
       end: vi.fn(async () => {
@@ -249,7 +249,10 @@ describe("MCP credential administration", () => {
       code: "UNEXPECTED_ERROR",
       cleanupFailures: [{ stage: "close", code: "UNEXPECTED_ERROR" }],
     });
-    expect(JSON.stringify(event)).not.toContain("private");
+    expect(event.cleanupFailures[0]).toMatchObject({
+      message: "private close details",
+    });
+    expect(event.cleanupFailures[0]).not.toHaveProperty("stack");
     expect(JSON.stringify(event)).not.toContain("synthetic-token");
   });
 });

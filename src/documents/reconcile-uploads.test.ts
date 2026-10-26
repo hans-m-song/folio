@@ -27,6 +27,7 @@ describe("upload reconciliation CLI", () => {
     });
     expect(JSON.stringify(event)).not.toContain("private@example.test");
     expect(JSON.stringify(event)).not.toContain("--unknown");
+    expect(JSON.stringify(event)).toContain("Input parsing failed.");
   });
 
   it("links pool cleanup failure to the primary reconciliation failure", async () => {
@@ -72,8 +73,8 @@ describe("upload reconciliation CLI", () => {
         },
       ],
     });
-    expect(JSON.stringify(event)).not.toContain("private query detail");
-    expect(JSON.stringify(event)).not.toContain("private close detail");
+    expect(JSON.stringify(event)).toContain("private query detail");
+    expect(JSON.stringify(event)).toContain("private close detail");
   });
 
   it("passes the assumed-role provider to its S3 client without resolving it", async () => {

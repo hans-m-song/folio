@@ -20,6 +20,9 @@ import {
   type RecurringBillView,
 } from "../domain/recurring-bills";
 import { FolioDiagnosticError } from "../domain/diagnostics";
+import { OperationCleanupError } from "../domain/errors";
+import { parseWithDiagnostics } from "../domain/validation-diagnostics";
+import { withDatabaseTransactionClient } from "./transaction-cleanup";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
 
@@ -96,13 +99,17 @@ const associationNotFound = (): FolioDiagnosticError =>
     retryable: false,
   });
 
-const associationConflict = (): FolioDiagnosticError =>
-  new FolioDiagnosticError({
-    category: "validation",
-    code: "RECURRING_BILL_ASSOCIATION_CONFLICT",
-    httpStatus: 409,
-    retryable: false,
-  });
+const associationConflict = (cause?: unknown): FolioDiagnosticError =>
+  new FolioDiagnosticError(
+    {
+      category: "validation",
+      code: "RECURRING_BILL_ASSOCIATION_CONFLICT",
+      httpStatus: 409,
+      retryable: false,
+    },
+    undefined,
+    cause === undefined ? undefined : { cause },
+  );
 
 const linkIneligible = (): FolioDiagnosticError =>
   new FolioDiagnosticError({
@@ -142,7 +149,7 @@ const nullableStringValue = (value: unknown): string | null =>
   value === null || value === undefined ? null : String(value);
 
 const mapScheduleRecord = (row: QueryResultRow): RecurringBillSchedule => {
-  const input = recurringBillScheduleInputSchema.parse({
+  const input = parseWithDiagnostics(recurringBillScheduleInputSchema, {
     label: row.label,
     counterparty: row.counterparty,
     descriptionMatchText: row.description_match_text,
@@ -194,9 +201,21 @@ const mapLinkRecord = (row: QueryResultRow): RecurringBillLink => ({
 });
 
 const postgresErrorCode = (error: unknown): string | null => {
-  if (!error || typeof error !== "object") return null;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" ? code : null;
+  let current = error;
+  for (let depth = 0; depth < 8; depth++) {
+    if (current instanceof OperationCleanupError) {
+      current = current.primaryError;
+      continue;
+    }
+    if (!current || typeof current !== "object") return null;
+    try {
+      const code = (current as { code?: unknown }).code;
+      return typeof code === "string" ? code : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 };
 
 export interface ListRecurringBillsInput {
@@ -284,28 +303,24 @@ export class RecurringBillRepository {
   private async withWriteTransaction<Result>(
     actorId: string,
     operation: (client: PoolClient, activeActorId: string) => Promise<Result>,
+    normalizeError?: (error: unknown) => unknown,
   ): Promise<Result> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const activeActorId = await this.requireActiveActor(
-        client,
-        actorId,
-        true,
-      );
-      const result = await operation(client, activeActorId);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // Preserve the operation failure if PostgreSQL has already aborted the transaction.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    return withDatabaseTransactionClient(
+      this.pool,
+      async (client, markTransactionStarted) => {
+        await client.query("BEGIN");
+        markTransactionStarted();
+        const activeActorId = await this.requireActiveActor(
+          client,
+          actorId,
+          true,
+        );
+        const result = await operation(client, activeActorId);
+        await client.query("COMMIT");
+        return result;
+      },
+      normalizeError,
+    );
   }
 
   private async lockSchedule(
@@ -385,7 +400,10 @@ export class RecurringBillRepository {
     actorId: string,
     input: PreviewRecurringBillMatchesInput,
   ): Promise<RecurringBillMatchPreviewResult> {
-    const schedule = recurringBillScheduleInputSchema.parse(input.schedule);
+    const schedule = parseWithDiagnostics(
+      recurringBillScheduleInputSchema,
+      input.schedule,
+    );
     await this.requireActiveActor(this.pool, actorId);
     const result = await this.pool.query(
       `SELECT ${transactionProjection} FROM ${this.transactionsTable} WHERE kind='supplier_expense' AND status='recorded' AND counterparty IS NOT NULL AND document_currency IS NOT NULL ORDER BY id`,
@@ -416,7 +434,8 @@ export class RecurringBillRepository {
     actorId: string,
     input: SaveRecurringBillInput,
   ): Promise<RecurringBillSchedule> {
-    const scheduleInput = recurringBillScheduleInputSchema.parse(
+    const scheduleInput = parseWithDiagnostics(
+      recurringBillScheduleInputSchema,
       input.schedule,
     );
     const hasId = input.id !== undefined;
@@ -495,59 +514,58 @@ export class RecurringBillRepository {
     actorId: string,
     input: LinkRecurringBillOccurrenceInput,
   ): Promise<RecurringBillLink> {
-    try {
-      return await this.withWriteTransaction(
-        actorId,
-        async (client, activeActorId) => {
-          const schedule = await this.lockSchedule(
-            client,
+    return this.withWriteTransaction(
+      actorId,
+      async (client, activeActorId) => {
+        const schedule = await this.lockSchedule(
+          client,
+          input.scheduleId,
+          input.expectedUpdatedAt,
+        );
+        if (!schedule.active) throw schedulePaused();
+
+        const transactionResult = await client.query(
+          `SELECT ${transactionProjection} FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
+          [input.transactionId],
+        );
+        const transactionRow = transactionResult.rows[0];
+        if (!transactionRow) throw linkIneligible();
+        const transaction = mapTransactionRecord(transactionRow);
+        if (
+          !isRecurringBillTransactionEligible(
+            schedule,
+            input.expectedDate,
+            transaction,
+            input.timeZone,
+          )
+        ) {
+          throw linkIneligible();
+        }
+
+        const result = await client.query(
+          `INSERT INTO ${this.linksTable} (schedule_id, expected_date, transaction_id, created_by_id) VALUES ($1,$2::date,$3,$4) RETURNING ${linkProjection}`,
+          [
             input.scheduleId,
-            input.expectedUpdatedAt,
-          );
-          if (!schedule.active) throw schedulePaused();
-
-          const transactionResult = await client.query(
-            `SELECT ${transactionProjection} FROM ${this.transactionsTable} WHERE id=$1 FOR UPDATE`,
-            [input.transactionId],
-          );
-          const transactionRow = transactionResult.rows[0];
-          if (!transactionRow) throw linkIneligible();
-          const transaction = mapTransactionRecord(transactionRow);
-          if (
-            !isRecurringBillTransactionEligible(
-              schedule,
-              input.expectedDate,
-              transaction,
-              input.timeZone,
-            )
-          ) {
-            throw linkIneligible();
-          }
-
-          const result = await client.query(
-            `INSERT INTO ${this.linksTable} (schedule_id, expected_date, transaction_id, created_by_id) VALUES ($1,$2::date,$3,$4) RETURNING ${linkProjection}`,
-            [
-              input.scheduleId,
-              input.expectedDate,
-              input.transactionId,
-              activeActorId,
-            ],
-          );
-          const row = result.rows[0];
-          if (!row) throw associationConflict();
-          await this.updateScheduleRevision(
-            client,
-            schedule.id,
+            input.expectedDate,
+            input.transactionId,
             activeActorId,
-            input.expectedUpdatedAt,
-          );
-          return mapLinkRecord(row);
-        },
-      );
-    } catch (error) {
-      if (postgresErrorCode(error) === "23505") throw associationConflict();
-      throw error;
-    }
+          ],
+        );
+        const row = result.rows[0];
+        if (!row) throw associationConflict();
+        await this.updateScheduleRevision(
+          client,
+          schedule.id,
+          activeActorId,
+          input.expectedUpdatedAt,
+        );
+        return mapLinkRecord(row);
+      },
+      (error) =>
+        postgresErrorCode(error) === "23505"
+          ? associationConflict(error)
+          : error,
+    );
   }
 
   async unlinkOccurrence(

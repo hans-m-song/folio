@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { extractInvoicePdf, invoicePdfLimits } from "./invoice-extraction";
 
@@ -143,6 +143,69 @@ describe("bounded local invoice PDF extraction", () => {
       status: "unsupported",
       reason: "no_text",
     });
+  });
+
+  it("reports malformed worker exceptions without returning PDF content in diagnostics", async () => {
+    const diagnosticLog = vi
+      .spyOn(console, "info")
+      .mockImplementation(() => {});
+    const submittedMarker =
+      "Synthetic invoice for person@example.test token=synthetic-secret";
+    let logged: string[] = [];
+
+    try {
+      await expect(
+        extractInvoicePdf(encode(`not a PDF ${submittedMarker}`)),
+      ).resolves.toEqual({
+        status: "unsupported",
+        reason: "malformed_pdf",
+      });
+      logged = diagnosticLog.mock.calls.map(([line]) => String(line));
+    } finally {
+      diagnosticLog.mockRestore();
+    }
+
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('"operation":"invoice_pdf_extraction"');
+    expect(logged[0]).toContain('"stage":"worker_parser"');
+    expect(logged[0]).toContain('"code":"PDF_EXTRACTION_UNSUPPORTED"');
+    expect(logged[0]).toContain('"severity":"info"');
+    expect(logged[0]).toContain("malformed_pdf");
+    expect(logged[0]).not.toContain(submittedMarker);
+    expect(logged[0]).not.toContain("person@example.test");
+    expect(logged[0]).not.toContain("synthetic-secret");
+  });
+
+  it("reports unexpected PDF worker setup failures at error severity", async () => {
+    const diagnosticLog = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const serverEntry = process.argv[1];
+    let logged: string[] = [];
+
+    process.argv[1] = "relative-synthetic-server-entry";
+    try {
+      await expect(
+        extractInvoicePdf(pdfWithPages(["Synthetic invoice"])),
+      ).resolves.toEqual({
+        status: "unsupported",
+        reason: "extraction_failed",
+      });
+      logged = diagnosticLog.mock.calls.map(([line]) => String(line));
+    } finally {
+      if (serverEntry === undefined) {
+        process.argv.splice(1, 1);
+      } else {
+        process.argv[1] = serverEntry;
+      }
+      diagnosticLog.mockRestore();
+    }
+
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('"operation":"invoice_pdf_extraction"');
+    expect(logged[0]).toContain('"stage":"resolve_pdfjs_entry"');
+    expect(logged[0]).toContain('"code":"PDF_EXTRACTION_FAILED"');
+    expect(logged[0]).toContain('"severity":"error"');
   });
 
   it("returns an encrypted manual-review code without requesting a password", async () => {

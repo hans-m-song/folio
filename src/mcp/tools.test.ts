@@ -948,7 +948,7 @@ describe("Folio MCP tools", () => {
           artifactId: ids.artifact,
           actorId: ids.actor,
         });
-
+        expect(event.message).toBe("synthetic");
         expect(JSON.stringify(toolValue(warningFailure).value)).not.toContain(
           "synthetic",
         );
@@ -1031,6 +1031,9 @@ describe("Folio MCP tools", () => {
       );
       expect(logged).toHaveLength(1);
       expect(logged[0]).toContain('"operation":"submit_draft_transaction"');
+      expect(logged[0]).toContain(
+        "CommBank source row was not found in the pinned artifact",
+      );
       expect(fakes.proposalRepository.submit).toHaveBeenCalledTimes(2);
       expect(fakes.repository.createManual).not.toHaveBeenCalled();
       expect(fakes.bankRepository.reconcile).not.toHaveBeenCalled();
@@ -1272,11 +1275,7 @@ describe("Folio MCP tools", () => {
             string,
             unknown
           >;
-          expect(event).toMatchObject({
-            operation: "get_artifact",
-            code: "UNEXPECTED_ERROR",
-            correlationId: value?.reference,
-          });
+          expect(event.message).toBe("Synthetic private server diagnostic");
         },
       );
     } finally {

@@ -1,4 +1,5 @@
 import { validateInput } from "./input-validation";
+import { rememberValidationSchema } from "../domain/validation-diagnostics";
 import { createServerFn } from "@tanstack/react-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { z } from "zod";
@@ -523,8 +524,16 @@ export const saveManualTransaction = createServerFn({ method: "POST" })
         );
         const parsed = manualTransactionSavePayloadSchema.safeParse(data);
         if (!parsed.success) {
+          rememberValidationSchema(
+            parsed.error,
+            manualTransactionSavePayloadSchema,
+          );
           reportServerFailure(
-            new AppError({ code: "INPUT_INVALID", stage: "input_validation" }),
+            new AppError({
+              code: "INPUT_INVALID",
+              stage: "input_validation",
+              cause: parsed.error,
+            }),
             {
               operation: "save_manual_transaction",
               metadata: { issueCount: parsed.error.issues.length },

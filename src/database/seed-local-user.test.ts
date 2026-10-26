@@ -69,7 +69,7 @@ describe("local administrator seeding CLI", () => {
         },
       ],
     });
-    expect(JSON.stringify(event)).not.toContain("private database detail");
-    expect(JSON.stringify(event)).not.toContain("private cleanup detail");
+    expect(JSON.stringify(event)).toContain("private database detail");
+    expect(JSON.stringify(event)).toContain("private cleanup detail");
   });
 });

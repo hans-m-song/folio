@@ -188,11 +188,11 @@ describe("MCP request logging", () => {
       withMcpRequestLogging(
         request(),
         () => {
-          throw new Error("synthetic secret error");
+          throw new Error("synthetic-route-exception");
         },
         { error },
       ),
-    ).rejects.toThrow("synthetic secret error");
+    ).rejects.toThrow("synthetic-route-exception");
 
     expect(JSON.parse(error.mock.calls[0][0])).toMatchObject({
       event: "folio.operation",
@@ -201,8 +201,8 @@ describe("MCP request logging", () => {
       stage: "route_exception",
       phase: "failure",
       code: "UNEXPECTED_ERROR",
+      message: "synthetic-route-exception",
     });
-    expect(error.mock.calls[0][0]).not.toContain("synthetic secret error");
   });
 
   it("does not log or replace an HTTP failure already carrying a reference", async () => {

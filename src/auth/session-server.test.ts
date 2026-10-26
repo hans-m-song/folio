@@ -75,10 +75,11 @@ describe("current session server function", () => {
     });
 
     const line = String(errorLog.mock.calls[0]?.[0]);
+    expect(current.auth.session).toHaveBeenCalledWith(privateValue);
     expect(line).toContain('"operation":"auth_session"');
     expect(line).toContain('"stage":"session_lookup"');
     expect(line).not.toContain(privateValue);
-    expect(line).not.toContain("Error");
+    expect(line).toContain('"name":"Error"');
   });
 
   it("logs runtime initialization faults without attempting a session lookup", async () => {
@@ -101,6 +102,6 @@ describe("current session server function", () => {
     const line = String(errorLog.mock.calls[0]?.[0]);
     expect(line).toContain('"operation":"auth_session"');
     expect(line).toContain('"stage":"runtime_init"');
-    expect(line).not.toContain(privateValue);
+    expect(line).toContain(privateValue);
   });
 });

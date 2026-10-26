@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createFolioMcpHandler, MCP_MAX_REQUEST_BODY_BYTES } from "./server";
+import {
+  createFolioMcpHandler,
+  MCP_MAX_REQUEST_BODY_BYTES,
+  type McpPrincipal,
+} from "./server";
+import { createMcpToolRegistrar, type McpToolDependencies } from "./tools";
 import { createMcpWebEndpoint, mcpEnabled } from "./web";
 
 const principal = {
@@ -25,6 +30,18 @@ const body = JSON.stringify({
   },
 });
 
+const toolsListBody = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "tools/list",
+  params: {
+    _meta: {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {},
+    },
+  },
+});
+
 const request = (
   options: {
     method?: string;
@@ -32,6 +49,7 @@ const request = (
     origin?: string;
     authorization?: string;
     body?: string;
+    mcpMethod?: string;
   } = {},
 ) =>
   new Request(`${origin}/mcp`, {
@@ -43,7 +61,7 @@ const request = (
       authorization:
         options.authorization ?? "Bearer synthetic-test-credential",
       "mcp-protocol-version": "2026-07-28",
-      "mcp-method": "tools/call",
+      "mcp-method": options.mcpMethod ?? "tools/call",
       "mcp-name": "folio_ping",
       ...(options.origin ? { origin: options.origin } : {}),
     },
@@ -78,6 +96,54 @@ describe("MCP web route boundary", () => {
       expect(verifyCredential).toHaveBeenCalledWith(
         "synthetic-test-credential",
       );
+    } finally {
+      await handler.close();
+    }
+  });
+
+  it("rebuilds the tool catalog from the scopes verified for each request", async () => {
+    const token = "synthetic-test-credential";
+    let scopes: McpPrincipal["scopes"] = ["transactions:draft"];
+    const verifyCredential = vi.fn(async (candidate: string | undefined) =>
+      candidate === token ? { ...principal, scopes } : undefined,
+    );
+    const registerTools = createMcpToolRegistrar({} as McpToolDependencies);
+    const handler = createFolioMcpHandler(registerTools);
+    const endpoint = createMcpWebEndpoint({
+      expectedOrigin: origin,
+      verifyCredential,
+      handler,
+    });
+
+    const listTools = async () => {
+      const response = await endpoint(
+        request({
+          authorization: `Bearer ${token}`,
+          body: toolsListBody,
+          mcpMethod: "tools/list",
+        }),
+      );
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as {
+        result?: { tools: { name: string }[] };
+      };
+      expect(result.result).toBeDefined();
+      return result.result!.tools.map(({ name }) => name);
+    };
+
+    try {
+      expect(await listTools()).toEqual([
+        "folio_ping",
+        "submit_draft_transaction",
+        "edit_transaction",
+      ]);
+
+      scopes = ["transactions:search"];
+
+      expect(await listTools()).toEqual(["folio_ping", "search_transactions"]);
+      expect(verifyCredential).toHaveBeenCalledTimes(2);
+      expect(verifyCredential).toHaveBeenNthCalledWith(1, token);
+      expect(verifyCredential).toHaveBeenNthCalledWith(2, token);
     } finally {
       await handler.close();
     }
@@ -164,6 +230,7 @@ describe("MCP web route boundary", () => {
       expect(response.headers.get("x-folio-error-reference")).toMatch(
         /^[0-9a-f-]{36}$/i,
       );
+      expect(await response.text()).not.toContain("private verifier details");
       expect(log).toHaveBeenCalledTimes(1);
       const event = JSON.parse(log.mock.calls[0][0] as string) as Record<
         string,
@@ -174,8 +241,9 @@ describe("MCP web route boundary", () => {
         stage: "credential_verification",
         phase: "failure",
         code: "UNEXPECTED_ERROR",
+        message: "private verifier details",
       });
-      expect(JSON.stringify(event)).not.toContain("private verifier details");
+      expect(event).not.toHaveProperty("stack");
     } finally {
       log.mockRestore();
       await handler.close();

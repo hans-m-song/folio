@@ -55,4 +55,23 @@ describe("error policy catalog", () => {
       severity: "error",
     });
   });
+
+  it("classifies stale artifact metadata updates as refreshable conflicts", () => {
+    expect(errorPolicyFor("ARTIFACT_METADATA_CONFLICT")).toMatchObject({
+      code: "ARTIFACT_METADATA_CONFLICT",
+      category: "validation",
+      status: 409,
+      retryable: false,
+      recovery: "refresh",
+    });
+    expect(
+      new AppError({
+        code: "ARTIFACT_METADATA_CONFLICT",
+        stage: "artifact_metadata",
+      }),
+    ).toMatchObject({
+      code: "ARTIFACT_METADATA_CONFLICT",
+      stage: "artifact_metadata",
+    });
+  });
 });

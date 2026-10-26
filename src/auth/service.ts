@@ -9,6 +9,7 @@ import type { ReturnTypeOfLoadAuthConfig } from "./types";
 import { randomOpaqueToken, sha256 } from "./crypto";
 import { safeReturnPath } from "./http";
 import { localPasswordMatches } from "./local";
+import { setDiagnosticContext } from "../server/error-handling";
 import type {
   AuthenticatedUser,
   AuthRepository,
@@ -356,6 +357,7 @@ export class AuthService {
 
   async session(token: string | null): Promise<AuthenticatedUser | null> {
     if (!token) return null;
+    setDiagnosticContext({ redactValues: [token] });
     try {
       return await this.repository.getActiveSession(sha256(token), this.now());
     } catch (error) {

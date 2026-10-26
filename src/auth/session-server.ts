@@ -3,6 +3,7 @@ import { getCookie } from "@tanstack/react-start/server";
 
 import { AppError } from "../domain/errors";
 import { runOperation } from "../server/diagnostics";
+import { setDiagnosticContext } from "../server/error-handling";
 import { runtime } from "../server/runtime";
 
 export const getCurrentSession = createServerFn({ method: "GET" }).handler(
@@ -22,9 +23,9 @@ export const getCurrentSession = createServerFn({ method: "GET" }).handler(
         }
 
         try {
-          const user = await current.auth.session(
-            getCookie(current.authConfig.sessionCookieName) ?? null,
-          );
+          const token = getCookie(current.authConfig.sessionCookieName) ?? null;
+          setDiagnosticContext({ redactValues: token ? [token] : [] });
+          const user = await current.auth.session(token);
           return user
             ? { authenticated: true as const, user }
             : { authenticated: false as const };

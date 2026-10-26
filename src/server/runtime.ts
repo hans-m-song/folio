@@ -1,6 +1,7 @@
 import { S3Client } from "@aws-sdk/client-s3";
 import { setResponseHeader } from "@tanstack/react-start/server";
 import { Pool } from "pg";
+import { validateRuntimeConfiguration } from "./runtime-configuration";
 
 import { AuthService, createGoogleOidcOperations } from "../auth/service";
 import { createS3CredentialsProvider } from "../aws/credentials";
@@ -17,8 +18,10 @@ import { S3ObjectStorage } from "../documents/storage";
 let singleton: ReturnType<typeof createRuntime> | undefined;
 
 function createRuntime() {
-  const config = loadConfig(process.env);
-  const authConfig = loadAuthConfig(process.env);
+  const { config, authConfig } = validateRuntimeConfiguration(() => ({
+    config: loadConfig(process.env),
+    authConfig: loadAuthConfig(process.env),
+  }));
   const pool = new Pool({ connectionString: config.databaseUrl, max: 5 });
   const repository = new FolioRepository(
     pool,

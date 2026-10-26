@@ -8,6 +8,7 @@ import {
   setDiagnosticContext,
   writeServerSuccess,
 } from "../../server/error-handling";
+import { summarizeInputException } from "../../server/error-details";
 import { runtime } from "../../server/runtime";
 
 const noStoreHeaders = {
@@ -174,7 +175,7 @@ export const Route = createFileRoute("/auth/login")({
               new AppError({
                 code: "AUTH_LOGIN_REQUEST_INVALID",
                 stage: "form_parse",
-                cause: error,
+                cause: summarizeInputException(error),
               }),
               400,
             );

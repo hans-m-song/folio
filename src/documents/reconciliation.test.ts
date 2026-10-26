@@ -112,6 +112,7 @@ describe("pending upload reconciliation", () => {
     const diagnosticLog = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
+    let logged: string[] = [];
     try {
       await expect(
         reconcilePendingUploads({
@@ -124,9 +125,127 @@ describe("pending upload reconciliation", () => {
       ).resolves.toEqual([
         { artifactId: artifact.id, status: "object_unavailable_or_denied" },
       ]);
+      logged = diagnosticLog.mock.calls.map(([line]) => String(line));
     } finally {
       diagnosticLog.mockRestore();
     }
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('"operation":"pending_upload_reconciliation"');
+    expect(logged[0]).toContain('"stage":"storage_head"');
+    expect(logged[0]).toContain(artifact.id);
+    expect(logged[0]).not.toContain("synthetic-secret");
+  });
+
+  it("reports PDF signature read failures with stage context", async () => {
+    const unavailable = boundaries({
+      readPrefix: vi
+        .fn()
+        .mockRejectedValue(new Error("storage failure token=synthetic-secret")),
+    });
+    const diagnosticLog = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    let logged: string[] = [];
+    try {
+      await expect(
+        reconcilePendingUploads({
+          artifacts: [artifact],
+          repository: unavailable.repository,
+          storage: unavailable.storage,
+          bucket: "test",
+          recover: false,
+        }),
+      ).resolves.toEqual([
+        { artifactId: artifact.id, status: "object_unavailable_or_denied" },
+      ]);
+      logged = diagnosticLog.mock.calls.map(([line]) => String(line));
+    } finally {
+      diagnosticLog.mockRestore();
+    }
+
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('"operation":"pending_upload_reconciliation"');
+    expect(logged[0]).toContain('"stage":"storage_prefix_read"');
+    expect(logged[0]).toContain(artifact.id);
+    expect(logged[0]).not.toContain("synthetic-secret");
+  });
+
+  it("preserves confirmation and state lookup failures", async () => {
+    const { repository, storage } = boundaries();
+    vi.mocked(repository.confirmAwaitingReview).mockRejectedValueOnce(
+      new Error("confirm failed token=synthetic-confirm-secret"),
+    );
+    vi.mocked(repository.getArtifact).mockRejectedValueOnce(
+      new Error("state lookup failed token=synthetic-lookup-secret"),
+    );
+    const diagnosticLog = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    let logged: string[] = [];
+
+    try {
+      await expect(
+        reconcilePendingUploads({
+          artifacts: [artifact],
+          repository,
+          storage,
+          bucket: "test",
+          recover: true,
+          actorEmail: "operator@example.test",
+          confirmation: RECOVERY_CONFIRMATION,
+        }),
+      ).rejects.toMatchObject({ name: "OperationCleanupError" });
+      logged = diagnosticLog.mock.calls.map(([line]) => String(line));
+    } finally {
+      diagnosticLog.mockRestore();
+    }
+
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('"stage":"reconciliation_state_lookup"');
+    expect(logged[0]).toContain("confirm failed");
+    expect(logged[0]).toContain("state lookup failed");
+    expect(logged[0]).not.toContain("synthetic-confirm-secret");
+    expect(logged[0]).not.toContain("synthetic-lookup-secret");
+  });
+
+  it("reports a failed confirmation even when recovery is already resolved", async () => {
+    const { repository, storage } = boundaries();
+    vi.mocked(repository.confirmAwaitingReview).mockRejectedValueOnce(
+      new Error("confirmation lost token=synthetic-secret"),
+    );
+    vi.mocked(repository.getArtifact).mockResolvedValueOnce({
+      ...artifact,
+      state: "available",
+      confirmedAt: "2040-01-01T00:00:00.000Z",
+    });
+    const diagnosticLog = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    let logged: string[] = [];
+
+    try {
+      await expect(
+        reconcilePendingUploads({
+          artifacts: [artifact],
+          repository,
+          storage,
+          bucket: "test",
+          recover: true,
+          actorEmail: "operator@example.test",
+          confirmation: RECOVERY_CONFIRMATION,
+        }),
+      ).resolves.toEqual([
+        { artifactId: artifact.id, status: "already_resolved" },
+      ]);
+      logged = diagnosticLog.mock.calls.map(([line]) => String(line));
+    } finally {
+      diagnosticLog.mockRestore();
+    }
+
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('"stage":"recovery_confirm"');
+    expect(logged[0]).toContain("confirmation lost");
+    expect(logged[0]).not.toContain("synthetic-secret");
   });
 
   it("refuses integrity mismatches and invalid recovery confirmation", async () => {

@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import type { Pool } from "pg";
 
 import type { loadConfig } from "../config";
+import { OperationCleanupError } from "../domain/errors";
+import type { LogWriter } from "../server/error-handling";
+import { writeDatabaseCliFailure } from "./cli-errors";
 import { addUserUsage, parseAddUserOptions } from "./add-user-options";
 
 type AddUserPool = Pick<Pool, "query" | "end">;
@@ -18,6 +21,7 @@ export type AddUserCliOptions = Readonly<{
   }) => AddUserPool;
   output?: (text: string) => void;
   error?: (text: string) => void;
+  diagnostic?: LogWriter;
 }>;
 
 export const runAddUser = async ({
@@ -27,6 +31,7 @@ export const runAddUser = async ({
   poolFactory,
   output = (text) => process.stdout.write(text),
   error: writeError = (text) => process.stderr.write(text),
+  diagnostic = (line) => process.stderr.write(`${line}\n`),
 }: AddUserCliOptions = {}): Promise<number> => {
   let command;
   try {
@@ -37,40 +42,53 @@ export const runAddUser = async ({
   }
 
   if (command.action === "help") {
-    output(addUserUsage() + "\n");
+    output(`${addUserUsage()}\n`);
     return 0;
   }
 
   let pool: AddUserPool | undefined;
   let failed = false;
+  let failure: unknown;
+  let stage = "configuration";
   try {
     const loadConfig = configLoader ?? (await import("../config")).loadConfig;
     const config = loadConfig(environment ?? process.env);
+    stage = "pool_create";
     if (poolFactory) {
       pool = poolFactory({ connectionString: config.databaseUrl, max: 1 });
     } else {
       const { Pool } = await import("pg");
       pool = new Pool({ connectionString: config.databaseUrl, max: 1 });
     }
+    stage = "query";
     await pool.query(
-      'INSERT INTO "' +
-        config.databaseSchema +
-        '"."users" (email, display_name, role) VALUES ($1, $2, $3)',
+      `INSERT INTO "${config.databaseSchema}"."users" (email, display_name, role) VALUES ($1, $2, $3)`,
       [command.input.email, command.input.displayName, command.input.role],
     );
-  } catch {
+  } catch (error) {
     failed = true;
+    failure = error;
   } finally {
     if (pool) {
       try {
         await pool.end();
-      } catch {
+      } catch (cleanupError) {
+        const hasPrimaryError = failed;
         failed = true;
+        failure = hasPrimaryError
+          ? new OperationCleanupError(failure, cleanupError, "pool_close")
+          : cleanupError;
+        stage = "pool_close";
       }
     }
   }
 
   if (failed) {
+    writeDatabaseCliFailure(
+      failure,
+      { operation: "add_user", stage, mutation: true },
+      diagnostic,
+    );
     writeError("Unable to create Folio user.\n");
     return 1;
   }

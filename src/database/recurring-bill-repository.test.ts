@@ -2,6 +2,7 @@ import type { Pool, QueryResultRow } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
 import { recurringBillScheduleInputSchema } from "../domain/recurring-bills";
+import { OperationCleanupError } from "../domain/errors";
 import { RecurringBillRepository } from "./recurring-bill-repository";
 
 const actorId = "11111111-1111-4111-8111-111111111111";
@@ -571,6 +572,42 @@ describe("RecurringBillRepository schedule writes", () => {
   });
 });
 
+describe("RecurringBillRepository transaction cleanup", () => {
+  it("retains operation, rollback, and release errors", async () => {
+    const operationError = new Error("synthetic recurring bill query failure");
+    const rollbackError = new Error(
+      "synthetic recurring bill rollback failure",
+    );
+    const releaseError = new Error("synthetic recurring bill release failure");
+    const { client, repository } = makePool(async (statement) => {
+      if (statement === "BEGIN") return result();
+      if (statement === "ROLLBACK") throw rollbackError;
+      throw operationError;
+    });
+    client.release.mockImplementation(() => {
+      throw releaseError;
+    });
+
+    let failure: unknown;
+    try {
+      await repository.save(actorId, { schedule: scheduleInput() });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(OperationCleanupError);
+    const releaseFailure = failure as OperationCleanupError;
+    expect(releaseFailure.stage).toBe("client_release");
+    expect(releaseFailure.cleanupError).toBe(releaseError);
+    expect(releaseFailure.primaryError).toBeInstanceOf(OperationCleanupError);
+    const rollbackFailure =
+      releaseFailure.primaryError as OperationCleanupError;
+    expect(rollbackFailure.stage).toBe("transaction_rollback");
+    expect(rollbackFailure.primaryError).toBe(operationError);
+    expect(rollbackFailure.cleanupError).toBe(rollbackError);
+  });
+});
+
 describe("RecurringBillRepository occurrence associations", () => {
   it("locks and revalidates the schedule and transaction before linking", async () => {
     const { client, repository } = makePool(async (statement) => {
@@ -652,6 +689,10 @@ describe("RecurringBillRepository occurrence associations", () => {
   });
 
   it("translates unique association violations and rolls back", async () => {
+    const uniqueError = Object.assign(
+      new Error("synthetic unique association violation"),
+      { code: "23505" },
+    );
     const { client, repository } = makePool(async (statement) => {
       if (statement.includes('FROM "folio"."users"'))
         return result([activeActorRow]);
@@ -660,7 +701,7 @@ describe("RecurringBillRepository occurrence associations", () => {
       if (statement.includes('FROM "folio"."transactions"'))
         return result([transactionRow()]);
       if (statement.startsWith('INSERT INTO "folio"."recurring_bill_links"'))
-        throw { code: "23505" };
+        throw uniqueError;
       return result();
     });
 
@@ -677,6 +718,7 @@ describe("RecurringBillRepository occurrence associations", () => {
         category: "validation",
         code: "RECURRING_BILL_ASSOCIATION_CONFLICT",
       },
+      cause: uniqueError,
     });
     const statements = client.query.mock.calls.map(([statement]) =>
       String(statement),

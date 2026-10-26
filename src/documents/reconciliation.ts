@@ -6,6 +6,7 @@ import {
   type ArtifactRepository,
 } from "./service";
 import type { ObjectStorage, StoredObjectHead } from "./storage";
+import { reportServerFailure } from "../server/error-handling";
 
 export const RECOVERY_CONFIRMATION = "RECOVER_EXACT_PENDING_UPLOADS";
 
@@ -43,6 +44,18 @@ const isMissingObject = (error: unknown): boolean =>
       "httpStatusCode" in error.$metadata &&
       error.$metadata.httpStatusCode === 404));
 
+const reportReconciliationFailure = (
+  error: unknown,
+  stage: string,
+  artifactId: string,
+): void => {
+  reportServerFailure(error, {
+    operation: "pending_upload_reconciliation",
+    stage,
+    ids: { artifactId },
+  });
+};
+
 export async function reconcilePendingUploads(input: {
   artifacts: readonly ArtifactRecord[];
   repository: ArtifactRepository;
@@ -70,6 +83,7 @@ export async function reconcilePendingUploads(input: {
     try {
       head = await input.storage.head(input.bucket, artifact.objectKey);
     } catch (error) {
+      reportReconciliationFailure(error, "storage_head", artifact.id);
       results.push({
         artifactId: artifact.id,
         status: isMissingObject(error)
@@ -93,7 +107,8 @@ export async function reconcilePendingUploads(input: {
           artifact.objectKey,
           5,
         );
-      } catch {
+      } catch (error) {
+        reportReconciliationFailure(error, "storage_prefix_read", artifact.id);
         results.push({
           artifactId: artifact.id,
           status: "object_unavailable_or_denied",
@@ -128,9 +143,15 @@ export async function reconcilePendingUploads(input: {
           lookupError,
           "reconciliation_state_lookup",
         );
+        reportReconciliationFailure(
+          failure,
+          "reconciliation_state_lookup",
+          artifact.id,
+        );
         throw failure;
       }
       if (current && current.state !== "pending") {
+        reportReconciliationFailure(error, "recovery_confirm", artifact.id);
         results.push({ artifactId: artifact.id, status: "already_resolved" });
         continue;
       }

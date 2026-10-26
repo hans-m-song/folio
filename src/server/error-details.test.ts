@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { redactDiagnosticText, serverErrorDetails } from "./error-details";
+import {
+  redactDiagnosticText,
+  serverErrorDetails,
+  summarizeInputException,
+} from "./error-details";
+import { validateRuntimeConfiguration } from "./runtime-configuration";
+import { reportServerFailure } from "./error-handling";
+import { loadConfig } from "../config";
 import {
   parseWithDiagnostics,
   rememberValidationSchema,
@@ -76,6 +83,64 @@ describe("internal error diagnostics", () => {
     expect(JSON.stringify(detail)).not.toMatch(/synthetic-/);
   });
 
+  it("redacts exact sensitive values as literals throughout structured details", () => {
+    const token = "session.+[synthetic](literal)*";
+    const source = new Error(`top ${token}`, {
+      cause: new Error(`nested ${token}`),
+    });
+    const details = serverErrorDetails(source, [token]);
+
+    expect(details.message).toBe("top [REDACTED_VALUE]");
+    expect(details.cause).toMatchObject({
+      message: "nested [REDACTED_VALUE]",
+    });
+    expect(JSON.stringify(details)).not.toContain(token);
+    expect(redactDiagnosticText(`literal ${token}`, [token])).toBe(
+      "literal [REDACTED_VALUE]",
+    );
+  });
+
+  it("summarizes input exceptions without reading their raw diagnostic fields", () => {
+    const submittedValue = "synthetic-submitted-input";
+    const reads: string[] = [];
+    const source = new Proxy(
+      {
+        name: "SyntaxError",
+        code: "ERR_PARSE",
+        message: submittedValue,
+        cause: new Error(submittedValue),
+        stack: submittedValue,
+      },
+      {
+        get: (target, key, receiver) => {
+          reads.push(String(key));
+          return Reflect.get(target, key, receiver);
+        },
+      },
+    );
+    const summary = summarizeInputException(source);
+
+    expect(summary).toEqual({
+      message: "Input parsing failed.",
+      name: "SyntaxError",
+      code: "ERR_PARSE",
+    });
+    expect(reads).toEqual(["name", "code"]);
+    expect(JSON.stringify(summary)).not.toContain(submittedValue);
+    const hostile = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error(submittedValue);
+        },
+      },
+    );
+    expect(() => summarizeInputException(hostile)).not.toThrow();
+    expect(summarizeInputException(hostile)).toEqual({
+      message: "Input parsing failed.",
+    });
+  });
+
   it("marks cycles and depth, message and aggregate limits", () => {
     const cycle = new Error("cycle");
     cycle.cause = cycle;
@@ -138,6 +203,13 @@ describe("internal error diagnostics", () => {
       "issuesUnavailable",
       true,
     );
+    expect(() =>
+      reportServerFailure(
+        hostileZod,
+        { operation: "hostile_validation" },
+        { info: () => {} },
+      ),
+    ).not.toThrow();
   });
 
   it("redacts submitted identifier keys even when they have valid identifier syntax", () => {
@@ -185,5 +257,51 @@ describe("internal error diagnostics", () => {
       ],
     });
     expect(JSON.stringify(detail)).not.toContain("submitted-value");
+  });
+
+  it("classifies runtime schema failures as configuration errors with internal fields", () => {
+    let line = "";
+    let failure: unknown;
+    try {
+      validateRuntimeConfiguration(() => loadConfig({}));
+    } catch (error) {
+      failure = error;
+    }
+    const reported = reportServerFailure(
+      failure,
+      { operation: "health" },
+      {
+        error: (value) => {
+          line = value;
+        },
+      },
+    );
+    expect(reported).toMatchObject({
+      internalCode: "CONFIG_INVALID",
+      status: 500,
+    });
+    expect(JSON.parse(line)).toMatchObject({
+      category: "configuration",
+      error: {
+        cause: {
+          issues: expect.arrayContaining([
+            {
+              path: ["FOLIO_DATABASE_APP_URL"],
+              code: "invalid_type",
+              expected: "string",
+            },
+          ]),
+        },
+      },
+    });
+    expect(JSON.stringify(reported.publicFailure)).not.toContain(
+      "FOLIO_DATABASE_APP_URL",
+    );
+    const unexpected = new Error("loader failure");
+    expect(() =>
+      validateRuntimeConfiguration(() => {
+        throw unexpected;
+      }),
+    ).toThrow(unexpected);
   });
 });
