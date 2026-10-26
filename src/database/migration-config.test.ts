@@ -4,7 +4,7 @@ import { formatDatabaseCliFailure } from "./cli-errors";
 import { loadMigrationConfig } from "./migration-config";
 
 const valid = {
-  FOLIO_MIGRATION_DATABASE_URL:
+  FOLIO_DATABASE_ADMIN_URL:
     "postgresql://folio_admin:synthetic@localhost/folio",
   FOLIO_DATABASE_SCHEMA: "folio_test",
 };
@@ -12,10 +12,10 @@ const valid = {
 describe("migration configuration", () => {
   it("loads only the dedicated migration connection and applies role defaults", () => {
     expect(loadMigrationConfig(valid)).toEqual({
-      migrationDatabaseUrl: valid.FOLIO_MIGRATION_DATABASE_URL,
+      databaseAdminUrl: valid.FOLIO_DATABASE_ADMIN_URL,
       databaseSchema: "folio_test",
       databaseAppRole: "folio_app",
-      databaseMigrationRole: "folio_admin",
+      databaseAdminRole: "folio_admin",
     });
   });
 
@@ -32,13 +32,13 @@ describe("migration configuration", () => {
     expect(() =>
       loadMigrationConfig({
         ...valid,
-        FOLIO_MIGRATION_DATABASE_URL: "https://db.example/folio",
+        FOLIO_DATABASE_ADMIN_URL: "https://db.example/folio",
       }),
     ).toThrow();
     expect(() =>
       loadMigrationConfig({
         ...valid,
-        FOLIO_MIGRATION_DATABASE_URL: "sqlite://localhost/folio",
+        FOLIO_DATABASE_ADMIN_URL: "sqlite://localhost/folio",
       }),
     ).toThrow();
   });
@@ -48,7 +48,7 @@ describe("migration configuration", () => {
     try {
       loadMigrationConfig({
         ...valid,
-        FOLIO_MIGRATION_DATABASE_URL:
+        FOLIO_DATABASE_ADMIN_URL:
           "https://synthetic-secret@private.example/folio",
       });
     } catch (error) {
@@ -60,7 +60,7 @@ describe("migration configuration", () => {
       "configuration",
       failure,
     );
-    expect(formatted).toContain("FOLIO_MIGRATION_DATABASE_URL");
+    expect(formatted).toContain("FOLIO_DATABASE_ADMIN_URL");
     expect(formatted).not.toContain("synthetic-secret");
     expect(formatted).not.toContain("private.example");
   });
@@ -82,11 +82,11 @@ describe("migration configuration", () => {
       loadMigrationConfig({
         ...valid,
         FOLIO_DATABASE_APP_ROLE: "folio_runtime",
-        FOLIO_DATABASE_MIGRATION_ROLE: "folio_schema_owner",
+        FOLIO_DATABASE_ADMIN_ROLE: "folio_schema_owner",
       }),
     ).toMatchObject({
       databaseAppRole: "folio_runtime",
-      databaseMigrationRole: "folio_schema_owner",
+      databaseAdminRole: "folio_schema_owner",
     });
   });
 });

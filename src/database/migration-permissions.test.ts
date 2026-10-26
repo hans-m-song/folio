@@ -5,7 +5,7 @@ import { applyRuntimePermissions } from "./migration-permissions";
 const config = {
   databaseSchema: "folio_test",
   databaseAppRole: "folio_app",
-  databaseMigrationRole: "folio_admin",
+  databaseAdminRole: "folio_admin",
 };
 
 describe("migration runtime permissions", () => {

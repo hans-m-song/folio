@@ -28,7 +28,7 @@ try {
     })),
   );
   pool = new pg.Pool({
-    connectionString: config.migrationDatabaseUrl,
+    connectionString: config.databaseAdminUrl,
     max: 1,
   });
   stage = "begin";
@@ -53,7 +53,7 @@ try {
   const role = identity.rows[0];
   if (
     !role ||
-    role.role_name !== config.databaseMigrationRole ||
+    role.role_name !== config.databaseAdminRole ||
     role.rolsuper ||
     role.rolcreatedb ||
     role.rolcreaterole ||

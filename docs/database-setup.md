@@ -97,9 +97,9 @@ workflow does not require it. Existing schema ownership need not change to use
 the privilege-based runner.
 
 Update the migration connection URL username to `folio_admin`. Remove or change
-an explicit `FOLIO_DATABASE_MIGRATION_ROLE=folio_migrate` override. The setting
-names remain `FOLIO_MIGRATION_DATABASE_URL` and
-`FOLIO_DATABASE_ADMIN_PASSWORD`; `FOLIO_DATABASE_URL` remains the app connection.
+an explicit `FOLIO_DATABASE_ADMIN_ROLE=folio_migrate` override. The setting
+names remain `FOLIO_DATABASE_ADMIN_URL` and
+`FOLIO_DATABASE_ADMIN_PASSWORD`; `FOLIO_DATABASE_APP_URL` remains the app connection.
 
 Then run migrations before restarting the application. The upgrade sets ownership
 and future defaults; the migration runner resets existing table/sequence grants

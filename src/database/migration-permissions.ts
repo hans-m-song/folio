@@ -6,7 +6,7 @@ type QueryExecutor = {
 
 type RuntimePermissionConfig = Pick<
   MigrationConfig,
-  "databaseSchema" | "databaseAppRole" | "databaseMigrationRole"
+  "databaseSchema" | "databaseAppRole" | "databaseAdminRole"
 >;
 
 const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
@@ -48,7 +48,7 @@ export const applyRuntimePermissions = async (
 ) => {
   const schema = quoteIdentifier(config.databaseSchema);
   const appRole = quoteIdentifier(config.databaseAppRole);
-  const migrationRole = quoteIdentifier(config.databaseMigrationRole);
+  const migrationRole = quoteIdentifier(config.databaseAdminRole);
 
   await database.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema} FROM ${appRole}`,

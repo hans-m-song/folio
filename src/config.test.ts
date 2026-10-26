@@ -8,7 +8,7 @@ const valid = {
   FOLIO_BIND_HOST: "127.0.0.1",
   NITRO_HOST: "127.0.0.1",
   NITRO_PORT: "43230",
-  FOLIO_DATABASE_URL: "postgres://folio:folio@localhost/folio",
+  FOLIO_DATABASE_APP_URL: "postgres://folio:folio@localhost/folio",
   FOLIO_DATABASE_SCHEMA: "folio_test",
   FOLIO_S3_REGION: "ap-southeast-2",
   FOLIO_S3_BUCKET: "folio-test",

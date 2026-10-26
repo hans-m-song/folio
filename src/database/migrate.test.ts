@@ -21,10 +21,10 @@ vi.mock("pg", () => ({
 
 vi.mock("./migration-config", () => ({
   loadMigrationConfig: () => ({
-    migrationDatabaseUrl: "postgres://migration.synthetic/folio",
+    databaseAdminUrl: "postgres://migration.synthetic/folio",
     databaseSchema: "folio",
     databaseAppRole: "folio_app",
-    databaseMigrationRole: "folio_admin",
+    databaseAdminRole: "folio_admin",
   }),
 }));
 

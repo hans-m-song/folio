@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseWithDiagnostics } from "./domain/validation-diagnostics";
 
 const identifier = z.string().regex(/^[a-z][a-z0-9_]{0,62}$/);
 const prefix = z
@@ -106,7 +107,7 @@ const configSchema = z
     NITRO_HOST: z.enum(["127.0.0.1", "::1", "0.0.0.0"]),
     NITRO_PORT: z.coerce.number().int().positive().max(65_535),
     FOLIO_ALLOW_CONTAINER_BIND: z.enum(["true", "false"]).default("false"),
-    FOLIO_DATABASE_URL: z
+    FOLIO_DATABASE_APP_URL: z
       .string()
       .url()
       .refine((value) => value.startsWith("postgres")),
@@ -159,13 +160,13 @@ const configSchema = z
 export type FolioConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(environment: Record<string, string | undefined>) {
-  const value = configSchema.parse(environment);
+  const value = parseWithDiagnostics(configSchema, environment);
   return Object.freeze({
     nodeEnv: value.NODE_ENV,
     privateMode: true as const,
     bindHost: value.FOLIO_BIND_HOST,
     port: value.NITRO_PORT,
-    databaseUrl: value.FOLIO_DATABASE_URL,
+    databaseUrl: value.FOLIO_DATABASE_APP_URL,
     databaseSchema: value.FOLIO_DATABASE_SCHEMA,
     databaseAppRole: value.FOLIO_DATABASE_APP_ROLE,
     s3Region: value.FOLIO_S3_REGION,
@@ -183,7 +184,7 @@ export function loadConfig(environment: Record<string, string | undefined>) {
 export function loadAuthConfig(
   environment: Record<string, string | undefined>,
 ) {
-  const value = authConfigSchema.parse(environment);
+  const value = parseWithDiagnostics(authConfigSchema, environment);
   const origin = new URL(value.FOLIO_ORIGIN);
   return Object.freeze({
     nodeEnv: value.NODE_ENV,
