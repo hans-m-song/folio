@@ -90,3 +90,18 @@
     min-height: 26rem;
   }
 }
+
+.transaction-form-preview-layout--peek {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.transaction-pdf-preview--peek {
+  order: -1;
+  position: static;
+  container-type: inline-size;
+}
+
+.transaction-pdf-preview--peek .transaction-pdf-preview__frame {
+  height: min(70.7142857cqw, 148.5mm);
+  min-height: 0;
+}

@@ -66,6 +66,30 @@ describe("transaction PDF preview", () => {
     ).toBe("_blank");
   });
 
+  it("hides the native PDF toolbar in peek mode and preserves URL fragments", async () => {
+    const url =
+      "https://preview.example.test/invoice.pdf?signature=synthetic#page=2&zoom=125";
+    operations.previewArtifactForReview.mockResolvedValue(url);
+    render(
+      <TransactionPdfPreview
+        artifactId="11111111-1111-4111-8111-111111111111"
+        filename="invoice.pdf"
+        variant="peek"
+      />,
+    );
+
+    const frame = await screen.findByTitle("PDF preview: invoice.pdf");
+    expect(frame.getAttribute("src")).toBe(`${url}&view=FitH&toolbar=0`);
+    expect(
+      frame.parentElement?.classList.contains("transaction-pdf-preview--peek"),
+    ).toBe(true);
+    expect(
+      screen
+        .getByRole("link", { name: "Open PDF in a new tab" })
+        .getAttribute("href"),
+    ).toBe(url);
+  });
+
   it("shows loading and error states and lets the reviewer retry", async () => {
     let resolvePreview!: (url: string) => void;
     operations.previewArtifactForReview

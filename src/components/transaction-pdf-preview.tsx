@@ -11,9 +11,11 @@ type PreviewState =
 export const TransactionPdfPreview = ({
   artifactId,
   filename,
+  variant = "side",
 }: {
   artifactId: string;
   filename: string;
+  variant?: "side" | "peek";
 }) => {
   const requestSequence = useRef(0);
   const currentArtifactId = useRef(artifactId);
@@ -62,10 +64,16 @@ export const TransactionPdfPreview = ({
     setPreview({ artifactId, status: "loading" });
     setRefreshKey((current) => current + 1);
   };
+  const viewerOptions =
+    variant === "peek" ? "view=FitH&toolbar=0" : "view=FitH";
 
   return (
     <section
-      className="transaction-pdf-preview"
+      className={
+        variant === "peek"
+          ? "transaction-pdf-preview transaction-pdf-preview--peek"
+          : "transaction-pdf-preview"
+      }
       aria-label="Invoice PDF preview"
     >
       <header className="transaction-pdf-preview__header">
@@ -105,7 +113,7 @@ export const TransactionPdfPreview = ({
         <iframe
           className="transaction-pdf-preview__frame"
           title={`PDF preview: ${filename}`}
-          src={`${currentPreview.url}${currentPreview.url.includes("#") ? "&" : "#"}view=FitH`}
+          src={`${currentPreview.url}${currentPreview.url.includes("#") ? "&" : "#"}${viewerOptions}`}
           referrerPolicy="no-referrer"
         />
       )}
