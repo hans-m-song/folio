@@ -1019,15 +1019,10 @@ li {
   text-decoration: none;
 }
 .app-brand__mark {
-  display: grid;
+  display: block;
   width: 2rem;
   height: 2rem;
-  place-items: center;
-  border-radius: 0.55rem;
-  background: #101f3a;
-  color: white;
-  font-size: 0.9rem;
-  font-weight: 700;
+  object-fit: contain;
 }
 .app-header__descriptor {
   color: var(--muted);

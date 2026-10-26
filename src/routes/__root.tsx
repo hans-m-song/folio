@@ -54,7 +54,21 @@ export const Route = createRootRoute({
       { httpEquiv: "cache-control", content: "no-store" },
       { title: "Folio · Private transaction archive" },
     ],
-    links: [{ rel: "stylesheet", href: appCss }],
+    links: [
+      { rel: "stylesheet", href: appCss },
+      { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" },
+      {
+        rel: "icon",
+        type: "image/png",
+        sizes: "32x32",
+        href: "/favicon-32.png",
+      },
+      {
+        rel: "apple-touch-icon",
+        sizes: "180x180",
+        href: "/apple-touch-icon.png",
+      },
+    ],
   }),
   notFoundComponent: FolioNotFoundBoundary,
   errorComponent: FolioErrorBoundary,

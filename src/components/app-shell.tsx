@@ -243,9 +243,13 @@ export const AppShell = ({
       </a>
       <header className="app-header">
         <a className="app-brand" href="/" aria-label="Folio overview">
-          <span className="app-brand__mark" aria-hidden="true">
-            F
-          </span>
+          <img
+            className="app-brand__mark"
+            src="/brand/folio-mark.svg"
+            width={32}
+            height={32}
+            alt=""
+          />
           <span>Folio</span>
         </a>
         <span className="app-header__descriptor">

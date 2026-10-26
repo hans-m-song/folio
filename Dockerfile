@@ -8,6 +8,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY src ./src
+COPY public ./public
 COPY tsconfig.json vite.config.ts ./
 COPY ops/build-database-tools.mjs ./ops/build-database-tools.mjs
 RUN pnpm run build && pnpm run build:database
